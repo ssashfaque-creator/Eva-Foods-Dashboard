@@ -1,0 +1,10 @@
+data/*.xlsx
+output/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+dist/
+build/
+preview/

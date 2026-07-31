@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eva-dashboard"
+version = "0.1.0"
+description = "Terminal sales dashboard that turns Excel sales data into PDF reports"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "openpyxl>=3.1",
+  "reportlab>=4.0",
+]
+
+[project.optional-dependencies]
+preview = ["pypdfium2>=4.0", "Pillow>=10.0"]
+
+[project.scripts]
+eva-dashboard = "eva_dashboard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eva_dashboard*"]
