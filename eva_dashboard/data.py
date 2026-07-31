@@ -16,6 +16,7 @@ HEADER_ROW = 4  # 0-indexed; Excel row 5
 
 SALES_COLUMNS = {
     "Date": "date",
+    "Party": "party",
     "Product": "product",
     "Qty": "qty",
     "Unit": "unit",
@@ -125,6 +126,7 @@ def load_sales(path: Path | str) -> pd.DataFrame:
     sales["date"] = sales["date"].map(_to_date)
     sales = sales.dropna(subset=["date", "product"]).copy()
     sales["product"] = sales["product"].astype(str).str.strip()
+    sales["party"] = sales["party"].fillna("").astype(str).str.strip()
     for col in ("qty", "mt_qty", "rate", "basic_amount", "incl_gst_fed"):
         sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0.0)
     sales["unit"] = sales["unit"].fillna("").astype(str).str.strip()
@@ -189,7 +191,8 @@ def prepare_report_data(
 
     daily_sales = daily[
         [
-            "category1",
+            "category2",
+            "party",
             "product",
             "qty",
             "unit",
@@ -198,9 +201,14 @@ def prepare_report_data(
             "basic_amount",
             "incl_gst_fed",
         ]
-    ].rename(columns={"effective_mt": "mt_qty"})
+    ].rename(columns={"category2": "category", "effective_mt": "mt_qty"})
+    kg = daily_sales["mt_qty"] * 1000.0
+    daily_sales["amount_per_kg"] = [
+        (float(incl) / float(k) if float(k) else 0.0)
+        for incl, k in zip(daily_sales["incl_gst_fed"], kg, strict=True)
+    ]
     daily_sales = daily_sales.sort_values(
-        ["category1", "product"], kind="mergesort"
+        ["category", "party", "product"], kind="mergesort"
     ).reset_index(drop=True)
 
     return SalesReportData(

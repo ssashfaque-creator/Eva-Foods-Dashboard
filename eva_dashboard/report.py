@@ -76,24 +76,24 @@ def _styles() -> dict[str, ParagraphStyle]:
             "Cell",
             parent=base["Normal"],
             fontName="Helvetica",
-            fontSize=8,
-            leading=10,
+            fontSize=7,
+            leading=9,
             textColor=colors.black,
         ),
         "cell_right": ParagraphStyle(
             "CellRight",
             parent=base["Normal"],
             fontName="Helvetica",
-            fontSize=8,
-            leading=10,
+            fontSize=7,
+            leading=9,
             alignment=TA_RIGHT,
         ),
         "cell_bold": ParagraphStyle(
             "CellBold",
             parent=base["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=8,
-            leading=10,
+            fontSize=7,
+            leading=9,
             textColor=colors.white,
         ),
         "cell_bold_dark": ParagraphStyle(
@@ -123,7 +123,7 @@ def _fmt_money(value: float) -> str:
 
 def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     header = [
-        Paragraph("Category 1", styles["cell_bold"]),
+        Paragraph("Category", styles["cell_bold"]),
         Paragraph("Daily Sales (MT)", styles["cell_bold"]),
         Paragraph("Month-to-Date Sales (MT)", styles["cell_bold"]),
     ]
@@ -167,7 +167,8 @@ def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> 
 
 def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     header = [
-        Paragraph("Category 1", styles["cell_bold"]),
+        Paragraph("Category", styles["cell_bold"]),
+        Paragraph("Party", styles["cell_bold"]),
         Paragraph("Product", styles["cell_bold"]),
         Paragraph("Qty", styles["cell_bold"]),
         Paragraph("Unit", styles["cell_bold"]),
@@ -175,12 +176,14 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
         Paragraph("Rate", styles["cell_bold"]),
         Paragraph("Basic Amount", styles["cell_bold"]),
         Paragraph("Incl Gst/Fed", styles["cell_bold"]),
+        Paragraph("Amount per KG", styles["cell_bold"]),
     ]
     rows: list[list] = [header]
     for _, row in data.daily_sales.iterrows():
         rows.append(
             [
-                Paragraph(str(row["category1"]), styles["cell"]),
+                Paragraph(str(row["category"]), styles["cell"]),
+                Paragraph(str(row["party"]), styles["cell"]),
                 Paragraph(str(row["product"]), styles["cell"]),
                 Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
                 Paragraph(str(row["unit"]), styles["cell"]),
@@ -188,16 +191,29 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
                 Paragraph(_fmt_money(float(row["rate"])), styles["cell_right"]),
                 Paragraph(_fmt_money(float(row["basic_amount"])), styles["cell_right"]),
                 Paragraph(_fmt_money(float(row["incl_gst_fed"])), styles["cell_right"]),
+                Paragraph(_fmt_money(float(row["amount_per_kg"])), styles["cell_right"]),
             ]
         )
 
-    col_widths = [28 * mm, 68 * mm, 22 * mm, 16 * mm, 22 * mm, 28 * mm, 32 * mm, 32 * mm]
+    # Landscape A4 usable width ~273mm; keep columns readable with party included
+    col_widths = [
+        22 * mm,  # Category (Category 2)
+        42 * mm,  # Party
+        48 * mm,  # Product
+        16 * mm,  # Qty
+        12 * mm,  # Unit
+        18 * mm,  # M.T Qty
+        22 * mm,  # Rate
+        26 * mm,  # Basic Amount
+        26 * mm,  # Incl Gst/Fed
+        24 * mm,  # Amount per KG
+    ]
     table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
@@ -284,7 +300,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             f"Source: {data.source_path.name}",
             styles["meta"],
         ),
-        Paragraph("Sales by Category 1 (Metric Tons)", styles["section"]),
+        Paragraph("Sales by Category (Metric Tons)", styles["section"]),
         _summary_table(data, styles),
         Spacer(1, 6 * mm),
         Paragraph(

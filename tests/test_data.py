@@ -27,7 +27,8 @@ def test_prepare_report_against_sample():
     assert abs(data.total_daily_mt - 277.106) < 0.01
     assert abs(data.total_mtd_mt - 15674.312) < 0.01
     assert list(data.daily_sales.columns) == [
-        "category1",
+        "category",
+        "party",
         "product",
         "qty",
         "unit",
@@ -35,7 +36,16 @@ def test_prepare_report_against_sample():
         "rate",
         "basic_amount",
         "incl_gst_fed",
+        "amount_per_kg",
     ]
+    sample = data.daily_sales.iloc[0]
+    kg = float(sample["mt_qty"]) * 1000.0
+    expected = float(sample["incl_gst_fed"]) / kg if kg else 0.0
+    assert abs(float(sample["amount_per_kg"]) - expected) < 1e-6
+    cats = set(data.daily_sales["category"])
+    # Detail uses Category 2 labels from the mapping sheet
+    assert "Canola Meal" in cats or "Soya Meal" in cats
+    assert data.daily_sales["party"].astype(str).str.len().gt(0).any()
 
 
 if __name__ == "__main__":

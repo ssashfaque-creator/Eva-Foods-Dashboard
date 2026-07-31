@@ -36,12 +36,16 @@ eva-dashboard report sales.xlsx --date 2026-07-31 -o report.pdf
 
 **Page 1 — Summary**
 
-| Category 1 | Daily Sales (MT) | Month-to-Date Sales (MT) |
+| Category | Daily Sales (MT) | Month-to-Date Sales (MT) |
 |---|---|---|
+
+(Aggregated by **Category 1** from the mapping sheet.)
 
 **Following pages — Daily sales detail** (landscape)
 
-Category 1, Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed
+Category (**Category 2**), Party, Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG
+
+`Amount per KG = Incl GST/FED ÷ (M.T Qty × 1000)`
 
 ### M.T Qty handling
 
