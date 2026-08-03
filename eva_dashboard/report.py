@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -87,6 +87,14 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=7,
             leading=9,
             alignment=TA_RIGHT,
+        ),
+        "cell_center": ParagraphStyle(
+            "CellCenter",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7,
+            leading=9,
+            alignment=TA_CENTER,
         ),
         "cell_bold": ParagraphStyle(
             "CellBold",
@@ -210,8 +218,24 @@ def _city_brand_table(
     return table
 
 
-def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
-    header = [
+def _sales_identity_and_sku_widths() -> list[float]:
+    return [
+        24 * mm,  # Category = client Type (merged)
+        20 * mm,  # City = City-Filter (merged)
+        36 * mm,  # Party (merged)
+        40 * mm,  # Product
+        14 * mm,  # Qty
+        11 * mm,  # Unit
+        16 * mm,  # M.T Qty
+        20 * mm,  # Rate
+        24 * mm,  # Basic Amount
+        24 * mm,  # Incl Gst/Fed
+        22 * mm,  # Amount per KG
+    ]
+
+
+def _sales_header_row(styles: dict[str, ParagraphStyle]) -> list:
+    return [
         Paragraph("Category", styles["cell_bold"]),
         Paragraph("City", styles["cell_bold"]),
         Paragraph("Party", styles["cell_bold"]),
@@ -224,13 +248,31 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
         Paragraph("Incl Gst/Fed", styles["cell_bold"]),
         Paragraph("Amount per KG", styles["cell_bold"]),
     ]
-    rows: list[list] = [header]
-    for _, row in data.daily_sales.iterrows():
+
+
+def _party_sales_table(
+    category: str,
+    city: str,
+    party: str,
+    group,
+    styles: dict[str, ParagraphStyle],
+    shade: bool,
+) -> Table:
+    """One customer block: Category/City/Party merged once, SKU lines to the right."""
+    rows: list[list] = []
+    sku_rows = list(group.iterrows())
+    for offset, (_, row) in enumerate(sku_rows):
+        if offset == 0:
+            identity = [
+                Paragraph(str(category), styles["cell_center"]),
+                Paragraph(str(city), styles["cell_center"]),
+                Paragraph(str(party), styles["cell_center"]),
+            ]
+        else:
+            identity = ["", "", ""]
         rows.append(
-            [
-                Paragraph(str(row["category"]), styles["cell"]),
-                Paragraph(str(row["city"]), styles["cell"]),
-                Paragraph(str(row["party"]), styles["cell"]),
+            identity
+            + [
                 Paragraph(str(row["product"]), styles["cell"]),
                 Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
                 Paragraph(str(row["unit"]), styles["cell"]),
@@ -242,34 +284,78 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
             ]
         )
 
-    col_widths = [
-        24 * mm,  # Category = client Type
-        20 * mm,  # City = City-Filter
-        36 * mm,  # Party
-        40 * mm,  # Product
-        14 * mm,  # Qty
-        11 * mm,  # Unit
-        16 * mm,  # M.T Qty
-        20 * mm,  # Rate
-        24 * mm,  # Basic Amount
-        24 * mm,  # Incl Gst/Fed
-        22 * mm,  # Amount per KG
-    ]
-    table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
-    style_cmds = [
-        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    end = len(rows) - 1
+    style_cmds: list = [
+        ("VALIGN", (0, 0), (2, end), "MIDDLE"),
+        ("ALIGN", (0, 0), (2, end), "CENTER"),
+        ("VALIGN", (3, 0), (-1, end), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+        ("BOX", (0, 0), (-1, -1), 0.7, ACCENT),
+        ("BACKGROUND", (0, 0), (2, end), ROW_ALT),
     ]
-    for i in range(1, len(rows)):
-        if i % 2 == 0:
-            style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    if end > 0:
+        style_cmds.extend(
+            [
+                ("SPAN", (0, 0), (0, end)),
+                ("SPAN", (1, 0), (1, end)),
+                ("SPAN", (2, 0), (2, end)),
+            ]
+        )
+    if shade:
+        style_cmds.append(
+            ("BACKGROUND", (3, 0), (-1, end), colors.Color(0.90, 0.94, 0.92))
+        )
+
+    table = Table(rows, colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
     table.setStyle(TableStyle(style_cmds))
     return table
+
+
+def _sales_detail_flowables(
+    data: SalesReportData, styles: dict[str, ParagraphStyle]
+) -> list:
+    """Header + customer-wise merged blocks for the daily sales detail section."""
+    from reportlab.platypus import KeepTogether
+
+    header = Table(
+        [_sales_header_row(styles)],
+        colWidths=_sales_identity_and_sku_widths(),
+        hAlign="LEFT",
+    )
+    header.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+                ("BOX", (0, 0), (-1, -1), 0.7, BRAND),
+            ]
+        )
+    )
+
+    flowables: list = [header, Spacer(1, 1 * mm)]
+    frame = data.daily_sales
+    for group_index, ((category, city, party), group) in enumerate(
+        frame.groupby(["category", "city", "party"], sort=False)
+    ):
+        block = _party_sales_table(
+            category,
+            city,
+            party,
+            group,
+            styles,
+            shade=(group_index % 2 == 1),
+        )
+        flowables.append(KeepTogether([block, Spacer(1, 1.5 * mm)]))
+    return flowables
 
 
 def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
@@ -369,10 +455,11 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         PageBreak(),
         Paragraph(
             f"All sales for {data.report_date.strftime('%d %B %Y')} — "
-            f"{len(data.daily_sales)} line(s)",
+            f"{len(data.daily_sales)} line(s), "
+            f"{data.daily_sales.groupby(['category', 'city', 'party'], sort=False).ngroups} customers",
             styles["section"],
         ),
-        _sales_table(data, styles),
+        *_sales_detail_flowables(data, styles),
     ]
 
     doc.build(story)

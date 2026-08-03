@@ -38,9 +38,9 @@ By default the **latest date** in the sales workbook is treated as the current r
 2. **Daily Sales by City** — rows = `City-Filter`, columns = Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
 3. **MTD Sales by City** — same layout
 
-**Detail pages** (landscape)
+**Detail pages** (landscape) — grouped customer-wise
 
-Category (**client Type**), City (**City-Filter**), Party, Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG
+Category (**client Type**), City (**City-Filter**), and Party are shown once per customer (vertically merged / centered). SKU lines keep Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG.
 
 `Amount per KG = Incl GST/FED ÷ (M.T Qty × 1000)`
 
