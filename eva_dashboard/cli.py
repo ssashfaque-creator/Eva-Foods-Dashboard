@@ -20,8 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eva-dashboard",
         description=(
-            "Build Eva Foods sales dashboard PDFs from Excel sales workbooks. "
-            "Sheet 1 = Sales, Sheet 2 = Category mapping."
+            "Build Eva Foods sales dashboard PDFs from Excel sales + client workbooks."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -33,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
         "excel",
         type=Path,
         help="Path to the sales Excel workbook (.xlsx)",
+    )
+    report.add_argument(
+        "--clients",
+        type=Path,
+        default=None,
+        help="Path to the clients Excel workbook (must include City-Filter)",
     )
     report.add_argument(
         "-o",
@@ -56,7 +61,14 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"error: Excel file not found: {excel}", file=sys.stderr)
         return 1
 
-    data = prepare_report_data(excel, report_date=args.date)
+    clients = None
+    if args.clients is not None:
+        clients = args.clients.expanduser().resolve()
+        if not clients.exists():
+            print(f"error: Clients file not found: {clients}", file=sys.stderr)
+            return 1
+
+    data = prepare_report_data(excel, clients_path=clients, report_date=args.date)
     output = args.output
     if output is None:
         output = Path("output") / f"sales_report_{data.report_date.isoformat()}.pdf"
@@ -65,6 +77,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     pdf_path = generate_pdf(data, output)
     print(f"Report date : {data.report_date.isoformat()}")
     print(f"Categories  : {len(data.category_summary)}")
+    print(f"Cities daily: {len(data.city_daily)}")
+    print(f"Cities MTD  : {len(data.city_mtd)}")
     print(f"Daily lines : {len(data.daily_sales)}")
     print(f"Daily MT    : {data.total_daily_mt:,.3f}")
     print(f"MTD MT      : {data.total_mtd_mt:,.3f}")

@@ -1,7 +1,8 @@
-"""Load sales Excel workbooks and aggregate Category 1 metrics."""
+"""Load sales/client Excel workbooks and aggregate report metrics."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import pandas as pd
 
 SALES_SHEET = "Sales"
 CATEGORY_SHEET = "Category"
+CLIENT_SHEET = "ClientListReport"
 HEADER_ROW = 4  # 0-indexed; Excel row 5
 
 SALES_COLUMNS = {
@@ -26,6 +28,13 @@ SALES_COLUMNS = {
     "Incl GST/FED Amount": "incl_gst_fed",
 }
 
+CITY_BRAND_COLUMNS = (
+    "Eva Consumer",
+    "Eva Bulk",
+    "Maan Consumer",
+    "Maan Bulk",
+)
+
 
 @dataclass(frozen=True)
 class CategorySummaryRow:
@@ -39,10 +48,13 @@ class SalesReportData:
     """Prepared data for the sales PDF report."""
 
     source_path: Path
+    clients_path: Path | None
     report_date: date
     month_start: date
     month_end: date
     category_summary: list[CategorySummaryRow]
+    city_daily: pd.DataFrame
+    city_mtd: pd.DataFrame
     daily_sales: pd.DataFrame
     total_daily_mt: float
     total_mtd_mt: float
@@ -67,6 +79,11 @@ def _to_date(value: Any) -> date | None:
     return None
 
 
+def normalize_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
 def effective_mt_qty(qty: Any, unit: Any, mt_qty: Any) -> float:
     """Prefer Excel M.T Qty; for bulk Kgs rows where it is blank/0, use Qty/1000."""
     try:
@@ -88,6 +105,22 @@ def effective_mt_qty(qty: Any, unit: Any, mt_qty: Any) -> float:
     if unit_text in {"mt", "m.t", "m.t.", "ton", "tons", "tonne", "tonnes"}:
         return quantity
     return mt
+
+
+def resolve_credit_days(cr_days: Any, payment_type: Any) -> float:
+    """Use CrDays when set; else Cash→0, Credit/blank→30."""
+    if cr_days is not None and not (isinstance(cr_days, float) and pd.isna(cr_days)):
+        text = str(cr_days).strip()
+        if text != "":
+            try:
+                return float(cr_days)
+            except (TypeError, ValueError):
+                pass
+
+    payment = str(payment_type or "").strip().lower()
+    if payment == "cash":
+        return 0.0
+    return 30.0
 
 
 def load_category_map(path: Path | str) -> pd.DataFrame:
@@ -134,11 +167,114 @@ def load_sales(path: Path | str) -> pd.DataFrame:
         effective_mt_qty(q, u, m)
         for q, u, m in zip(sales["qty"], sales["unit"], sales["mt_qty"], strict=True)
     ]
+    sales["party_key"] = sales["party"].map(normalize_name)
     return sales.reset_index(drop=True)
+
+
+def load_clients(path: Path | str) -> pd.DataFrame:
+    """Load client master. Geographic city for reports comes from City-Filter only."""
+    path = Path(path)
+    raw = pd.read_excel(
+        path,
+        sheet_name=CLIENT_SHEET,
+        header=HEADER_ROW,
+        engine="openpyxl",
+    )
+
+    rename = {
+        "Locality": "locality",
+        "Region": "region",
+        "Zone": "zone",
+        "Area": "area",
+        "Territory": "territory",
+        "Type": "client_type",
+        "ClientID": "client_id",
+        "Client": "client",
+        "PaymentType": "payment_type",
+        "CrDays": "cr_days_raw",
+        "CrLimit": "cr_limit",
+        "InActive": "inactive",
+        "City-Filter": "city",
+    }
+    if "City-Filter" not in raw.columns:
+        raise ValueError(
+            "Clients sheet missing required City-Filter column "
+            "(do not use City; City-Filter is the report geography)"
+        )
+
+    missing = [col for col in rename if col not in raw.columns]
+    if missing:
+        raise ValueError(f"Clients sheet missing columns: {missing}")
+
+    clients = raw[list(rename.keys())].rename(columns=rename).copy()
+    clients["client"] = clients["client"].fillna("").astype(str).str.strip()
+    clients = clients[clients["client"] != ""].copy()
+    clients["party_key"] = clients["client"].map(normalize_name)
+
+    for col in ("locality", "zone", "area", "territory", "client_type", "payment_type", "city"):
+        clients[col] = clients[col].fillna("").astype(str).str.strip()
+        clients.loc[clients[col].str.lower().isin({"nan", "none"}), col] = ""
+
+    clients["cr_limit"] = pd.to_numeric(clients["cr_limit"], errors="coerce")
+    clients["credit_days"] = [
+        resolve_credit_days(days, pay)
+        for days, pay in zip(clients["cr_days_raw"], clients["payment_type"], strict=True)
+    ]
+
+    inactive = clients["inactive"].astype(str).str.strip().str.upper()
+    clients["_inactive"] = inactive.eq("Y")
+    # Prefer rows with a real City-Filter over blank/Undefined when deduping
+    clients["_city_missing"] = clients["city"].eq("") | clients["city"].str.lower().eq(
+        "undefined"
+    )
+    clients = clients.sort_values(
+        ["_inactive", "_city_missing", "client_id"],
+        kind="mergesort",
+    )
+    clients = clients.drop_duplicates("party_key", keep="first")
+
+    return clients[
+        [
+            "party_key",
+            "client_id",
+            "client",
+            "locality",
+            "zone",
+            "area",
+            "territory",
+            "client_type",
+            "city",
+            "payment_type",
+            "credit_days",
+            "cr_limit",
+        ]
+    ].reset_index(drop=True)
+
+
+def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
+    brands = list(CITY_BRAND_COLUMNS)
+    scoped = frame[frame["category1"].isin(brands)].copy()
+    if scoped.empty:
+        empty = pd.DataFrame(columns=["city", *brands, "total"])
+        return empty
+
+    scoped["city"] = scoped["city"].replace("", "Unmapped").fillna("Unmapped")
+    pivot = (
+        scoped.groupby(["city", "category1"], as_index=False)["effective_mt"]
+        .sum()
+        .pivot(index="city", columns="category1", values="effective_mt")
+        .reindex(columns=brands)
+        .fillna(0.0)
+        .reset_index()
+    )
+    pivot["total"] = pivot[brands].sum(axis=1)
+    pivot = pivot.sort_values("city", kind="mergesort").reset_index(drop=True)
+    return pivot
 
 
 def prepare_report_data(
     path: Path | str,
+    clients_path: Path | str | None = None,
     report_date: date | None = None,
 ) -> SalesReportData:
     path = Path(path)
@@ -150,6 +286,34 @@ def prepare_report_data(
         raise ValueError(
             "Products missing from Category sheet: " + ", ".join(unmatched)
         )
+
+    clients_file: Path | None = None
+    if clients_path is not None:
+        clients_file = Path(clients_path)
+        clients = load_clients(clients_file)
+        merged = merged.merge(clients, on="party_key", how="left")
+    else:
+        for col, default in (
+            ("city", ""),
+            ("client_type", ""),
+            ("locality", ""),
+            ("zone", ""),
+            ("area", ""),
+            ("territory", ""),
+            ("payment_type", ""),
+            ("credit_days", None),
+            ("cr_limit", None),
+            ("client_id", None),
+        ):
+            merged[col] = default
+
+    merged["city"] = merged["city"].fillna("").astype(str).str.strip()
+    merged["client_type"] = merged["client_type"].fillna("").astype(str).str.strip()
+    # Detail "Category" column shows client type when available
+    merged["detail_category"] = merged["client_type"].where(
+        merged["client_type"] != "", "Unmapped"
+    )
+    merged["city_display"] = merged["city"].where(merged["city"] != "", "Unmapped")
 
     available_dates = sorted(merged["date"].unique())
     if not available_dates:
@@ -189,9 +353,13 @@ def prepare_report_data(
         for _, row in summary.iterrows()
     ]
 
+    city_daily = _city_brand_pivot(daily)
+    city_mtd = _city_brand_pivot(mtd)
+
     daily_sales = daily[
         [
-            "category2",
+            "detail_category",
+            "city_display",
             "party",
             "product",
             "qty",
@@ -201,22 +369,31 @@ def prepare_report_data(
             "basic_amount",
             "incl_gst_fed",
         ]
-    ].rename(columns={"category2": "category", "effective_mt": "mt_qty"})
+    ].rename(
+        columns={
+            "detail_category": "category",
+            "city_display": "city",
+            "effective_mt": "mt_qty",
+        }
+    )
     kg = daily_sales["mt_qty"] * 1000.0
     daily_sales["amount_per_kg"] = [
         (float(incl) / float(k) if float(k) else 0.0)
         for incl, k in zip(daily_sales["incl_gst_fed"], kg, strict=True)
     ]
     daily_sales = daily_sales.sort_values(
-        ["category", "party", "product"], kind="mergesort"
+        ["city", "category", "party", "product"], kind="mergesort"
     ).reset_index(drop=True)
 
     return SalesReportData(
         source_path=path,
+        clients_path=clients_file,
         report_date=current,
         month_start=month_start,
         month_end=month_end,
         category_summary=category_summary,
+        city_daily=city_daily,
+        city_mtd=city_mtd,
         daily_sales=daily_sales,
         total_daily_mt=float(daily_sales["mt_qty"].sum()),
         total_mtd_mt=float(sum(row.mtd_mt for row in category_summary)),

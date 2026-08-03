@@ -21,7 +21,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from eva_dashboard.data import SalesReportData
+from eva_dashboard.data import CITY_BRAND_COLUMNS, SalesReportData
 
 
 BRAND = colors.Color(0.09, 0.29, 0.22)
@@ -121,6 +121,31 @@ def _fmt_money(value: float) -> str:
     return f"{value:,.2f}"
 
 
+def _base_table_style(row_count: int, has_total: bool = True) -> list:
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+    ]
+    last_data = row_count - 2 if has_total else row_count - 1
+    for i in range(1, last_data + 1):
+        if i % 2 == 0:
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    if has_total:
+        style_cmds.extend(
+            [
+                ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.86, 0.91, 0.88)),
+                ("LINEABOVE", (0, -1), (-1, -1), 1.0, BRAND),
+            ]
+        )
+    return style_cmds
+
+
 def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     header = [
         Paragraph("Category", styles["cell_bold"]),
@@ -145,29 +170,50 @@ def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> 
     )
 
     table = Table(rows, colWidths=[70 * mm, 50 * mm, 55 * mm], hAlign="LEFT")
-    style_cmds = [
-        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
-        ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
-        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.86, 0.91, 0.88)),
-        ("LINEABOVE", (0, -1), (-1, -1), 1.0, BRAND),
-    ]
-    for i in range(1, len(rows) - 1):
-        if i % 2 == 0:
-            style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
-    table.setStyle(TableStyle(style_cmds))
+    table.setStyle(TableStyle(_base_table_style(len(rows))))
+    return table
+
+
+def _city_brand_table(
+    frame,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    brands = list(CITY_BRAND_COLUMNS)
+    header = [Paragraph("City", styles["cell_bold"])] + [
+        Paragraph(name, styles["cell_bold"]) for name in brands
+    ] + [Paragraph("Total", styles["cell_bold"])]
+    rows: list[list] = [header]
+
+    totals = {name: 0.0 for name in brands}
+    grand = 0.0
+    for _, row in frame.iterrows():
+        cells = [Paragraph(str(row["city"]), styles["cell"])]
+        row_total = 0.0
+        for name in brands:
+            value = float(row.get(name, 0.0) or 0.0)
+            totals[name] += value
+            row_total += value
+            cells.append(Paragraph(_fmt_mt(value), styles["cell_right"]))
+        grand += row_total
+        cells.append(Paragraph(_fmt_mt(row_total), styles["cell_right"]))
+        rows.append(cells)
+
+    total_row = [Paragraph("Total", styles["cell_bold_dark"])]
+    for name in brands:
+        total_row.append(Paragraph(_fmt_mt(totals[name]), styles["cell_right"]))
+    total_row.append(Paragraph(_fmt_mt(grand), styles["cell_right"]))
+    rows.append(total_row)
+
+    col_widths = [32 * mm] + [28 * mm] * len(brands) + [28 * mm]
+    table = Table(rows, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
+    table.setStyle(TableStyle(_base_table_style(len(rows))))
     return table
 
 
 def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     header = [
         Paragraph("Category", styles["cell_bold"]),
+        Paragraph("City", styles["cell_bold"]),
         Paragraph("Party", styles["cell_bold"]),
         Paragraph("Product", styles["cell_bold"]),
         Paragraph("Qty", styles["cell_bold"]),
@@ -183,6 +229,7 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
         rows.append(
             [
                 Paragraph(str(row["category"]), styles["cell"]),
+                Paragraph(str(row["city"]), styles["cell"]),
                 Paragraph(str(row["party"]), styles["cell"]),
                 Paragraph(str(row["product"]), styles["cell"]),
                 Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
@@ -195,27 +242,27 @@ def _sales_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Ta
             ]
         )
 
-    # Landscape A4 usable width ~273mm; keep columns readable with party included
     col_widths = [
-        22 * mm,  # Category (Category 2)
-        42 * mm,  # Party
-        48 * mm,  # Product
-        16 * mm,  # Qty
-        12 * mm,  # Unit
-        18 * mm,  # M.T Qty
-        22 * mm,  # Rate
-        26 * mm,  # Basic Amount
-        26 * mm,  # Incl Gst/Fed
-        24 * mm,  # Amount per KG
+        24 * mm,  # Category = client Type
+        20 * mm,  # City = City-Filter
+        36 * mm,  # Party
+        40 * mm,  # Product
+        14 * mm,  # Qty
+        11 * mm,  # Unit
+        16 * mm,  # M.T Qty
+        20 * mm,  # Rate
+        24 * mm,  # Basic Amount
+        24 * mm,  # Incl Gst/Fed
+        22 * mm,  # Amount per KG
     ]
     table = Table(rows, colWidths=col_widths, repeatRows=1, hAlign="LEFT")
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
     ]
     for i in range(1, len(rows)):
@@ -237,17 +284,17 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
     )
 
     portrait_frame = Frame(
+        14 * mm,
         16 * mm,
-        16 * mm,
-        A4[0] - 32 * mm,
+        A4[0] - 28 * mm,
         A4[1] - 34 * mm,
         id="portrait",
     )
     landscape_size = landscape(A4)
     landscape_frame = Frame(
-        12 * mm,
+        10 * mm,
         14 * mm,
-        landscape_size[0] - 24 * mm,
+        landscape_size[0] - 20 * mm,
         landscape_size[1] - 30 * mm,
         id="landscape",
     )
@@ -257,7 +304,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         width, height = A4
         canvas.setStrokeColor(ACCENT)
         canvas.setLineWidth(1.5)
-        canvas.line(15 * mm, height - 12 * mm, width - 15 * mm, height - 12 * mm)
+        canvas.line(14 * mm, height - 12 * mm, width - 14 * mm, height - 12 * mm)
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(MUTED)
         canvas.drawCentredString(width / 2, 10 * mm, f"Page {doc_.page}")
@@ -268,13 +315,13 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         width, height = landscape(A4)
         canvas.setStrokeColor(ACCENT)
         canvas.setLineWidth(1.5)
-        canvas.line(12 * mm, height - 10 * mm, width - 12 * mm, height - 10 * mm)
+        canvas.line(10 * mm, height - 10 * mm, width - 10 * mm, height - 10 * mm)
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(MUTED)
         canvas.drawCentredString(width / 2, 8 * mm, f"Page {doc_.page}")
         canvas.setFont("Helvetica-Bold", 8)
         canvas.setFillColor(BRAND)
-        canvas.drawString(12 * mm, height - 8 * mm, "EVA FOODS — Daily Sales Detail")
+        canvas.drawString(10 * mm, height - 8 * mm, "EVA FOODS — Daily Sales Detail")
         canvas.restoreState()
 
     doc.addPageTemplates(
@@ -289,6 +336,9 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         ]
     )
 
+    clients_note = (
+        f"Clients: {data.clients_path.name}" if data.clients_path else "Clients: not provided"
+    )
     story = [
         Paragraph("EVA FOODS", styles["brand"]),
         Paragraph("Daily Sales Summary", styles["title"]),
@@ -297,16 +347,22 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             f"(latest date in workbook treated as current)<br/>"
             f"Month-to-date window: {data.month_start.strftime('%d %b %Y')} "
             f"to {data.report_date.strftime('%d %b %Y')}<br/>"
-            f"Source: {data.source_path.name}",
+            f"Source: {data.source_path.name} · {clients_note}",
             styles["meta"],
         ),
         Paragraph("Sales by Category (Metric Tons)", styles["section"]),
         _summary_table(data, styles),
-        Spacer(1, 6 * mm),
+        Spacer(1, 5 * mm),
+        Paragraph("Daily Sales by City (MT)", styles["section"]),
+        _city_brand_table(data.city_daily, styles),
+        Spacer(1, 5 * mm),
+        Paragraph("Month-to-Date Sales by City (MT)", styles["section"]),
+        _city_brand_table(data.city_mtd, styles),
+        Spacer(1, 4 * mm),
         Paragraph(
-            "Daily Sales (MT) uses rows dated on the report date. "
-            "Month-to-Date Sales (MT) sums all rows from the 1st of the month through the report date. "
-            "For bulk Kgs lines where Excel M.T Qty is blank/zero, Qty ÷ 1000 is used.",
+            "City rows use the client master <b>City-Filter</b> column. "
+            "Brand columns are Category 1 values: Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk. "
+            "Detail Category uses client Type.",
             styles["meta"],
         ),
         NextPageTemplate("detail"),

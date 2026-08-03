@@ -1,11 +1,15 @@
 # Eva Foods Dashboard
 
-Terminal app that reads company sales Excel data and generates a PDF sales dashboard.
+Terminal app that reads company sales + client Excel data and generates a PDF sales dashboard.
 
-## Excel layout expected
+## Excel inputs
 
-1. **Sales** sheet — transactional sales (header on row 5)
-2. **Category** sheet — product → Category 1 / Category 2 mapping
+1. **Sales workbook**
+   - **Sales** sheet — transactional sales (header on row 5)
+   - **Category** sheet — product → Category 1 / Category 2 mapping
+2. **Clients workbook** (`--clients`)
+   - **ClientListReport** sheet with `Client`, `Type`, geography, credit fields
+   - Report city comes from **`City-Filter`** (last column) — not the `City` column
 
 ## Install (Mac / Linux)
 
@@ -19,33 +23,33 @@ pip install -e .
 ## Generate a report
 
 ```bash
-eva-dashboard report /path/to/sales.xlsx
+eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx
 # or
-python -m eva_dashboard report /path/to/sales.xlsx -o output/sales_report.pdf
+python -m eva_dashboard report sales.xlsx --clients clients.xlsx -o output/sales_report.pdf
 ```
 
-By default the **latest date** in the workbook is treated as the current report date.
+By default the **latest date** in the sales workbook is treated as the current report date.
 
-Optional:
+## Report contents
 
-```bash
-eva-dashboard report sales.xlsx --date 2026-07-31 -o report.pdf
-```
+**Summary pages**
 
-## Report contents (v0.1 — Sales)
+1. Category table (Category 1) — Daily MT + MTD MT
+2. **Daily Sales by City** — rows = `City-Filter`, columns = Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
+3. **MTD Sales by City** — same layout
 
-**Page 1 — Summary**
+**Detail pages** (landscape)
 
-| Category | Daily Sales (MT) | Month-to-Date Sales (MT) |
-|---|---|---|
-
-(Aggregated by **Category 1** from the mapping sheet.)
-
-**Following pages — Daily sales detail** (landscape)
-
-Category (**Category 2**), Party, Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG
+Category (**client Type**), City (**City-Filter**), Party, Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG
 
 `Amount per KG = Incl GST/FED ÷ (M.T Qty × 1000)`
+
+### Credit days (stored from clients file)
+
+- Use `CrDays` when present
+- If blank and `PaymentType` is Cash → 0
+- If blank and Credit/blank → 30
+- `CrLimit` kept when assigned
 
 ### M.T Qty handling
 
