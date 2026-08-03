@@ -250,6 +250,7 @@ def _city_brand_table(
     return table
 
 
+
 def _sales_identity_and_sku_widths() -> list[float]:
     return [
         24 * mm,  # Category = client Type (merged)
@@ -266,41 +267,61 @@ def _sales_identity_and_sku_widths() -> list[float]:
     ]
 
 
-def _sales_header_table(styles: dict[str, ParagraphStyle]) -> Table:
-    header = Table(
-        [
-            [
-                Paragraph("Category", styles["cell_bold"]),
-                Paragraph("City", styles["cell_bold"]),
-                Paragraph("Party", styles["cell_bold"]),
-                Paragraph("Product", styles["cell_bold"]),
-                Paragraph("Qty", styles["cell_bold"]),
-                Paragraph("Unit", styles["cell_bold"]),
-                Paragraph("M.T Qty", styles["cell_bold"]),
-                Paragraph("Rate", styles["cell_bold"]),
-                Paragraph("Basic Amount", styles["cell_bold"]),
-                Paragraph("Incl Gst/Fed", styles["cell_bold"]),
-                Paragraph("Amount per KG", styles["cell_bold"]),
-            ]
-        ],
-        colWidths=_sales_identity_and_sku_widths(),
-        hAlign="LEFT",
-    )
-    header.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
-                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ("GRID", (0, 0), (-1, -1), 0.3, LINE),
-                ("BOX", (0, 0), (-1, -1), 0.7, BRAND),
-            ]
-        )
-    )
-    return header
+def _sales_header_labels() -> list[str]:
+    return [
+        "Category",
+        "City",
+        "Party",
+        "Product",
+        "Qty",
+        "Unit",
+        "M.T Qty",
+        "Rate",
+        "Basic Amount",
+        "Incl Gst/Fed",
+        "Amount per KG",
+    ]
+
+
+def _sales_header_cells(styles: dict[str, ParagraphStyle]) -> list:
+    return [Paragraph(label, styles["cell_bold"]) for label in _sales_header_labels()]
+
+
+def _blank_identity() -> list:
+    return ["", "", ""]
+
+
+def _sku_cells(row, styles: dict[str, ParagraphStyle]) -> list:
+    return [
+        Paragraph(str(row["product"]), styles["cell"]),
+        Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
+        Paragraph(str(row["unit"]), styles["cell"]),
+        Paragraph(_fmt_mt(float(row["mt_qty"])), styles["cell_right"]),
+        Paragraph(_fmt_money(float(row["rate"])), styles["cell_right"]),
+        Paragraph(_fmt_money(float(row["basic_amount"])), styles["cell_right"]),
+        Paragraph(_fmt_money(float(row["incl_gst_fed"])), styles["cell_right"]),
+        Paragraph(_fmt_money(float(row["amount_per_kg"])), styles["cell_right"]),
+    ]
+
+
+def _total_cells(
+    label: str,
+    total_mt: float,
+    total_basic: float,
+    total_incl: float,
+    blended_rate: float,
+    styles: dict[str, ParagraphStyle],
+) -> list:
+    return [
+        Paragraph(label, styles["cell_bold_dark"]),
+        Paragraph("", styles["cell"]),
+        Paragraph("", styles["cell"]),
+        Paragraph(_fmt_mt(total_mt), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(total_basic), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(total_incl), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
+    ]
 
 
 def _frame_totals(frame) -> tuple[float, float, float, float]:
@@ -312,137 +333,151 @@ def _frame_totals(frame) -> tuple[float, float, float, float]:
     return total_mt, total_basic, total_incl, blended_rate
 
 
-def _summary_total_table(
-    label: str,
-    frame,
-    styles: dict[str, ParagraphStyle],
-) -> Table:
-    """Single highlighted totals row for a city or product-type section."""
-    total_mt, total_basic, total_incl, blended_rate = _frame_totals(frame)
-    row = [
-        Paragraph("", styles["cell"]),
-        Paragraph("", styles["cell"]),
-        Paragraph("", styles["cell"]),
-        Paragraph(label, styles["cell_bold_dark"]),
-        Paragraph("", styles["cell"]),
-        Paragraph("", styles["cell"]),
-        Paragraph(_fmt_mt(total_mt), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(total_basic), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(total_incl), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
-    ]
-    table = Table([row], colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.82, 0.89, 0.85)),
-                ("BOX", (0, 0), (-1, 0), 1.0, BRAND),
-                ("LINEABOVE", (0, 0), (-1, 0), 1.0, BRAND),
-                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("SPAN", (0, 0), (2, 0)),
-            ]
-        )
-    )
-    return table
-
-
-def _party_sales_table(
-    category: str,
-    city: str,
-    party: str,
-    group,
-    styles: dict[str, ParagraphStyle],
-    shade: bool,
-) -> Table:
-    """One customer block: Category/City/Party merged once, SKU lines + client totals."""
-    rows: list[list] = []
-    sku_rows = list(group.iterrows())
-    total_mt, total_basic, total_incl, blended_rate = _frame_totals(group)
-
-    for offset, (_, row) in enumerate(sku_rows):
-        if offset == 0:
-            identity = [
-                Paragraph(str(category), styles["cell_center"]),
-                Paragraph(str(city), styles["cell_center"]),
-                Paragraph(str(party), styles["cell_center"]),
-            ]
-        else:
-            identity = ["", "", ""]
-        rows.append(
-            identity
-            + [
-                Paragraph(str(row["product"]), styles["cell"]),
-                Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
-                Paragraph(str(row["unit"]), styles["cell"]),
-                Paragraph(_fmt_mt(float(row["mt_qty"])), styles["cell_right"]),
-                Paragraph(_fmt_money(float(row["rate"])), styles["cell_right"]),
-                Paragraph(_fmt_money(float(row["basic_amount"])), styles["cell_right"]),
-                Paragraph(_fmt_money(float(row["incl_gst_fed"])), styles["cell_right"]),
-                Paragraph(_fmt_money(float(row["amount_per_kg"])), styles["cell_right"]),
-            ]
-        )
-
-    rows.append(
-        [
-            "",
-            "",
-            "",
-            Paragraph("Customer Total", styles["cell_bold_dark"]),
-            Paragraph("", styles["cell"]),
-            Paragraph("", styles["cell"]),
-            Paragraph(_fmt_mt(total_mt), styles["cell_right_bold"]),
-            Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
-            Paragraph(_fmt_money(total_basic), styles["cell_right_bold"]),
-            Paragraph(_fmt_money(total_incl), styles["cell_right_bold"]),
-            Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
-        ]
-    )
-
-    sku_end = len(sku_rows) - 1
-    total_row = len(rows) - 1
-    style_cmds: list = [
-        ("VALIGN", (0, 0), (2, total_row), "MIDDLE"),
-        ("ALIGN", (0, 0), (2, total_row), "CENTER"),
-        ("VALIGN", (3, 0), (-1, total_row), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("GRID", (0, 0), (-1, -1), 0.3, LINE),
-        ("BOX", (0, 0), (-1, -1), 0.7, ACCENT),
-        ("BACKGROUND", (0, 0), (2, total_row), ROW_ALT),
-        ("BACKGROUND", (3, total_row), (-1, total_row), colors.Color(0.86, 0.91, 0.88)),
-        ("LINEABOVE", (3, total_row), (-1, total_row), 0.8, BRAND),
-    ]
-    if total_row > 0:
-        style_cmds.extend(
-            [
-                ("SPAN", (0, 0), (0, total_row)),
-                ("SPAN", (1, 0), (1, total_row)),
-                ("SPAN", (2, 0), (2, total_row)),
-            ]
-        )
-    if shade and sku_end >= 0:
-        style_cmds.append(
-            ("BACKGROUND", (3, 0), (-1, sku_end), colors.Color(0.90, 0.94, 0.92))
-        )
-
-    table = Table(rows, colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
-    table.setStyle(TableStyle(style_cmds))
-    return table
-
-
 def _party_mt_totals(frame) -> dict[tuple[str, str, str], float]:
     return (
         frame.groupby(["category", "city", "party"], sort=False)["mt_qty"]
         .sum()
         .to_dict()
     )
+
+
+def _section_sales_table(
+    frame,
+    styles: dict[str, ParagraphStyle],
+    section_total_label: str,
+) -> Table:
+    """City/product section table: header over data, repeats on each new page."""
+    rows: list[list] = [_sales_header_cells(styles)]
+    style_cmds: list = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
+        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("GRID", (0, 0), (-1, -1), 0.3, LINE),
+        ("BOX", (0, 0), (-1, -1), 0.7, BRAND),
+    ]
+
+    party_mt = _party_mt_totals(frame)
+    keys = sorted(
+        party_mt.keys(),
+        key=lambda key: (-party_mt[key], key[2], key[0], key[1]),
+    )
+
+    for index, (category, city, party) in enumerate(keys):
+        group = frame[
+            (frame["category"] == category)
+            & (frame["city"] == city)
+            & (frame["party"] == party)
+        ]
+        start = len(rows)
+        sku_rows = list(group.iterrows())
+        for offset, (_, row) in enumerate(sku_rows):
+            if offset == 0:
+                identity = [
+                    Paragraph(str(category), styles["cell_center"]),
+                    Paragraph(str(city), styles["cell_center"]),
+                    Paragraph(str(party), styles["cell_center"]),
+                ]
+            else:
+                identity = _blank_identity()
+            rows.append(identity + _sku_cells(row, styles))
+
+        total_mt, total_basic, total_incl, blended_rate = _frame_totals(group)
+        rows.append(
+            _blank_identity()
+            + _total_cells(
+                "Customer Total",
+                total_mt,
+                total_basic,
+                total_incl,
+                blended_rate,
+                styles,
+            )
+        )
+        end = len(rows) - 1
+        style_cmds.extend(
+            [
+                ("SPAN", (0, start), (0, end)),
+                ("SPAN", (1, start), (1, end)),
+                ("SPAN", (2, start), (2, end)),
+                ("VALIGN", (0, start), (2, end), "MIDDLE"),
+                ("ALIGN", (0, start), (2, end), "CENTER"),
+                ("BACKGROUND", (0, start), (2, end), ROW_ALT),
+                ("BACKGROUND", (3, end), (-1, end), colors.Color(0.86, 0.91, 0.88)),
+                ("LINEABOVE", (0, start), (-1, start), 0.7, ACCENT),
+                ("LINEABOVE", (3, end), (-1, end), 0.7, BRAND),
+            ]
+        )
+        if index % 2 == 1 and end > start:
+            style_cmds.append(
+                ("BACKGROUND", (3, start), (-1, end - 1), colors.Color(0.90, 0.94, 0.92))
+            )
+
+    total_mt, total_basic, total_incl, blended_rate = _frame_totals(frame)
+    section_row = len(rows)
+    rows.append(
+        _blank_identity()
+        + _total_cells(
+            section_total_label,
+            total_mt,
+            total_basic,
+            total_incl,
+            blended_rate,
+            styles,
+        )
+    )
+    style_cmds.extend(
+        [
+            ("SPAN", (0, section_row), (2, section_row)),
+            ("BACKGROUND", (0, section_row), (-1, section_row), colors.Color(0.82, 0.89, 0.85)),
+            ("LINEABOVE", (0, section_row), (-1, section_row), 1.0, BRAND),
+            ("VALIGN", (0, section_row), (-1, section_row), "MIDDLE"),
+        ]
+    )
+
+    table = Table(
+        rows,
+        colWidths=_sales_identity_and_sku_widths(),
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    table.setStyle(TableStyle(style_cmds))
+    return table
+
+
+def _product_total_banner(
+    product_type: str,
+    frame,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    total_mt, total_basic, total_incl, blended_rate = _frame_totals(frame)
+    row = _blank_identity() + _total_cells(
+        f"Product Total — {product_type}",
+        total_mt,
+        total_basic,
+        total_incl,
+        blended_rate,
+        styles,
+    )
+    table = Table([row], colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("SPAN", (0, 0), (2, 0)),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.78, 0.86, 0.82)),
+                ("BOX", (0, 0), (-1, 0), 1.0, BRAND),
+                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return table
 
 
 def _ordered_product_types(frame) -> list[str]:
@@ -452,11 +487,7 @@ def _ordered_product_types(frame) -> list[str]:
     return ordered + extras
 
 
-def _ordered_cities_for_product(
-    product_frame,
-    city_rank: list[str],
-) -> list[str]:
-    """City order follows summary table; leftover cities by that product's MT desc."""
+def _ordered_cities_for_product(product_frame, city_rank: list[str]) -> list[str]:
     present = set(product_frame["city"].unique())
     ordered = [city for city in city_rank if city in present]
     leftover = sorted(
@@ -469,43 +500,15 @@ def _ordered_cities_for_product(
     return ordered + leftover
 
 
-def _append_customer_blocks(
-    flowables: list,
-    frame,
-    styles: dict[str, ParagraphStyle],
-) -> None:
-    from reportlab.platypus import KeepTogether
-
-    party_mt = _party_mt_totals(frame)
-    # Sort customers by total MT high → low within this section
-    keys = sorted(
-        party_mt.keys(),
-        key=lambda key: (-party_mt[key], key[2], key[0], key[1]),
-    )
-    for index, (category, city, party) in enumerate(keys):
-        group = frame[
-            (frame["category"] == category)
-            & (frame["city"] == city)
-            & (frame["party"] == party)
-        ]
-        block = _party_sales_table(
-            category,
-            city,
-            party,
-            group,
-            styles,
-            shade=(index % 2 == 1),
-        )
-        flowables.append(KeepTogether([block, Spacer(1, 1.2 * mm)]))
-
-
 def _sales_detail_flowables(
     data: SalesReportData, styles: dict[str, ParagraphStyle]
 ) -> list:
-    """Product-type sections, optional city subsections, customer blocks + totals."""
+    """Section titles first; column header is the first row of each section table."""
     frame = data.daily_sales
-    city_rank = [str(c) for c in data.city_daily["city"].tolist()] if len(data.city_daily) else []
-    flowables: list = [_sales_header_table(styles), Spacer(1, 2 * mm)]
+    city_rank = (
+        [str(c) for c in data.city_daily["city"].tolist()] if len(data.city_daily) else []
+    )
+    flowables: list = []
 
     for product_type in _ordered_product_types(frame):
         product_frame = frame[frame["product_type"] == product_type]
@@ -520,18 +523,25 @@ def _sales_detail_flowables(
                 if city_frame.empty:
                     continue
                 flowables.append(Paragraph(f"City: {city}", styles["city_heading"]))
-                _append_customer_blocks(flowables, city_frame, styles)
                 flowables.append(
-                    _summary_total_table(f"City Total — {city}", city_frame, styles)
+                    _section_sales_table(
+                        city_frame,
+                        styles,
+                        section_total_label=f"City Total — {city}",
+                    )
                 )
-                flowables.append(Spacer(1, 2.5 * mm))
+                flowables.append(Spacer(1, 3 * mm))
+            flowables.append(_product_total_banner(product_type, product_frame, styles))
+            flowables.append(Spacer(1, 4 * mm))
         else:
-            _append_customer_blocks(flowables, product_frame, styles)
-
-        flowables.append(
-            _summary_total_table(f"Product Total — {product_type}", product_frame, styles)
-        )
-        flowables.append(Spacer(1, 4 * mm))
+            flowables.append(
+                _section_sales_table(
+                    product_frame,
+                    styles,
+                    section_total_label=f"Product Total — {product_type}",
+                )
+            )
+            flowables.append(Spacer(1, 4 * mm))
 
     return flowables
 
