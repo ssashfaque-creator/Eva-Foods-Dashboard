@@ -934,10 +934,11 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "and — when the baseline is zero (e.g. no prior-month history loaded yet). "
             "ADS = average daily sales over the last 30 days; AMS = average monthly sales "
             "over the prior 3 full months. City tables show the top 10 cities by total MT. "
-            "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 32.3242; "
-            "cost factors in litres are converted at 1 Ltr = 0.915 Kg. "
+            "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 37.3246; "
+            "cost factors in litres are converted to per kg at 1 Ltr = 0.915 Kg "
+            "(always computed in kg). "
             "Price Fetch columns split Eva / Maan × Oil / Ghee. "
-            "Bulk Oil averages are shown per maund (× 32.3246); other bulk categories per kg.",
+            "Bulk Oil averages are shown per maund (× 37.3246); other bulk categories per kg.",
             styles["meta"],
         ),
         NextPageTemplate("detail"),

@@ -56,8 +56,8 @@ eva-dashboard costs /path/to/product_costs.xlsx /path/to/packing_costs.xlsx \
 
 1. **Sales by Category** (fixed order): Eva Consumer → Eva Bulk → Maan Consumer → Maan Bulk → Cusine King → Shortening → Bulk Oil → Meal → Byproducts
 2. **Daily / MTD Sales by City** — City-Filter rows sorted by total MT high → low; columns Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
-3. **Price Fetch by Client Type** — Oil (Eva), Ghee (Eva), Oil (Maan), Ghee (Maan) in Rs/maund. Oil vs Ghee from Category 2 (Eva Cooking/Canola/Sunflower = Oil; Eva VTF = Ghee; Maan Oil/Ghee; Maan Bulk uses product name — `Maan Banaspati*` = Ghee). Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 32.3242; Ltrs costs ÷ 0.915 to get per kg.
-4. **Bulk Product Average Prices (MTD)** — Bulk Oil per maund (× 32.3246); Byproducts / Meal / Shortening / Cusine King per kg
+3. **Price Fetch by Client Type** — Oil (Eva), Ghee (Eva), Oil (Maan), Ghee (Maan) in Rs/maund. Oil vs Ghee from Category 2 (Eva Cooking/Canola/Sunflower = Oil; Eva VTF = Ghee; Maan Oil/Ghee; Maan Bulk uses product name — `Maan Banaspati*` = Ghee). Always in kg: Price Fetch = (Incl GST/FED per kg − cost factor per kg) × **37.3246**; Ltrs costs ÷ 0.915 to get per kg.
+4. **Bulk Product Average Prices (MTD)** — Bulk Oil per maund (× 37.3246); Byproducts / Meal / Shortening / Cusine King per kg
 
 **Detail** (landscape), sectioned by product type
 

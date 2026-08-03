@@ -34,10 +34,10 @@ SALES_CLIENT_TYPE_COLUMN = "Client Type"
 
 # 1 litre of oil/ghee ≈ 0.915 kg (cost factors in Ltrs → per kg)
 LTR_TO_KG = 0.915
-# Recovery (Price Fetch) is shown per maund
-MAUND_FACTOR_PRICE_FETCH = 32.3242
-# Bulk Oil average selling price is shown per maund
-MAUND_FACTOR_BULK_OIL = 32.3246
+# 1 maund = 37.3246 kg (Price Fetch and Bulk Oil averages)
+MAUND_KG = 37.3246
+MAUND_FACTOR_PRICE_FETCH = MAUND_KG
+MAUND_FACTOR_BULK_OIL = MAUND_KG
 
 BULK_PRICE_CATEGORIES = (
     "Bulk Oil",
@@ -333,7 +333,11 @@ def cost_factor_per_kg(total_factor_cost: Any, unit: Any) -> float | None:
 
 
 def price_fetch_per_maund(amount_per_kg: Any, cost_per_kg: Any) -> float | None:
-    """(Incl GST/FED per kg − cost factor per kg) × maund factor."""
+    """(Incl GST/FED per kg − cost factor per kg) × kg per maund.
+
+    Always work in kg: convert Ltrs cost factors to per-kg first (÷ 0.915),
+    then subtract from selling price per kg and scale to one maund (37.3246 kg).
+    """
     if cost_per_kg is None or (isinstance(cost_per_kg, float) and pd.isna(cost_per_kg)):
         return None
     try:

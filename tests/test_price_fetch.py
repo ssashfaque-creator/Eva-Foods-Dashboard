@@ -115,7 +115,20 @@ def test_prepare_report_with_costs_sample():
     assert meal
     assert all(r.price_unit == "per Kg" for r in meal)
     # Maund factor sanity for bulk oil
-    assert MAUND_FACTOR_BULK_OIL == 32.3246
+    assert MAUND_FACTOR_BULK_OIL == 37.3246
+    assert MAUND_FACTOR_PRICE_FETCH == 37.3246
+
+
+def test_price_fetch_matches_kg_maund_example():
+    """Screenshot example: ~630/kg sell, 150/Ltr cost → ~17,401 / maund."""
+    amount_per_kg = 4_799_997 / (7.617375 * 1000.0)
+    cost_per_kg = cost_factor_per_kg(150.0, "Ltrs")
+    assert cost_per_kg is not None
+    pf = price_fetch_per_maund(amount_per_kg, cost_per_kg)
+    assert pf is not None
+    expected = (amount_per_kg - 150.0 / LTR_TO_KG) * 37.3246
+    assert abs(pf - expected) < 0.01
+    assert abs(pf - 17400.86) < 1.0
 
 
 def test_fixture_factor_costs_join():
@@ -132,5 +145,6 @@ if __name__ == "__main__":
     test_classify_price_fetch_segment()
     test_cost_factor_ltr_to_kg_and_price_fetch()
     test_prepare_report_with_costs_sample()
+    test_price_fetch_matches_kg_maund_example()
     test_fixture_factor_costs_join()
     print("ok")
