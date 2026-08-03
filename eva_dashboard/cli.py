@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from eva_dashboard import __version__
+from eva_dashboard.costs import compute_total_factor_costs, save_factor_costs
 from eva_dashboard.data import prepare_report_data
 from eva_dashboard.report import generate_pdf
 
@@ -52,6 +53,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Report date YYYY-MM-DD (default: latest date in the workbook)",
     )
+
+    costs = sub.add_parser(
+        "costs",
+        help="Compute total factor cost per product for every client type",
+    )
+    costs.add_argument(
+        "product_costs",
+        type=Path,
+        help="Product cost factors Excel workbook",
+    )
+    costs.add_argument(
+        "packing_costs",
+        type=Path,
+        help="Packing costs Excel workbook",
+    )
+    costs.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Output path (.csv or .xlsx). "
+            "Default: output/total_factor_costs.csv"
+        ),
+    )
     return parser
 
 
@@ -86,11 +112,40 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_costs(args: argparse.Namespace) -> int:
+    product_costs = args.product_costs.expanduser().resolve()
+    packing_costs = args.packing_costs.expanduser().resolve()
+    if not product_costs.exists():
+        print(f"error: Product costs file not found: {product_costs}", file=sys.stderr)
+        return 1
+    if not packing_costs.exists():
+        print(f"error: Packing costs file not found: {packing_costs}", file=sys.stderr)
+        return 1
+
+    result = compute_total_factor_costs(product_costs, packing_costs)
+    output = args.output
+    if output is None:
+        output = Path("output") / "total_factor_costs.csv"
+    output = output.expanduser().resolve()
+
+    out_path = save_factor_costs(result, output)
+    units = sorted(result.frame["Unit"].dropna().unique().tolist())
+    print(f"Client types : {result.frame['ClientType'].nunique()}")
+    print(f"Products     : {result.frame['ProdID'].nunique()}")
+    print(f"Factor rows  : {len(result.frame)}")
+    print(f"Units        : {', '.join(units)}")
+    print(f"No packing   : {result.products_without_packing}")
+    print(f"Wrote        : {out_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "report":
         raise SystemExit(cmd_report(args))
+    if args.command == "costs":
+        raise SystemExit(cmd_costs(args))
     parser.error(f"Unknown command: {args.command}")
 
 

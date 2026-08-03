@@ -10,6 +10,8 @@ Terminal app that reads company sales + client Excel data and generates a PDF sa
 2. **Clients workbook** (`--clients`)
    - **ClientListReport** sheet with `Client`, `Type`, geography, credit fields
    - Report city comes from **`City-Filter`** (last column) — not the `City` column
+3. **Product cost factors** — `ProductCostFactors` sheet (header on row 5). Per client type + product, the latest `Date` snapshot is used and all `Cost` lines in that snapshot are summed (Ltrs or Kgs from `Unit`).
+4. **Packing costs** — per product, the latest packing cost is used (`Date` when present; otherwise the last row in file order). Matched to products by `ProdID`.
 
 ## Install (Mac / Linux)
 
@@ -24,6 +26,19 @@ pip install -e .
 
 ```bash
 eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx
+```
+
+## Compute total factor costs
+
+For each client type and product:
+
+`TotalFactorCost = (sum of latest product cost centers) + (latest packing cost)`
+
+Unit stays Ltrs or Kgs from the product cost file.
+
+```bash
+eva-dashboard costs /path/to/product_costs.xlsx /path/to/packing_costs.xlsx \
+  -o output/total_factor_costs.csv
 ```
 
 ## Report contents
