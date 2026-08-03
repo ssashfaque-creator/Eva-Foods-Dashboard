@@ -24,34 +24,25 @@ pip install -e .
 
 ```bash
 eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx
-# or
-python -m eva_dashboard report sales.xlsx --clients clients.xlsx -o output/sales_report.pdf
 ```
-
-By default the **latest date** in the sales workbook is treated as the current report date.
 
 ## Report contents
 
-**Summary pages**
+**Summary**
 
-1. Category table (Category 1) — Daily MT + MTD MT
-2. **Daily Sales by City** — rows = `City-Filter`, columns = Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
-3. **MTD Sales by City** — same layout
+1. **Sales by Category** (fixed order): Eva Consumer → Eva Bulk → Maan Consumer → Maan Bulk → Cusine King → Shortening → Bulk Oil → Meal → Byproducts
+2. **Daily / MTD Sales by City** — City-Filter rows sorted by total MT high → low; columns Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
 
-**Detail pages** (landscape) — grouped customer-wise
+**Detail** (landscape), sectioned by product type
 
-Category (**client Type**), City (**City-Filter**), and Party are shown once per customer (vertically merged / centered). SKU lines keep Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG. Each customer ends with a **Total** row: total M.T Qty, Basic Amount, Incl Gst/Fed, and Rate = total Incl Gst/Fed ÷ total kg (MT × 1000).
+- **Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk / Cusine King**
+  - Product-type heading
+  - City subsections (same city order as summary)
+  - Customers inside each city sorted by total MT high → low
+  - City total + product total
+- **Shortening / Bulk Oil / Meal / Byproducts**
+  - Product-type heading only (no city sections)
+  - Customers sorted by total MT high → low
+  - Product total
 
-`Amount per KG = Incl GST/FED ÷ (M.T Qty × 1000)`
-
-### Credit days (stored from clients file)
-
-- Use `CrDays` when present
-- If blank and `PaymentType` is Cash → 0
-- If blank and Credit/blank → 30
-- `CrLimit` kept when assigned
-
-### M.T Qty handling
-
-- Uses Excel `M.T Qty` when present and non-zero
-- For bulk `Kgs` rows where `M.T Qty` is 0/blank, uses `Qty / 1000`
+Customer blocks merge Category (client Type), City, Party; SKU lines plus customer total (MT, Basic, Incl Gst/Fed, blended Rate = Incl ÷ kg).

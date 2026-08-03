@@ -35,6 +35,28 @@ CITY_BRAND_COLUMNS = (
     "Maan Bulk",
 )
 
+# Summary + detail section order (Excel spelling: Cusine King)
+CATEGORY1_ORDER = (
+    "Eva Consumer",
+    "Eva Bulk",
+    "Maan Consumer",
+    "Maan Bulk",
+    "Cusine King",
+    "Shortening",
+    "Bulk Oil",
+    "Meal",
+    "Byproducts",
+)
+
+# These product types get City-Filter subsections in sales detail
+CITY_DETAIL_CATEGORIES = (
+    "Eva Consumer",
+    "Eva Bulk",
+    "Maan Consumer",
+    "Maan Bulk",
+    "Cusine King",
+)
+
 
 @dataclass(frozen=True)
 class CategorySummaryRow:
@@ -251,6 +273,13 @@ def load_clients(path: Path | str) -> pd.DataFrame:
     ].reset_index(drop=True)
 
 
+def _category1_sort_key(name: str) -> tuple[int, str]:
+    try:
+        return (CATEGORY1_ORDER.index(name), name)
+    except ValueError:
+        return (len(CATEGORY1_ORDER), name)
+
+
 def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
     brands = list(CITY_BRAND_COLUMNS)
     scoped = frame[frame["category1"].isin(brands)].copy()
@@ -268,7 +297,10 @@ def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     pivot["total"] = pivot[brands].sum(axis=1)
-    pivot = pivot.sort_values("city", kind="mergesort").reset_index(drop=True)
+    # Highest total MT first
+    pivot = pivot.sort_values(
+        ["total", "city"], ascending=[False, True], kind="mergesort"
+    ).reset_index(drop=True)
     return pivot
 
 
@@ -342,7 +374,10 @@ def prepare_report_data(
         how="outer",
         suffixes=("_mtd", "_daily"),
     ).fillna(0.0)
-    summary = summary.sort_values("category1").reset_index(drop=True)
+    summary["_ord"] = summary["category1"].map(lambda n: _category1_sort_key(n)[0])
+    summary = summary.sort_values(["_ord", "category1"], kind="mergesort").reset_index(
+        drop=True
+    )
 
     category_summary = [
         CategorySummaryRow(
@@ -358,6 +393,7 @@ def prepare_report_data(
 
     daily_sales = daily[
         [
+            "category1",
             "detail_category",
             "city_display",
             "party",
@@ -371,6 +407,7 @@ def prepare_report_data(
         ]
     ].rename(
         columns={
+            "category1": "product_type",
             "detail_category": "category",
             "city_display": "city",
             "effective_mt": "mt_qty",
@@ -381,9 +418,12 @@ def prepare_report_data(
         (float(incl) / float(k) if float(k) else 0.0)
         for incl, k in zip(daily_sales["incl_gst_fed"], kg, strict=True)
     ]
+    daily_sales["_ptype_ord"] = daily_sales["product_type"].map(
+        lambda n: _category1_sort_key(n)[0]
+    )
     daily_sales = daily_sales.sort_values(
-        ["city", "category", "party", "product"], kind="mergesort"
-    ).reset_index(drop=True)
+        ["_ptype_ord", "city", "party", "product"], kind="mergesort"
+    ).drop(columns=["_ptype_ord"]).reset_index(drop=True)
 
     return SalesReportData(
         source_path=path,

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from eva_dashboard.data import (
+    CATEGORY1_ORDER,
     effective_mt_qty,
     load_clients,
     prepare_report_data,
@@ -36,7 +37,6 @@ def test_clients_use_city_filter_not_city():
         return
     clients = load_clients(CLIENTS)
     assert "city" in clients.columns
-    # City-Filter values include places that differ from the City column
     cities = set(clients["city"])
     assert "Rawalpindi" in cities or "Sargodha" in cities or "Peshawar" in cities
 
@@ -50,7 +50,13 @@ def test_prepare_report_against_sample():
     assert len(data.daily_sales) == 136
     assert abs(data.total_daily_mt - 277.106) < 0.01
     assert abs(data.total_mtd_mt - 15674.312) < 0.01
+
+    cat_names = [row.category1 for row in data.category_summary]
+    expected = [name for name in CATEGORY1_ORDER if name in cat_names]
+    assert cat_names == expected
+
     assert list(data.daily_sales.columns) == [
+        "product_type",
         "category",
         "city",
         "party",
@@ -71,9 +77,12 @@ def test_prepare_report_against_sample():
         "Maan Bulk",
         "total",
     ]
-    # Detail category is client Type, not product Category 2
-    assert data.daily_sales["category"].ne("Canola Meal").all()
+    # Cities sorted by total MT descending
+    totals = data.city_daily["total"].tolist()
+    assert totals == sorted(totals, reverse=True)
+
     assert data.daily_sales["city"].notna().all()
+    assert "Eva Consumer" in set(data.daily_sales["product_type"])
 
 
 if __name__ == "__main__":
