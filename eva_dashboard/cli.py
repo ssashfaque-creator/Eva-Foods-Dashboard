@@ -9,7 +9,7 @@ from pathlib import Path
 
 from eva_dashboard import __version__
 from eva_dashboard.costs import compute_total_factor_costs, save_factor_costs
-from eva_dashboard.data import prepare_report_data
+from eva_dashboard.data import load_factor_costs_frame, prepare_report_data
 from eva_dashboard.report import generate_pdf
 
 
@@ -39,6 +39,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to the clients Excel workbook (must include City-Filter)",
+    )
+    report.add_argument(
+        "--product-costs",
+        type=Path,
+        default=None,
+        help="Product cost factors Excel workbook (used with --packing-costs)",
+    )
+    report.add_argument(
+        "--packing-costs",
+        type=Path,
+        default=None,
+        help="Packing costs Excel workbook (used with --product-costs)",
+    )
+    report.add_argument(
+        "--factor-costs",
+        type=Path,
+        default=None,
+        help="Precomputed total factor costs CSV/XLSX (skips product+packing compute)",
     )
     report.add_argument(
         "-o",
@@ -81,6 +99,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_factor_costs(args: argparse.Namespace):
+    if args.factor_costs is not None:
+        path = args.factor_costs.expanduser().resolve()
+        if not path.exists():
+            print(f"error: Factor costs file not found: {path}", file=sys.stderr)
+            return None, 1
+        return load_factor_costs_frame(path), 0
+
+    if args.product_costs is not None or args.packing_costs is not None:
+        if args.product_costs is None or args.packing_costs is None:
+            print(
+                "error: provide both --product-costs and --packing-costs "
+                "(or pass --factor-costs)",
+                file=sys.stderr,
+            )
+            return None, 1
+        product_costs = args.product_costs.expanduser().resolve()
+        packing_costs = args.packing_costs.expanduser().resolve()
+        if not product_costs.exists():
+            print(f"error: Product costs file not found: {product_costs}", file=sys.stderr)
+            return None, 1
+        if not packing_costs.exists():
+            print(f"error: Packing costs file not found: {packing_costs}", file=sys.stderr)
+            return None, 1
+        result = compute_total_factor_costs(product_costs, packing_costs)
+        return result.frame, 0
+
+    return None, 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     excel = args.excel.expanduser().resolve()
     if not excel.exists():
@@ -94,18 +142,31 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"error: Clients file not found: {clients}", file=sys.stderr)
             return 1
 
-    data = prepare_report_data(excel, clients_path=clients, report_date=args.date)
+    factor_costs, err = _resolve_factor_costs(args)
+    if err:
+        return err
+
+    data = prepare_report_data(
+        excel,
+        clients_path=clients,
+        report_date=args.date,
+        factor_costs=factor_costs,
+    )
     output = args.output
     if output is None:
         output = Path("output") / f"sales_report_{data.report_date.isoformat()}.pdf"
     output = output.expanduser().resolve()
 
     pdf_path = generate_pdf(data, output)
+    matched = int(data.daily_sales["cost_factor"].notna().sum()) if "cost_factor" in data.daily_sales else 0
     print(f"Report date : {data.report_date.isoformat()}")
     print(f"Categories  : {len(data.category_summary)}")
     print(f"Cities daily: {len(data.city_daily)}")
     print(f"Cities MTD  : {len(data.city_mtd)}")
     print(f"Daily lines : {len(data.daily_sales)}")
+    print(f"Cost matched: {matched}/{len(data.daily_sales)}")
+    print(f"Price fetch : {len(data.price_fetch_summary)} client type(s)")
+    print(f"Bulk prices : {len(data.bulk_product_prices)} product(s)")
     print(f"Daily MT    : {data.total_daily_mt:,.3f}")
     print(f"MTD MT      : {data.total_mtd_mt:,.3f}")
     print(f"Wrote PDF   : {pdf_path}")

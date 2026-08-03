@@ -405,19 +405,99 @@ def _city_mtd_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) ->
 
 
 
+def _fmt_optional_money(value: float | None) -> str:
+    if value is None:
+        return "—"
+    try:
+        if value != value:  # NaN
+            return "—"
+    except TypeError:
+        return "—"
+    return _fmt_money(float(value))
+
+
+def _price_fetch_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
+    header = [
+        Paragraph("Client Type", styles["cell_bold"]),
+        Paragraph("Oil", styles["cell_bold"]),
+        Paragraph("Ghee", styles["cell_bold"]),
+    ]
+    rows: list[list] = [header]
+    for row in data.price_fetch_summary:
+        rows.append(
+            [
+                Paragraph(row.client_type, styles["cell"]),
+                Paragraph(_fmt_optional_money(row.oil), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.ghee), styles["cell_right"]),
+            ]
+        )
+    if len(rows) == 1:
+        rows.append(
+            [
+                Paragraph("No oil/ghee sales with cost factors", styles["cell"]),
+                Paragraph("—", styles["cell_right"]),
+                Paragraph("—", styles["cell_right"]),
+            ]
+        )
+
+    table = Table(rows, colWidths=[70 * mm, 35 * mm, 35 * mm], hAlign="LEFT")
+    table.setStyle(TableStyle(_base_table_style(len(rows), has_total=False)))
+    return table
+
+
+def _bulk_product_price_table(
+    data: SalesReportData, styles: dict[str, ParagraphStyle]
+) -> Table:
+    header = [
+        Paragraph("Product", styles["cell_bold"]),
+        Paragraph("Category", styles["cell_bold"]),
+        Paragraph("Average Price", styles["cell_bold"]),
+        Paragraph("Unit", styles["cell_bold"]),
+    ]
+    rows: list[list] = [header]
+    for row in data.bulk_product_prices:
+        rows.append(
+            [
+                Paragraph(row.product, styles["cell"]),
+                Paragraph(row.category1, styles["cell"]),
+                Paragraph(_fmt_money(row.avg_price), styles["cell_right"]),
+                Paragraph(row.price_unit, styles["cell"]),
+            ]
+        )
+    if len(rows) == 1:
+        rows.append(
+            [
+                Paragraph("No bulk / industrial sales in MTD window", styles["cell"]),
+                Paragraph("—", styles["cell"]),
+                Paragraph("—", styles["cell_right"]),
+                Paragraph("—", styles["cell"]),
+            ]
+        )
+
+    table = Table(
+        rows,
+        colWidths=[70 * mm, 28 * mm, 28 * mm, 22 * mm],
+        hAlign="LEFT",
+    )
+    table.setStyle(TableStyle(_base_table_style(len(rows), has_total=False)))
+    return table
+
+
 def _sales_identity_and_sku_widths() -> list[float]:
     return [
-        24 * mm,  # Category = client Type (merged)
-        20 * mm,  # City = City-Filter (merged)
-        36 * mm,  # Party (merged)
-        40 * mm,  # Product
-        14 * mm,  # Qty
-        11 * mm,  # Unit
-        16 * mm,  # M.T Qty
-        20 * mm,  # Rate
-        24 * mm,  # Basic Amount
-        24 * mm,  # Incl Gst/Fed
-        22 * mm,  # Amount per KG
+        20 * mm,  # Category = client Type (merged)
+        16 * mm,  # City = City-Filter (merged)
+        30 * mm,  # Party (merged)
+        34 * mm,  # Product
+        12 * mm,  # Qty
+        10 * mm,  # Unit
+        14 * mm,  # M.T Qty
+        16 * mm,  # Rate
+        20 * mm,  # Basic Amount
+        20 * mm,  # Incl Gst/Fed
+        18 * mm,  # Amount per KG
+        16 * mm,  # Cost Factor
+        18 * mm,  # Price Fetch
     ]
 
 
@@ -434,6 +514,8 @@ def _sales_header_labels() -> list[str]:
         "Basic Amount",
         "Incl Gst/Fed",
         "Amount per KG",
+        "Cost Factor",
+        "Price Fetch",
     ]
 
 
@@ -446,6 +528,31 @@ def _blank_identity() -> list:
 
 
 def _sku_cells(row, styles: dict[str, ParagraphStyle]) -> list:
+    import math
+
+    import pandas as pd
+
+    cost = row["cost_factor"] if "cost_factor" in row.index else None
+    price_fetch = row["price_fetch"] if "price_fetch" in row.index else None
+
+    cost_val = None
+    if cost is not None and not (isinstance(cost, float) and math.isnan(cost)) and not pd.isna(cost):
+        try:
+            cost_val = float(cost)
+        except (TypeError, ValueError):
+            cost_val = None
+
+    pf_val = None
+    if (
+        price_fetch is not None
+        and not (isinstance(price_fetch, float) and math.isnan(price_fetch))
+        and not pd.isna(price_fetch)
+    ):
+        try:
+            pf_val = float(price_fetch)
+        except (TypeError, ValueError):
+            pf_val = None
+
     return [
         Paragraph(str(row["product"]), styles["cell"]),
         Paragraph(_fmt_qty(float(row["qty"])), styles["cell_right"]),
@@ -455,6 +562,8 @@ def _sku_cells(row, styles: dict[str, ParagraphStyle]) -> list:
         Paragraph(_fmt_money(float(row["basic_amount"])), styles["cell_right"]),
         Paragraph(_fmt_money(float(row["incl_gst_fed"])), styles["cell_right"]),
         Paragraph(_fmt_money(float(row["amount_per_kg"])), styles["cell_right"]),
+        Paragraph(_fmt_optional_money(cost_val), styles["cell_right"]),
+        Paragraph(_fmt_optional_money(pf_val), styles["cell_right"]),
     ]
 
 
@@ -465,6 +574,7 @@ def _total_cells(
     total_incl: float,
     blended_rate: float,
     styles: dict[str, ParagraphStyle],
+    blended_price_fetch: float | None = None,
 ) -> list:
     return [
         Paragraph(label, styles["cell_bold_dark"]),
@@ -475,16 +585,24 @@ def _total_cells(
         Paragraph(_fmt_money(total_basic), styles["cell_right_bold"]),
         Paragraph(_fmt_money(total_incl), styles["cell_right_bold"]),
         Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
+        Paragraph("", styles["cell"]),
+        Paragraph(_fmt_optional_money(blended_price_fetch), styles["cell_right_bold"]),
     ]
 
 
-def _frame_totals(frame) -> tuple[float, float, float, float]:
+def _frame_totals(frame) -> tuple[float, float, float, float, float | None]:
     total_mt = float(frame["mt_qty"].sum())
     total_basic = float(frame["basic_amount"].sum())
     total_incl = float(frame["incl_gst_fed"].sum())
     total_kg = total_mt * 1000.0
     blended_rate = (total_incl / total_kg) if total_kg else 0.0
-    return total_mt, total_basic, total_incl, blended_rate
+    if "price_fetch" in frame.columns and "mt_qty" in frame.columns:
+        from eva_dashboard.data import weighted_avg
+
+        blended_pf = weighted_avg(frame["price_fetch"], frame["mt_qty"])
+    else:
+        blended_pf = None
+    return total_mt, total_basic, total_incl, blended_rate, blended_pf
 
 
 def _party_mt_totals(frame) -> dict[tuple[str, str, str], float]:
@@ -539,7 +657,7 @@ def _section_sales_table(
                 identity = _blank_identity()
             rows.append(identity + _sku_cells(row, styles))
 
-        total_mt, total_basic, total_incl, blended_rate = _frame_totals(group)
+        total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(group)
         rows.append(
             _blank_identity()
             + _total_cells(
@@ -549,6 +667,7 @@ def _section_sales_table(
                 total_incl,
                 blended_rate,
                 styles,
+                blended_price_fetch=blended_pf,
             )
         )
         end = len(rows) - 1
@@ -570,7 +689,7 @@ def _section_sales_table(
                 ("BACKGROUND", (3, start), (-1, end - 1), colors.Color(0.90, 0.94, 0.92))
             )
 
-    total_mt, total_basic, total_incl, blended_rate = _frame_totals(frame)
+    total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(frame)
     section_row = len(rows)
     rows.append(
         _blank_identity()
@@ -581,6 +700,7 @@ def _section_sales_table(
             total_incl,
             blended_rate,
             styles,
+            blended_price_fetch=blended_pf,
         )
     )
     style_cmds.extend(
@@ -607,7 +727,7 @@ def _product_total_banner(
     frame,
     styles: dict[str, ParagraphStyle],
 ) -> Table:
-    total_mt, total_basic, total_incl, blended_rate = _frame_totals(frame)
+    total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(frame)
     row = _blank_identity() + _total_cells(
         f"Product Total — {product_type}",
         total_mt,
@@ -615,6 +735,7 @@ def _product_total_banner(
         total_incl,
         blended_rate,
         styles,
+        blended_price_fetch=blended_pf,
     )
     table = Table([row], colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
     table.setStyle(
@@ -791,12 +912,21 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         Spacer(1, 5 * mm),
         Paragraph("Month-to-Date Sales by City (MT)", styles["section"]),
         _city_mtd_table(data, styles),
+        Spacer(1, 5 * mm),
+        Paragraph("Price Fetch by Client Type (Rs / Maund)", styles["section"]),
+        _price_fetch_table(data, styles),
+        Spacer(1, 5 * mm),
+        Paragraph("Bulk Product Average Prices (MTD)", styles["section"]),
+        _bulk_product_price_table(data, styles),
         Spacer(1, 4 * mm),
         Paragraph(
             "Δ% is green when current is above the average baseline, red when below, "
             "and — when the baseline is zero (e.g. no prior-month history loaded yet). "
             "ADS = average daily sales over the last 30 days; AMS = average monthly sales "
-            "over the prior 3 full months. City tables show the top 10 cities by total MT.",
+            "over the prior 3 full months. City tables show the top 10 cities by total MT. "
+            "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 32.3242; "
+            "cost factors in litres are converted at 1 Ltr = 0.915 Kg. "
+            "Bulk Oil averages are shown per maund (× 32.3246); other bulk categories per kg.",
             styles["meta"],
         ),
         NextPageTemplate("detail"),

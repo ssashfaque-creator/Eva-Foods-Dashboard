@@ -29,6 +29,42 @@ SALES_COLUMNS = {
     "Incl GST/FED Amount": "incl_gst_fed",
 }
 
+# Optional Sales column — used as fallback when clients master has no Type
+SALES_CLIENT_TYPE_COLUMN = "Client Type"
+
+# 1 litre of oil/ghee ≈ 0.915 kg (cost factors in Ltrs → per kg)
+LTR_TO_KG = 0.915
+# Recovery (Price Fetch) is shown per maund
+MAUND_FACTOR_PRICE_FETCH = 32.3242
+# Bulk Oil average selling price is shown per maund
+MAUND_FACTOR_BULK_OIL = 32.3246
+
+BULK_PRICE_CATEGORIES = (
+    "Bulk Oil",
+    "Byproducts",
+    "Meal",
+    "Shortening",
+    "Cusine King",
+)
+
+# Category 2 values that map to Oil / Ghee for Price Fetch summary
+OIL_CATEGORY2 = frozenset(
+    {
+        "eva cooking",
+        "eva canola",
+        "eva sunflower",
+        "maan oil",
+        "eva bulk",
+    }
+)
+GHEE_CATEGORY2 = frozenset(
+    {
+        "eva vtf",
+        "eva vtf bulk",
+        "maan ghee",
+    }
+)
+
 CITY_BRAND_COLUMNS = (
     "Eva Consumer",
     "Eva Bulk",
@@ -69,6 +105,25 @@ class CategorySummaryRow:
 
 
 @dataclass(frozen=True)
+class PriceFetchRow:
+    """Client-type Oil / Ghee Price Fetch (weighted average, Rs/maund)."""
+
+    client_type: str
+    oil: float | None
+    ghee: float | None
+
+
+@dataclass(frozen=True)
+class BulkProductPriceRow:
+    """Average selling price for a bulk / industrial product."""
+
+    product: str
+    category1: str
+    avg_price: float
+    price_unit: str  # "per Maund" or "per Kg"
+
+
+@dataclass(frozen=True)
 class SalesReportData:
     """Prepared data for the sales PDF report."""
 
@@ -85,6 +140,8 @@ class SalesReportData:
     city_daily_ads: dict[str, float]
     city_mtd_ams: dict[str, float]
     daily_sales: pd.DataFrame
+    price_fetch_summary: list[PriceFetchRow]
+    bulk_product_prices: list[BulkProductPriceRow]
     total_daily_mt: float
     total_mtd_mt: float
     total_avg_30d_mt: float
@@ -187,6 +244,17 @@ def load_sales(path: Path | str) -> pd.DataFrame:
         raise ValueError(f"Sales sheet missing columns: {missing}")
 
     sales = raw[list(SALES_COLUMNS.keys())].rename(columns=SALES_COLUMNS)
+    if SALES_CLIENT_TYPE_COLUMN in raw.columns:
+        sales["sales_client_type"] = (
+            raw[SALES_CLIENT_TYPE_COLUMN].fillna("").astype(str).str.strip()
+        )
+        sales.loc[
+            sales["sales_client_type"].str.lower().isin({"nan", "none", ""}),
+            "sales_client_type",
+        ] = ""
+    else:
+        sales["sales_client_type"] = ""
+
     sales["date"] = sales["date"].map(_to_date)
     sales = sales.dropna(subset=["date", "product"]).copy()
     sales["product"] = sales["product"].astype(str).str.strip()
@@ -200,6 +268,185 @@ def load_sales(path: Path | str) -> pd.DataFrame:
     ]
     sales["party_key"] = sales["party"].map(normalize_name)
     return sales.reset_index(drop=True)
+
+
+def classify_oil_ghee(category2: Any, product: Any) -> str | None:
+    """Return 'Oil' or 'Ghee' for branded edible products, else None."""
+    c2 = str(category2 or "").strip().lower()
+    prod = str(product or "").strip().lower()
+    if not c2 and not prod:
+        return None
+
+    if c2 in GHEE_CATEGORY2:
+        return "Ghee"
+    if c2 == "maan bulk" and prod.startswith("maan banaspati"):
+        return "Ghee"
+    if c2 in OIL_CATEGORY2:
+        return "Oil"
+    if c2 == "maan bulk":
+        return "Oil"
+    return None
+
+
+def cost_factor_per_kg(total_factor_cost: Any, unit: Any) -> float | None:
+    """Convert a TotalFactorCost in Ltrs or Kgs into a per-kg cost."""
+    if total_factor_cost is None or (isinstance(total_factor_cost, float) and pd.isna(total_factor_cost)):
+        return None
+    try:
+        value = float(total_factor_cost)
+    except (TypeError, ValueError):
+        return None
+    unit_norm = str(unit or "").strip().lower()
+    if unit_norm in {"ltr", "ltrs", "liter", "litre", "liters", "litres"}:
+        if LTR_TO_KG == 0:
+            return None
+        return value / LTR_TO_KG
+    if unit_norm in {"kg", "kgs", "kilogram", "kilograms"}:
+        return value
+    return None
+
+
+def price_fetch_per_maund(amount_per_kg: Any, cost_per_kg: Any) -> float | None:
+    """(Incl GST/FED per kg − cost factor per kg) × maund factor."""
+    if cost_per_kg is None or (isinstance(cost_per_kg, float) and pd.isna(cost_per_kg)):
+        return None
+    try:
+        sell = float(amount_per_kg or 0.0)
+        cost = float(cost_per_kg)
+    except (TypeError, ValueError):
+        return None
+    return (sell - cost) * MAUND_FACTOR_PRICE_FETCH
+
+
+def load_factor_costs_frame(path: Path | str) -> pd.DataFrame:
+    """Load a previously saved total-factor-costs CSV/XLSX."""
+    path = Path(path)
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        frame = pd.read_excel(path, engine="openpyxl")
+    else:
+        frame = pd.read_csv(path)
+    required = {"ClientType", "Product", "Unit", "TotalFactorCost"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"Factor costs file missing columns: {sorted(missing)}")
+    out = frame.copy()
+    out["ClientType"] = out["ClientType"].astype(str).str.strip()
+    out["Product"] = out["Product"].astype(str).str.strip()
+    out["Unit"] = out["Unit"].astype(str).str.strip()
+    out["TotalFactorCost"] = pd.to_numeric(out["TotalFactorCost"], errors="coerce")
+    out = out.dropna(subset=["ClientType", "Product", "TotalFactorCost"])
+    # One row per client type + product name (latest / last wins)
+    out = out.drop_duplicates(subset=["ClientType", "Product"], keep="last")
+    return out[["ClientType", "Product", "Unit", "TotalFactorCost"]].reset_index(drop=True)
+
+
+def _attach_cost_factors(frame: pd.DataFrame, factor_costs: pd.DataFrame) -> pd.DataFrame:
+    """Join TotalFactorCost onto sales rows by client type + product name."""
+    out = frame.copy()
+    lookup = factor_costs.rename(
+        columns={
+            "ClientType": "_cf_client",
+            "Product": "product",
+            "Unit": "cost_unit",
+            "TotalFactorCost": "cost_factor",
+        }
+    )
+    out = out.merge(
+        lookup,
+        left_on=["detail_category", "product"],
+        right_on=["_cf_client", "product"],
+        how="left",
+    )
+    if "_cf_client" in out.columns:
+        out = out.drop(columns=["_cf_client"])
+    out["cost_factor_per_kg"] = [
+        cost_factor_per_kg(cost, unit)
+        for cost, unit in zip(out["cost_factor"], out["cost_unit"], strict=True)
+    ]
+    return out
+
+
+def _amount_per_kg_series(incl: pd.Series, mt: pd.Series) -> pd.Series:
+    kg = mt.astype(float) * 1000.0
+    return [
+        (float(i) / float(k) if float(k) else 0.0)
+        for i, k in zip(incl, kg, strict=True)
+    ]
+
+
+def weighted_avg(values: pd.Series, weights: pd.Series) -> float | None:
+    mask = values.notna() & weights.notna() & (weights.astype(float) > 0)
+    if not mask.any():
+        # fall back to simple mean of available values
+        vals = values.dropna()
+        if vals.empty:
+            return None
+        return float(vals.mean())
+    w = weights[mask].astype(float)
+    v = values[mask].astype(float)
+    total_w = float(w.sum())
+    if total_w <= 0:
+        return float(v.mean())
+    return float((v * w).sum() / total_w)
+
+
+def _build_price_fetch_summary(daily: pd.DataFrame) -> list[PriceFetchRow]:
+    scoped = daily[daily["oil_ghee"].isin(["Oil", "Ghee"])].copy()
+    if scoped.empty:
+        return []
+    rows: list[PriceFetchRow] = []
+    for client_type, group in scoped.groupby("detail_category", sort=True):
+        oil = group[group["oil_ghee"] == "Oil"]
+        ghee = group[group["oil_ghee"] == "Ghee"]
+        rows.append(
+            PriceFetchRow(
+                client_type=str(client_type),
+                oil=weighted_avg(oil["price_fetch"], oil["effective_mt"]),
+                ghee=weighted_avg(ghee["price_fetch"], ghee["effective_mt"]),
+            )
+        )
+    return rows
+
+
+def _build_bulk_product_prices(frame: pd.DataFrame) -> list[BulkProductPriceRow]:
+    scoped = frame[frame["category1"].isin(BULK_PRICE_CATEGORIES)].copy()
+    if scoped.empty:
+        return []
+    scoped["amount_per_kg"] = _amount_per_kg_series(
+        scoped["incl_gst_fed"], scoped["effective_mt"]
+    )
+    rows: list[BulkProductPriceRow] = []
+    grouped = scoped.groupby(["category1", "product"], sort=False)
+    for (category1, product), group in grouped:
+        avg_kg = weighted_avg(
+            pd.Series(group["amount_per_kg"], dtype=float),
+            group["effective_mt"],
+        )
+        if avg_kg is None:
+            continue
+        if category1 == "Bulk Oil":
+            avg_price = avg_kg * MAUND_FACTOR_BULK_OIL
+            price_unit = "per Maund"
+        else:
+            avg_price = avg_kg
+            price_unit = "per Kg"
+        rows.append(
+            BulkProductPriceRow(
+                product=str(product),
+                category1=str(category1),
+                avg_price=float(avg_price),
+                price_unit=price_unit,
+            )
+        )
+
+    def sort_key(row: BulkProductPriceRow) -> tuple:
+        try:
+            cat_ord = BULK_PRICE_CATEGORIES.index(row.category1)
+        except ValueError:
+            cat_ord = len(BULK_PRICE_CATEGORIES)
+        return (cat_ord, row.product)
+
+    return sorted(rows, key=sort_key)
 
 
 def load_clients(path: Path | str) -> pd.DataFrame:
@@ -345,6 +592,7 @@ def prepare_report_data(
     path: Path | str,
     clients_path: Path | str | None = None,
     report_date: date | None = None,
+    factor_costs: pd.DataFrame | None = None,
 ) -> SalesReportData:
     path = Path(path)
     sales = load_sales(path)
@@ -378,10 +626,23 @@ def prepare_report_data(
 
     merged["city"] = merged["city"].fillna("").astype(str).str.strip()
     merged["client_type"] = merged["client_type"].fillna("").astype(str).str.strip()
-    merged["detail_category"] = merged["client_type"].where(
-        merged["client_type"] != "", "Unmapped"
-    )
+    # Prefer clients master Type; fall back to Sales "Client Type"
+    sales_type = merged.get("sales_client_type", pd.Series("", index=merged.index))
+    sales_type = sales_type.fillna("").astype(str).str.strip()
+    resolved_type = merged["client_type"].where(merged["client_type"] != "", sales_type)
+    merged["detail_category"] = resolved_type.where(resolved_type != "", "Unmapped")
     merged["city_display"] = merged["city"].where(merged["city"] != "", "Unmapped")
+    merged["oil_ghee"] = [
+        classify_oil_ghee(c2, prod)
+        for c2, prod in zip(merged["category2"], merged["product"], strict=True)
+    ]
+
+    if factor_costs is not None and len(factor_costs):
+        merged = _attach_cost_factors(merged, factor_costs)
+    else:
+        merged["cost_factor"] = pd.NA
+        merged["cost_unit"] = pd.NA
+        merged["cost_factor_per_kg"] = None
 
     available_dates = sorted(merged["date"].unique())
     if not available_dates:
@@ -414,9 +675,6 @@ def prepare_report_data(
         prior_frames.append(
             merged.loc[(merged["date"] >= start) & (merged["date"] <= end)]
         )
-    prior_all = (
-        pd.concat(prior_frames, ignore_index=True) if prior_frames else merged.iloc[0:0]
-    )
 
     mtd_by_cat = _sum_by_category(mtd)
     daily_by_cat = _sum_by_category(daily)
@@ -494,9 +752,25 @@ def prepare_report_data(
     city_mtd_ams = {brand: float(ams_by_cat.get(brand, 0.0)) for brand in brands}
     city_mtd_ams["total"] = float(sum(city_mtd_ams.values()))
 
+    # Price fetch on the daily slice (needs amount_per_kg first)
+    daily = daily.copy()
+    daily["amount_per_kg"] = _amount_per_kg_series(
+        daily["incl_gst_fed"], daily["effective_mt"]
+    )
+    daily["price_fetch"] = [
+        price_fetch_per_maund(sell, cost)
+        for sell, cost in zip(
+            daily["amount_per_kg"], daily["cost_factor_per_kg"], strict=True
+        )
+    ]
+
+    price_fetch_summary = _build_price_fetch_summary(daily)
+    bulk_product_prices = _build_bulk_product_prices(mtd)
+
     daily_sales = daily[
         [
             "category1",
+            "category2",
             "detail_category",
             "city_display",
             "party",
@@ -507,6 +781,12 @@ def prepare_report_data(
             "rate",
             "basic_amount",
             "incl_gst_fed",
+            "amount_per_kg",
+            "oil_ghee",
+            "cost_factor",
+            "cost_unit",
+            "cost_factor_per_kg",
+            "price_fetch",
         ]
     ].rename(
         columns={
@@ -516,11 +796,6 @@ def prepare_report_data(
             "effective_mt": "mt_qty",
         }
     )
-    kg = daily_sales["mt_qty"] * 1000.0
-    daily_sales["amount_per_kg"] = [
-        (float(incl) / float(k) if float(k) else 0.0)
-        for incl, k in zip(daily_sales["incl_gst_fed"], kg, strict=True)
-    ]
     daily_sales["_ptype_ord"] = daily_sales["product_type"].map(
         lambda n: _category1_sort_key(n)[0]
     )
@@ -547,6 +822,8 @@ def prepare_report_data(
         city_daily_ads=city_daily_ads,
         city_mtd_ams=city_mtd_ams,
         daily_sales=daily_sales,
+        price_fetch_summary=price_fetch_summary,
+        bulk_product_prices=bulk_product_prices,
         total_daily_mt=total_daily,
         total_mtd_mt=total_mtd,
         total_avg_30d_mt=total_avg_30d,

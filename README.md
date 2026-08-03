@@ -25,7 +25,16 @@ pip install -e .
 ## Generate a report
 
 ```bash
-eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx
+eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx \
+  --product-costs /path/to/product_costs.xlsx \
+  --packing-costs /path/to/packing_costs.xlsx
+```
+
+Or pass a precomputed factor-costs file:
+
+```bash
+eva-dashboard report sales.xlsx --clients clients.xlsx \
+  --factor-costs output/total_factor_costs.csv
 ```
 
 ## Compute total factor costs
@@ -47,6 +56,8 @@ eva-dashboard costs /path/to/product_costs.xlsx /path/to/packing_costs.xlsx \
 
 1. **Sales by Category** (fixed order): Eva Consumer → Eva Bulk → Maan Consumer → Maan Bulk → Cusine King → Shortening → Bulk Oil → Meal → Byproducts
 2. **Daily / MTD Sales by City** — City-Filter rows sorted by total MT high → low; columns Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
+3. **Price Fetch by Client Type** — Oil and Ghee columns (Rs/maund). Oil vs Ghee from Category 2 (Eva Cooking/Canola/Sunflower = Oil; Eva VTF = Ghee; Maan Oil/Ghee; Maan Bulk uses product name — `Maan Banaspati*` = Ghee). Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 32.3242; Ltrs costs ÷ 0.915 to get per kg.
+4. **Bulk Product Average Prices (MTD)** — Bulk Oil per maund (× 32.3246); Byproducts / Meal / Shortening / Cusine King per kg
 
 **Detail** (landscape), sectioned by product type
 
@@ -60,4 +71,4 @@ eva-dashboard costs /path/to/product_costs.xlsx /path/to/packing_costs.xlsx \
   - Customers sorted by total MT high → low
   - Product total
 
-Customer blocks merge Category (client Type), City, Party; SKU lines plus customer total (MT, Basic, Incl Gst/Fed, blended Rate = Incl ÷ kg).
+Customer blocks merge Category (client Type), City, Party; SKU lines plus customer total (MT, Basic, Incl Gst/Fed, blended Rate = Incl ÷ kg). Detail also shows **Cost Factor** and **Price Fetch** when cost files are supplied.

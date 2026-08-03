@@ -1,0 +1,100 @@
+"""Tests for cost factor application and Price Fetch recovery."""
+
+from pathlib import Path
+
+import pandas as pd
+
+from eva_dashboard.costs import compute_total_factor_costs
+from eva_dashboard.data import (
+    LTR_TO_KG,
+    MAUND_FACTOR_BULK_OIL,
+    MAUND_FACTOR_PRICE_FETCH,
+    classify_oil_ghee,
+    cost_factor_per_kg,
+    prepare_report_data,
+    price_fetch_per_maund,
+)
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+ROOT = Path(__file__).resolve().parents[1]
+SAMPLE = ROOT / "data" / "sales.xlsx"
+CLIENTS = ROOT / "data" / "clients.xlsx"
+PRODUCT_COSTS = ROOT / "data" / "product_costs.xlsx"
+PACKING_COSTS = ROOT / "data" / "packing_costs.xlsx"
+
+
+def test_classify_oil_ghee():
+    assert classify_oil_ghee("Eva Cooking", "Eva Cooking Oil (3 Ltr Bottle)") == "Oil"
+    assert classify_oil_ghee("Eva Canola", "Eva Canola Oil (StandUpPouch)") == "Oil"
+    assert classify_oil_ghee("Eva Sunflower", "Eva Sunflower Oil 5 Ltr Pet Bottle") == "Oil"
+    assert classify_oil_ghee("Eva VTF", "Eva VTF Banaspati 1x5 Pouch") == "Ghee"
+    assert classify_oil_ghee("Eva VTF Bulk", "Eva VTF Banaspati 16 Kg Tin") == "Ghee"
+    assert classify_oil_ghee("Maan Oil", "Maan Cooking Oil 5 Ltr Pet Bottle") == "Oil"
+    assert classify_oil_ghee("Maan Ghee", "Maan Banaspati 1X5") == "Ghee"
+    assert classify_oil_ghee("Maan Bulk", "Maan Banaspati 16 Kgs Tin") == "Ghee"
+    assert classify_oil_ghee("Maan Bulk", "Maan Cooking Oil 16 Ltrs. Tin") == "Oil"
+    assert classify_oil_ghee("Eva Bulk", "Eva Cooking Oil (16 Ltr Tin)") == "Oil"
+    assert classify_oil_ghee("Bulk Oil", "RBD Palm Olein") is None
+
+
+def test_cost_factor_ltr_to_kg_and_price_fetch():
+    per_kg = cost_factor_per_kg(169.79, "Ltrs")
+    assert per_kg is not None
+    assert abs(per_kg - 169.79 / LTR_TO_KG) < 1e-9
+    assert abs(cost_factor_per_kg(50.0, "Kgs") - 50.0) < 1e-9
+    pf = price_fetch_per_maund(634.5095, per_kg)
+    assert pf is not None
+    assert abs(pf - (634.5095 - per_kg) * MAUND_FACTOR_PRICE_FETCH) < 1e-6
+
+
+def test_prepare_report_with_costs_sample():
+    if not (SAMPLE.exists() and CLIENTS.exists() and PRODUCT_COSTS.exists() and PACKING_COSTS.exists()):
+        return
+    factors = compute_total_factor_costs(PRODUCT_COSTS, PACKING_COSTS).frame
+    data = prepare_report_data(SAMPLE, clients_path=CLIENTS, factor_costs=factors)
+    assert "cost_factor" in data.daily_sales.columns
+    assert "price_fetch" in data.daily_sales.columns
+    matched = data.daily_sales["cost_factor"].notna().sum()
+    assert matched > 0
+    # Known StandUpPouch canola row for Eva Distributors
+    sample = data.daily_sales[
+        (data.daily_sales["category"] == "Eva Distributors")
+        & (data.daily_sales["product"] == "Eva Canola Oil (StandUpPouch)")
+    ]
+    if len(sample):
+        row = sample.iloc[0]
+        assert abs(float(row["cost_factor"]) - 150.0) < 1e-6
+        expected_pf = (
+            float(row["amount_per_kg"]) - (150.0 / LTR_TO_KG)
+        ) * MAUND_FACTOR_PRICE_FETCH
+        assert abs(float(row["price_fetch"]) - expected_pf) < 0.01
+
+    assert len(data.price_fetch_summary) > 0
+    assert any(r.oil is not None or r.ghee is not None for r in data.price_fetch_summary)
+    assert len(data.bulk_product_prices) > 0
+    bulk_oil = [r for r in data.bulk_product_prices if r.category1 == "Bulk Oil"]
+    assert bulk_oil
+    assert all(r.price_unit == "per Maund" for r in bulk_oil)
+    meal = [r for r in data.bulk_product_prices if r.category1 == "Meal"]
+    assert meal
+    assert all(r.price_unit == "per Kg" for r in meal)
+    # Maund factor sanity for bulk oil
+    assert MAUND_FACTOR_BULK_OIL == 32.3246
+
+
+def test_fixture_factor_costs_join():
+    factors = compute_total_factor_costs(
+        FIXTURES / "product_costs.xlsx",
+        FIXTURES / "packing_costs.xlsx",
+    ).frame
+    assert not factors.empty
+    assert set(factors["Unit"]) <= {"Ltrs", "Kgs"}
+
+
+if __name__ == "__main__":
+    test_classify_oil_ghee()
+    test_cost_factor_ltr_to_kg_and_price_fetch()
+    test_prepare_report_with_costs_sample()
+    test_fixture_factor_costs_join()
+    print("ok")
