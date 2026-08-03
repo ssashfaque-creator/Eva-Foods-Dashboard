@@ -111,9 +111,13 @@ def test_prepare_report_with_costs_sample():
     bulk_oil = [r for r in data.bulk_product_prices if r.category1 == "Bulk Oil"]
     assert bulk_oil
     assert all(r.price_unit == "per Maund" for r in bulk_oil)
+    assert any(r.mtd_avg_price is not None for r in bulk_oil)
     meal = [r for r in data.bulk_product_prices if r.category1 == "Meal"]
     assert meal
     assert all(r.price_unit == "per Kg" for r in meal)
+    # Report-date meal lines have zero amounts in the sample workbook
+    assert all(r.daily_avg_price is None for r in meal)
+    assert all(r.mtd_avg_price is not None for r in meal)
     # Maund factor sanity for bulk oil
     assert MAUND_FACTOR_BULK_OIL == 37.3246
     assert MAUND_FACTOR_PRICE_FETCH == 37.3246

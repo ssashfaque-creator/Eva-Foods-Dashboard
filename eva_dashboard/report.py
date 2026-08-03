@@ -461,7 +461,8 @@ def _bulk_product_price_table(
     header = [
         Paragraph("Product", styles["cell_bold"]),
         Paragraph("Category", styles["cell_bold"]),
-        Paragraph("Average Price", styles["cell_bold"]),
+        Paragraph("Daily Avg", styles["cell_bold"]),
+        Paragraph("MTD Avg", styles["cell_bold"]),
         Paragraph("Unit", styles["cell_bold"]),
     ]
     rows: list[list] = [header]
@@ -470,15 +471,17 @@ def _bulk_product_price_table(
             [
                 Paragraph(row.product, styles["cell"]),
                 Paragraph(row.category1, styles["cell"]),
-                Paragraph(_fmt_money(row.avg_price), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.daily_avg_price), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.mtd_avg_price), styles["cell_right"]),
                 Paragraph(row.price_unit, styles["cell"]),
             ]
         )
     if len(rows) == 1:
         rows.append(
             [
-                Paragraph("No bulk / industrial sales in MTD window", styles["cell"]),
+                Paragraph("No bulk / industrial sales in daily or MTD window", styles["cell"]),
                 Paragraph("—", styles["cell"]),
+                Paragraph("—", styles["cell_right"]),
                 Paragraph("—", styles["cell_right"]),
                 Paragraph("—", styles["cell"]),
             ]
@@ -486,7 +489,7 @@ def _bulk_product_price_table(
 
     table = Table(
         rows,
-        colWidths=[70 * mm, 28 * mm, 28 * mm, 22 * mm],
+        colWidths=[58 * mm, 26 * mm, 26 * mm, 26 * mm, 22 * mm],
         hAlign="LEFT",
     )
     table.setStyle(TableStyle(_base_table_style(len(rows), has_total=False)))
@@ -945,7 +948,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         Paragraph("Price Fetch by Client Type (Rs / Maund)", styles["section"]),
         _price_fetch_table(data, styles),
         Spacer(1, 5 * mm),
-        Paragraph("Bulk Product Average Prices (MTD)", styles["section"]),
+        Paragraph("Bulk Product Average Prices", styles["section"]),
         _bulk_product_price_table(data, styles),
         Spacer(1, 4 * mm),
         Paragraph(
@@ -957,7 +960,8 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "cost factors in litres are converted to per kg at 1 Ltr = 0.915 Kg "
             "(always computed in kg). "
             "Price Fetch columns split Eva / Maan × Oil / Ghee. "
-            "Bulk Oil averages are shown per maund (× 37.3246); other bulk categories per kg.",
+            "Bulk product Daily Avg uses report-date sales; MTD Avg uses the month-to-date "
+            "window. Bulk Oil prices are per maund (× 37.3246); other bulk categories per kg.",
             styles["meta"],
         ),
         NextPageTemplate("detail"),

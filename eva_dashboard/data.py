@@ -123,7 +123,8 @@ class BulkProductPriceRow:
 
     product: str
     category1: str
-    avg_price: float
+    daily_avg_price: float | None
+    mtd_avg_price: float | None
     price_unit: str  # "per Maund" or "per Kg"
 
 
@@ -446,33 +447,61 @@ def _build_price_fetch_summary(daily: pd.DataFrame) -> list[PriceFetchRow]:
     return rows
 
 
-def _build_bulk_product_prices(frame: pd.DataFrame) -> list[BulkProductPriceRow]:
-    scoped = frame[frame["category1"].isin(BULK_PRICE_CATEGORIES)].copy()
-    if scoped.empty:
-        return []
-    scoped["amount_per_kg"] = _amount_per_kg_series(
-        scoped["incl_gst_fed"], scoped["effective_mt"]
+def _avg_bulk_price(frame: pd.DataFrame, category1: str) -> float | None:
+    """MT-weighted average selling price; skip lines with no Incl GST/FED amount."""
+    if frame.empty:
+        return None
+    priced = frame[frame["incl_gst_fed"].astype(float) > 0].copy()
+    if priced.empty:
+        return None
+    priced["amount_per_kg"] = _amount_per_kg_series(
+        priced["incl_gst_fed"], priced["effective_mt"]
     )
-    rows: list[BulkProductPriceRow] = []
-    grouped = scoped.groupby(["category1", "product"], sort=False)
-    for (category1, product), group in grouped:
-        avg_kg = weighted_avg(
-            pd.Series(group["amount_per_kg"], dtype=float),
-            group["effective_mt"],
-        )
-        if avg_kg is None:
+    avg_kg = weighted_avg(
+        pd.Series(priced["amount_per_kg"], dtype=float),
+        priced["effective_mt"],
+    )
+    if avg_kg is None:
+        return None
+    if category1 == "Bulk Oil":
+        return float(avg_kg * MAUND_FACTOR_BULK_OIL)
+    return float(avg_kg)
+
+
+def _build_bulk_product_prices(
+    daily: pd.DataFrame,
+    mtd: pd.DataFrame,
+) -> list[BulkProductPriceRow]:
+    daily_scoped = daily[daily["category1"].isin(BULK_PRICE_CATEGORIES)].copy()
+    mtd_scoped = mtd[mtd["category1"].isin(BULK_PRICE_CATEGORIES)].copy()
+    if daily_scoped.empty and mtd_scoped.empty:
+        return []
+
+    keys: set[tuple[str, str]] = set()
+    for frame in (daily_scoped, mtd_scoped):
+        if frame.empty:
             continue
-        if category1 == "Bulk Oil":
-            avg_price = avg_kg * MAUND_FACTOR_BULK_OIL
-            price_unit = "per Maund"
-        else:
-            avg_price = avg_kg
-            price_unit = "per Kg"
+        for category1, product in (
+            frame[["category1", "product"]].drop_duplicates().itertuples(index=False)
+        ):
+            keys.add((str(category1), str(product)))
+
+    rows: list[BulkProductPriceRow] = []
+    for category1, product in keys:
+        price_unit = "per Maund" if category1 == "Bulk Oil" else "per Kg"
+        daily_part = daily_scoped[
+            (daily_scoped["category1"] == category1)
+            & (daily_scoped["product"] == product)
+        ]
+        mtd_part = mtd_scoped[
+            (mtd_scoped["category1"] == category1) & (mtd_scoped["product"] == product)
+        ]
         rows.append(
             BulkProductPriceRow(
-                product=str(product),
-                category1=str(category1),
-                avg_price=float(avg_price),
+                product=product,
+                category1=category1,
+                daily_avg_price=_avg_bulk_price(daily_part, category1),
+                mtd_avg_price=_avg_bulk_price(mtd_part, category1),
                 price_unit=price_unit,
             )
         )
@@ -809,7 +838,7 @@ def prepare_report_data(
     ]
 
     price_fetch_summary = _build_price_fetch_summary(daily)
-    bulk_product_prices = _build_bulk_product_prices(mtd)
+    bulk_product_prices = _build_bulk_product_prices(daily, mtd)
 
     daily_sales = daily[
         [
