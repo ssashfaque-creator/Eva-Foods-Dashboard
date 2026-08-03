@@ -271,9 +271,10 @@ def _city_daily_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) 
     ]
     rows: list[list] = [header]
 
+    frame = data.city_daily.head(10)
     totals = {name: 0.0 for name in brands}
     grand = 0.0
-    for _, row in data.city_daily.iterrows():
+    for _, row in frame.iterrows():
         cells = [Paragraph(str(row["city"]), styles["cell"])]
         row_total = 0.0
         for name in brands:
@@ -342,9 +343,10 @@ def _city_mtd_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) ->
     ]
     rows: list[list] = [header]
 
+    frame = data.city_mtd.head(10)
     totals = {name: 0.0 for name in brands}
     grand = 0.0
-    for _, row in data.city_mtd.iterrows():
+    for _, row in frame.iterrows():
         cells = [Paragraph(str(row["city"]), styles["cell"])]
         row_total = 0.0
         for name in brands:
@@ -794,7 +796,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "Δ% is green when current is above the average baseline, red when below, "
             "and — when the baseline is zero (e.g. no prior-month history loaded yet). "
             "ADS = average daily sales over the last 30 days; AMS = average monthly sales "
-            "over the prior 3 full months. City tables are sorted by total MT (high → low).",
+            "over the prior 3 full months. City tables show the top 10 cities by total MT.",
             styles["meta"],
         ),
         NextPageTemplate("detail"),
