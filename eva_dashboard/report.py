@@ -688,16 +688,12 @@ def _section_sales_table(
                 ("SPAN", (2, start), (2, end)),
                 ("VALIGN", (0, start), (2, end), "MIDDLE"),
                 ("ALIGN", (0, start), (2, end), "CENTER"),
-                ("BACKGROUND", (0, start), (2, end), ROW_ALT),
-                ("BACKGROUND", (3, end), (-1, end), colors.Color(0.86, 0.91, 0.88)),
+                # Sales lines stay white; only the customer total row is tinted
+                ("BACKGROUND", (0, end), (-1, end), colors.Color(0.86, 0.91, 0.88)),
                 ("LINEABOVE", (0, start), (-1, start), 0.7, ACCENT),
-                ("LINEABOVE", (3, end), (-1, end), 0.7, BRAND),
+                ("LINEABOVE", (0, end), (-1, end), 0.7, BRAND),
             ]
         )
-        if index % 2 == 1 and end > start:
-            style_cmds.append(
-                ("BACKGROUND", (3, start), (-1, end - 1), colors.Color(0.90, 0.94, 0.92))
-            )
 
     total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(frame)
     section_row = len(rows)
