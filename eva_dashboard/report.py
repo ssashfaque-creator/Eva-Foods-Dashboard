@@ -680,15 +680,18 @@ def _section_sales_table(
                 blended_price_fetch=blended_pf,
             )
         )
-        end = len(rows) - 1
+        end = len(rows) - 1  # customer total row
+        last_sku = end - 1
         style_cmds.extend(
             [
-                ("SPAN", (0, start), (0, end)),
-                ("SPAN", (1, start), (1, end)),
-                ("SPAN", (2, start), (2, end)),
-                ("VALIGN", (0, start), (2, end), "MIDDLE"),
-                ("ALIGN", (0, start), (2, end), "CENTER"),
-                # Sales lines stay white; only the customer total row is tinted
+                # Span identity only across SKU lines — not the total row —
+                # otherwise ReportLab paints the total-row green over the whole block.
+                ("SPAN", (0, start), (0, last_sku)),
+                ("SPAN", (1, start), (1, last_sku)),
+                ("SPAN", (2, start), (2, last_sku)),
+                ("VALIGN", (0, start), (2, last_sku), "MIDDLE"),
+                ("ALIGN", (0, start), (2, last_sku), "CENTER"),
+                ("BACKGROUND", (0, start), (-1, last_sku), colors.white),
                 ("BACKGROUND", (0, end), (-1, end), colors.Color(0.86, 0.91, 0.88)),
                 ("LINEABOVE", (0, start), (-1, start), 0.7, ACCENT),
                 ("LINEABOVE", (0, end), (-1, end), 0.7, BRAND),
