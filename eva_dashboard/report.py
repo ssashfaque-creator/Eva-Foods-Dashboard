@@ -582,7 +582,8 @@ def _total_cells(
     total_mt: float,
     total_basic: float,
     total_incl: float,
-    blended_rate: float,
+    weighted_rate: float,
+    amount_per_kg: float,
     styles: dict[str, ParagraphStyle],
     blended_price_fetch: float | None = None,
 ) -> list:
@@ -591,28 +592,38 @@ def _total_cells(
         Paragraph("", styles["cell"]),
         Paragraph("", styles["cell"]),
         Paragraph(_fmt_mt(total_mt), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(weighted_rate), styles["cell_right_bold"]),
         Paragraph(_fmt_money(total_basic), styles["cell_right_bold"]),
         Paragraph(_fmt_money(total_incl), styles["cell_right_bold"]),
-        Paragraph(_fmt_money(blended_rate), styles["cell_right_bold"]),
+        Paragraph(_fmt_money(amount_per_kg), styles["cell_right_bold"]),
         Paragraph("", styles["cell"]),
         Paragraph(_fmt_optional_money(blended_price_fetch), styles["cell_right_bold"]),
     ]
 
 
-def _frame_totals(frame) -> tuple[float, float, float, float, float | None]:
+def _frame_totals(
+    frame,
+) -> tuple[float, float, float, float, float, float | None]:
+    """Return mt, basic, incl, weighted line Rate, amount/kg, price fetch."""
+    from eva_dashboard.data import weighted_avg
+
     total_mt = float(frame["mt_qty"].sum())
     total_basic = float(frame["basic_amount"].sum())
     total_incl = float(frame["incl_gst_fed"].sum())
     total_kg = total_mt * 1000.0
-    blended_rate = (total_incl / total_kg) if total_kg else 0.0
-    if "price_fetch" in frame.columns and "mt_qty" in frame.columns:
-        from eva_dashboard.data import weighted_avg
+    amount_per_kg = (total_incl / total_kg) if total_kg else 0.0
 
+    # Rate on lines is typically per litre (Mes Qty); weight by Mes Qty when present.
+    if "mes_qty" in frame.columns and float(frame["mes_qty"].sum()) > 0:
+        weighted_rate = weighted_avg(frame["rate"], frame["mes_qty"]) or 0.0
+    else:
+        weighted_rate = weighted_avg(frame["rate"], frame["mt_qty"]) or 0.0
+
+    if "price_fetch" in frame.columns and "mt_qty" in frame.columns:
         blended_pf = weighted_avg(frame["price_fetch"], frame["mt_qty"])
     else:
         blended_pf = None
-    return total_mt, total_basic, total_incl, blended_rate, blended_pf
+    return total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf
 
 
 def _party_mt_totals(frame) -> dict[tuple[str, str, str], float]:
@@ -667,7 +678,9 @@ def _section_sales_table(
                 identity = _blank_identity()
             rows.append(identity + _sku_cells(row, styles))
 
-        total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(group)
+        total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
+            _frame_totals(group)
+        )
         rows.append(
             _blank_identity()
             + _total_cells(
@@ -675,7 +688,8 @@ def _section_sales_table(
                 total_mt,
                 total_basic,
                 total_incl,
-                blended_rate,
+                weighted_rate,
+                amount_per_kg,
                 styles,
                 blended_price_fetch=blended_pf,
             )
@@ -698,7 +712,9 @@ def _section_sales_table(
             ]
         )
 
-    total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(frame)
+    total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
+        _frame_totals(frame)
+    )
     section_row = len(rows)
     rows.append(
         _blank_identity()
@@ -707,7 +723,8 @@ def _section_sales_table(
             total_mt,
             total_basic,
             total_incl,
-            blended_rate,
+            weighted_rate,
+            amount_per_kg,
             styles,
             blended_price_fetch=blended_pf,
         )
@@ -736,13 +753,16 @@ def _product_total_banner(
     frame,
     styles: dict[str, ParagraphStyle],
 ) -> Table:
-    total_mt, total_basic, total_incl, blended_rate, blended_pf = _frame_totals(frame)
+    total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
+        _frame_totals(frame)
+    )
     row = _blank_identity() + _total_cells(
         f"Product Total — {product_type}",
         total_mt,
         total_basic,
         total_incl,
-        blended_rate,
+        weighted_rate,
+        amount_per_kg,
         styles,
         blended_price_fetch=blended_pf,
     )

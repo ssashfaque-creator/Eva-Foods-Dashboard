@@ -23,6 +23,8 @@ SALES_COLUMNS = {
     "Product": "product",
     "Qty": "qty",
     "Unit": "unit",
+    "Mes Qty": "mes_qty",
+    "Mes Unit": "mes_unit",
     "M.T Qty": "mt_qty",
     "Rate": "rate",
     "Basic Amount": "basic_amount",
@@ -261,9 +263,11 @@ def load_sales(path: Path | str) -> pd.DataFrame:
     sales = sales.dropna(subset=["date", "product"]).copy()
     sales["product"] = sales["product"].astype(str).str.strip()
     sales["party"] = sales["party"].fillna("").astype(str).str.strip()
-    for col in ("qty", "mt_qty", "rate", "basic_amount", "incl_gst_fed"):
+    for col in ("qty", "mes_qty", "mt_qty", "rate", "basic_amount", "incl_gst_fed"):
         sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0.0)
     sales["unit"] = sales["unit"].fillna("").astype(str).str.strip()
+    sales["mes_unit"] = sales["mes_unit"].fillna("").astype(str).str.strip()
+    sales.loc[sales["mes_unit"].str.lower().isin({"nan", "none"}), "mes_unit"] = ""
     sales["effective_mt"] = [
         effective_mt_qty(q, u, m)
         for q, u, m in zip(sales["qty"], sales["unit"], sales["mt_qty"], strict=True)
@@ -817,6 +821,8 @@ def prepare_report_data(
             "product",
             "qty",
             "unit",
+            "mes_qty",
+            "mes_unit",
             "effective_mt",
             "rate",
             "basic_amount",
