@@ -419,16 +419,20 @@ def _fmt_optional_money(value: float | None) -> str:
 def _price_fetch_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     header = [
         Paragraph("Client Type", styles["cell_bold"]),
-        Paragraph("Oil", styles["cell_bold"]),
-        Paragraph("Ghee", styles["cell_bold"]),
+        Paragraph("Oil (Eva)", styles["cell_bold"]),
+        Paragraph("Ghee (Eva)", styles["cell_bold"]),
+        Paragraph("Oil (Maan)", styles["cell_bold"]),
+        Paragraph("Ghee (Maan)", styles["cell_bold"]),
     ]
     rows: list[list] = [header]
     for row in data.price_fetch_summary:
         rows.append(
             [
                 Paragraph(row.client_type, styles["cell"]),
-                Paragraph(_fmt_optional_money(row.oil), styles["cell_right"]),
-                Paragraph(_fmt_optional_money(row.ghee), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.eva_oil), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.eva_ghee), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.maan_oil), styles["cell_right"]),
+                Paragraph(_fmt_optional_money(row.maan_ghee), styles["cell_right"]),
             ]
         )
     if len(rows) == 1:
@@ -437,10 +441,16 @@ def _price_fetch_table(data: SalesReportData, styles: dict[str, ParagraphStyle])
                 Paragraph("No oil/ghee sales with cost factors", styles["cell"]),
                 Paragraph("—", styles["cell_right"]),
                 Paragraph("—", styles["cell_right"]),
+                Paragraph("—", styles["cell_right"]),
+                Paragraph("—", styles["cell_right"]),
             ]
         )
 
-    table = Table(rows, colWidths=[70 * mm, 35 * mm, 35 * mm], hAlign="LEFT")
+    table = Table(
+        rows,
+        colWidths=[42 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm],
+        hAlign="LEFT",
+    )
     table.setStyle(TableStyle(_base_table_style(len(rows), has_total=False)))
     return table
 
@@ -926,6 +936,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "over the prior 3 full months. City tables show the top 10 cities by total MT. "
             "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 32.3242; "
             "cost factors in litres are converted at 1 Ltr = 0.915 Kg. "
+            "Price Fetch columns split Eva / Maan × Oil / Ghee. "
             "Bulk Oil averages are shown per maund (× 32.3246); other bulk categories per kg.",
             styles["meta"],
         ),

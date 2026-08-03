@@ -10,6 +10,7 @@ from eva_dashboard.data import (
     MAUND_FACTOR_BULK_OIL,
     MAUND_FACTOR_PRICE_FETCH,
     classify_oil_ghee,
+    classify_price_fetch_segment,
     cost_factor_per_kg,
     prepare_report_data,
     price_fetch_per_maund,
@@ -36,6 +37,34 @@ def test_classify_oil_ghee():
     assert classify_oil_ghee("Maan Bulk", "Maan Cooking Oil 16 Ltrs. Tin") == "Oil"
     assert classify_oil_ghee("Eva Bulk", "Eva Cooking Oil (16 Ltr Tin)") == "Oil"
     assert classify_oil_ghee("Bulk Oil", "RBD Palm Olein") is None
+
+
+def test_classify_price_fetch_segment():
+    assert (
+        classify_price_fetch_segment(
+            "Eva Consumer", "Eva Cooking", "Eva Cooking Oil (3 Ltr Bottle)"
+        )
+        == "Eva Oil"
+    )
+    assert (
+        classify_price_fetch_segment(
+            "Eva Consumer", "Eva VTF", "Eva VTF Banaspati 1x5 Pouch"
+        )
+        == "Eva Ghee"
+    )
+    assert (
+        classify_price_fetch_segment(
+            "Maan Consumer", "Maan Oil", "Maan Cooking Oil 5 Ltr Pet Bottle"
+        )
+        == "Maan Oil"
+    )
+    assert (
+        classify_price_fetch_segment(
+            "Maan Bulk", "Maan Bulk", "Maan Banaspati 16 Kgs Tin"
+        )
+        == "Maan Ghee"
+    )
+    assert classify_price_fetch_segment("Bulk Oil", "Olein", "RBD Palm Olein") is None
 
 
 def test_cost_factor_ltr_to_kg_and_price_fetch():
@@ -71,7 +100,13 @@ def test_prepare_report_with_costs_sample():
         assert abs(float(row["price_fetch"]) - expected_pf) < 0.01
 
     assert len(data.price_fetch_summary) > 0
-    assert any(r.oil is not None or r.ghee is not None for r in data.price_fetch_summary)
+    assert any(
+        r.eva_oil is not None
+        or r.eva_ghee is not None
+        or r.maan_oil is not None
+        or r.maan_ghee is not None
+        for r in data.price_fetch_summary
+    )
     assert len(data.bulk_product_prices) > 0
     bulk_oil = [r for r in data.bulk_product_prices if r.category1 == "Bulk Oil"]
     assert bulk_oil
@@ -94,6 +129,7 @@ def test_fixture_factor_costs_join():
 
 if __name__ == "__main__":
     test_classify_oil_ghee()
+    test_classify_price_fetch_segment()
     test_cost_factor_ltr_to_kg_and_price_fetch()
     test_prepare_report_with_costs_sample()
     test_fixture_factor_costs_join()

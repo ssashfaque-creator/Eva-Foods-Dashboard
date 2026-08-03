@@ -106,11 +106,13 @@ class CategorySummaryRow:
 
 @dataclass(frozen=True)
 class PriceFetchRow:
-    """Client-type Oil / Ghee Price Fetch (weighted average, Rs/maund)."""
+    """Client-type Price Fetch split by brand × Oil/Ghee (Rs/maund)."""
 
     client_type: str
-    oil: float | None
-    ghee: float | None
+    eva_oil: float | None
+    eva_ghee: float | None
+    maan_oil: float | None
+    maan_ghee: float | None
 
 
 @dataclass(frozen=True)
@@ -288,6 +290,30 @@ def classify_oil_ghee(category2: Any, product: Any) -> str | None:
     return None
 
 
+def classify_brand(category1: Any, category2: Any, product: Any) -> str | None:
+    """Return 'Eva' or 'Maan' for branded edible products, else None."""
+    c1 = str(category1 or "").strip().lower()
+    c2 = str(category2 or "").strip().lower()
+    prod = str(product or "").strip().lower()
+
+    if c1.startswith("eva") or c2.startswith("eva") or prod.startswith("eva"):
+        return "Eva"
+    if c1.startswith("maan") or c2.startswith("maan") or prod.startswith("maan"):
+        return "Maan"
+    return None
+
+
+def classify_price_fetch_segment(
+    category1: Any, category2: Any, product: Any
+) -> str | None:
+    """Return one of: Eva Oil, Eva Ghee, Maan Oil, Maan Ghee."""
+    brand = classify_brand(category1, category2, product)
+    oil_ghee = classify_oil_ghee(category2, product)
+    if brand is None or oil_ghee is None:
+        return None
+    return f"{brand} {oil_ghee}"
+
+
 def cost_factor_per_kg(total_factor_cost: Any, unit: Any) -> float | None:
     """Convert a TotalFactorCost in Ltrs or Kgs into a per-kg cost."""
     if total_factor_cost is None or (isinstance(total_factor_cost, float) and pd.isna(total_factor_cost)):
@@ -391,18 +417,22 @@ def weighted_avg(values: pd.Series, weights: pd.Series) -> float | None:
 
 
 def _build_price_fetch_summary(daily: pd.DataFrame) -> list[PriceFetchRow]:
-    scoped = daily[daily["oil_ghee"].isin(["Oil", "Ghee"])].copy()
+    scoped = daily[daily["price_fetch_segment"].notna()].copy()
     if scoped.empty:
         return []
     rows: list[PriceFetchRow] = []
     for client_type, group in scoped.groupby("detail_category", sort=True):
-        oil = group[group["oil_ghee"] == "Oil"]
-        ghee = group[group["oil_ghee"] == "Ghee"]
+        def avg_for(segment: str) -> float | None:
+            part = group[group["price_fetch_segment"] == segment]
+            return weighted_avg(part["price_fetch"], part["effective_mt"])
+
         rows.append(
             PriceFetchRow(
                 client_type=str(client_type),
-                oil=weighted_avg(oil["price_fetch"], oil["effective_mt"]),
-                ghee=weighted_avg(ghee["price_fetch"], ghee["effective_mt"]),
+                eva_oil=avg_for("Eva Oil"),
+                eva_ghee=avg_for("Eva Ghee"),
+                maan_oil=avg_for("Maan Oil"),
+                maan_ghee=avg_for("Maan Ghee"),
             )
         )
     return rows
@@ -636,6 +666,12 @@ def prepare_report_data(
         classify_oil_ghee(c2, prod)
         for c2, prod in zip(merged["category2"], merged["product"], strict=True)
     ]
+    merged["price_fetch_segment"] = [
+        classify_price_fetch_segment(c1, c2, prod)
+        for c1, c2, prod in zip(
+            merged["category1"], merged["category2"], merged["product"], strict=True
+        )
+    ]
 
     if factor_costs is not None and len(factor_costs):
         merged = _attach_cost_factors(merged, factor_costs)
@@ -783,6 +819,7 @@ def prepare_report_data(
             "incl_gst_fed",
             "amount_per_kg",
             "oil_ghee",
+            "price_fetch_segment",
             "cost_factor",
             "cost_unit",
             "cost_factor_per_kg",
