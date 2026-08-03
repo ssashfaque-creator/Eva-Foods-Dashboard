@@ -40,7 +40,7 @@ By default the **latest date** in the sales workbook is treated as the current r
 
 **Detail pages** (landscape) — grouped customer-wise
 
-Category (**client Type**), City (**City-Filter**), and Party are shown once per customer (vertically merged / centered). SKU lines keep Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG.
+Category (**client Type**), City (**City-Filter**), and Party are shown once per customer (vertically merged / centered). SKU lines keep Product, Qty, Unit, M.T Qty, Rate, Basic Amount, Incl Gst/Fed, Amount per KG. Each customer ends with a **Total** row: total M.T Qty, Basic Amount, Incl Gst/Fed, and Rate = total Incl Gst/Fed ÷ total kg (MT × 1000).
 
 `Amount per KG = Incl GST/FED ÷ (M.T Qty × 1000)`
 

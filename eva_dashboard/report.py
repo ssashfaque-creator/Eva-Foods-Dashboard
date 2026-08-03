@@ -258,9 +258,15 @@ def _party_sales_table(
     styles: dict[str, ParagraphStyle],
     shade: bool,
 ) -> Table:
-    """One customer block: Category/City/Party merged once, SKU lines to the right."""
+    """One customer block: Category/City/Party merged once, SKU lines + client totals."""
     rows: list[list] = []
     sku_rows = list(group.iterrows())
+    total_mt = float(group["mt_qty"].sum())
+    total_basic = float(group["basic_amount"].sum())
+    total_incl = float(group["incl_gst_fed"].sum())
+    total_kg = total_mt * 1000.0
+    blended_rate = (total_incl / total_kg) if total_kg else 0.0
+
     for offset, (_, row) in enumerate(sku_rows):
         if offset == 0:
             identity = [
@@ -284,30 +290,51 @@ def _party_sales_table(
             ]
         )
 
-    end = len(rows) - 1
+    # Client total row: MT, Basic, Incl Gst/Fed, and blended Rate = Incl÷kg
+    rows.append(
+        [
+            "",
+            "",
+            "",
+            Paragraph("Total", styles["cell_bold_dark"]),
+            Paragraph("", styles["cell"]),
+            Paragraph("", styles["cell"]),
+            Paragraph(_fmt_mt(total_mt), styles["cell_right"]),
+            Paragraph(_fmt_money(blended_rate), styles["cell_right"]),
+            Paragraph(_fmt_money(total_basic), styles["cell_right"]),
+            Paragraph(_fmt_money(total_incl), styles["cell_right"]),
+            Paragraph(_fmt_money(blended_rate), styles["cell_right"]),
+        ]
+    )
+
+    sku_end = len(sku_rows) - 1
+    total_row = len(rows) - 1
     style_cmds: list = [
-        ("VALIGN", (0, 0), (2, end), "MIDDLE"),
-        ("ALIGN", (0, 0), (2, end), "CENTER"),
-        ("VALIGN", (3, 0), (-1, end), "TOP"),
+        ("VALIGN", (0, 0), (2, total_row), "MIDDLE"),
+        ("ALIGN", (0, 0), (2, total_row), "CENTER"),
+        ("VALIGN", (3, 0), (-1, total_row), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
         ("BOX", (0, 0), (-1, -1), 0.7, ACCENT),
-        ("BACKGROUND", (0, 0), (2, end), ROW_ALT),
+        ("BACKGROUND", (0, 0), (2, total_row), ROW_ALT),
+        ("BACKGROUND", (3, total_row), (-1, total_row), colors.Color(0.86, 0.91, 0.88)),
+        ("LINEABOVE", (3, total_row), (-1, total_row), 0.8, BRAND),
+        ("FONTNAME", (3, total_row), (-1, total_row), "Helvetica-Bold"),
     ]
-    if end > 0:
+    if total_row > 0:
         style_cmds.extend(
             [
-                ("SPAN", (0, 0), (0, end)),
-                ("SPAN", (1, 0), (1, end)),
-                ("SPAN", (2, 0), (2, end)),
+                ("SPAN", (0, 0), (0, total_row)),
+                ("SPAN", (1, 0), (1, total_row)),
+                ("SPAN", (2, 0), (2, total_row)),
             ]
         )
-    if shade:
+    if shade and sku_end >= 0:
         style_cmds.append(
-            ("BACKGROUND", (3, 0), (-1, end), colors.Color(0.90, 0.94, 0.92))
+            ("BACKGROUND", (3, 0), (-1, sku_end), colors.Color(0.90, 0.94, 0.92))
         )
 
     table = Table(rows, colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
