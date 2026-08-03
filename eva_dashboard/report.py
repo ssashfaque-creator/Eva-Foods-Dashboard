@@ -26,6 +26,7 @@ from eva_dashboard.data import (
     CITY_BRAND_COLUMNS,
     CITY_DETAIL_CATEGORIES,
     SalesReportData,
+    pct_change,
 )
 
 
@@ -147,6 +148,10 @@ def _styles() -> dict[str, ParagraphStyle]:
     }
 
 
+UP = colors.Color(0.05, 0.45, 0.22)
+DOWN = colors.Color(0.70, 0.12, 0.12)
+
+
 def _fmt_mt(value: float) -> str:
     return f"{value:,.3f}"
 
@@ -159,6 +164,30 @@ def _fmt_qty(value: float) -> str:
 
 def _fmt_money(value: float) -> str:
     return f"{value:,.2f}"
+
+
+def _fmt_pct(change: float | None) -> tuple[str, colors.Color]:
+    if change is None:
+        return ("—", MUTED)
+    color = UP if change >= 0 else DOWN
+    sign = "+" if change > 0 else ""
+    return (f"{sign}{change:.1f}%", color)
+
+
+def _pct_paragraph(
+    current: float,
+    baseline: float,
+    styles: dict[str, ParagraphStyle],
+) -> Paragraph:
+    text, color = _fmt_pct(pct_change(current, baseline))
+    style = ParagraphStyle(
+        f"Pct_{text}_{id(color)}",
+        parent=styles["cell_right"],
+        textColor=color,
+        fontName="Helvetica-Bold",
+        fontSize=6.5,
+    )
+    return Paragraph(text, style)
 
 
 def _base_table_style(row_count: int, has_total: bool = True) -> list:
@@ -190,7 +219,11 @@ def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> 
     header = [
         Paragraph("Category", styles["cell_bold"]),
         Paragraph("Daily Sales (MT)", styles["cell_bold"]),
-        Paragraph("Month-to-Date Sales (MT)", styles["cell_bold"]),
+        Paragraph("Avg Last 30 Days", styles["cell_bold"]),
+        Paragraph("Δ% vs 30D", styles["cell_bold"]),
+        Paragraph("MTD Sales (MT)", styles["cell_bold"]),
+        Paragraph("AMS", styles["cell_bold"]),
+        Paragraph("Δ% vs AMS", styles["cell_bold"]),
     ]
     rows: list[list] = [header]
     for row in data.category_summary:
@@ -198,35 +231,48 @@ def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> 
             [
                 Paragraph(row.category1, styles["cell"]),
                 Paragraph(_fmt_mt(row.daily_mt), styles["cell_right"]),
+                Paragraph(_fmt_mt(row.avg_30d_mt), styles["cell_right"]),
+                _pct_paragraph(row.daily_mt, row.avg_30d_mt, styles),
                 Paragraph(_fmt_mt(row.mtd_mt), styles["cell_right"]),
+                Paragraph(_fmt_mt(row.ams_mt), styles["cell_right"]),
+                _pct_paragraph(row.mtd_mt, row.ams_mt, styles),
             ]
         )
     rows.append(
         [
             Paragraph("Total", styles["cell_bold_dark"]),
             Paragraph(_fmt_mt(data.total_daily_mt), styles["cell_right"]),
+            Paragraph(_fmt_mt(data.total_avg_30d_mt), styles["cell_right"]),
+            _pct_paragraph(data.total_daily_mt, data.total_avg_30d_mt, styles),
             Paragraph(_fmt_mt(data.total_mtd_mt), styles["cell_right"]),
+            Paragraph(_fmt_mt(data.total_ams_mt), styles["cell_right"]),
+            _pct_paragraph(data.total_mtd_mt, data.total_ams_mt, styles),
         ]
     )
 
-    table = Table(rows, colWidths=[70 * mm, 50 * mm, 55 * mm], hAlign="LEFT")
+    table = Table(
+        rows,
+        colWidths=[36 * mm, 24 * mm, 24 * mm, 18 * mm, 24 * mm, 22 * mm, 18 * mm],
+        hAlign="LEFT",
+    )
     table.setStyle(TableStyle(_base_table_style(len(rows))))
     return table
 
 
-def _city_brand_table(
-    frame,
-    styles: dict[str, ParagraphStyle],
-) -> Table:
+def _city_daily_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     brands = list(CITY_BRAND_COLUMNS)
     header = [Paragraph("City", styles["cell_bold"])] + [
         Paragraph(name, styles["cell_bold"]) for name in brands
-    ] + [Paragraph("Total", styles["cell_bold"])]
+    ] + [
+        Paragraph("Total", styles["cell_bold"]),
+        Paragraph("Avg 30D", styles["cell_bold"]),
+        Paragraph("Δ%", styles["cell_bold"]),
+    ]
     rows: list[list] = [header]
 
     totals = {name: 0.0 for name in brands}
     grand = 0.0
-    for _, row in frame.iterrows():
+    for _, row in data.city_daily.iterrows():
         cells = [Paragraph(str(row["city"]), styles["cell"])]
         row_total = 0.0
         for name in brands:
@@ -234,19 +280,124 @@ def _city_brand_table(
             totals[name] += value
             row_total += value
             cells.append(Paragraph(_fmt_mt(value), styles["cell_right"]))
+        avg_30d = float(row.get("avg_30d", 0.0) or 0.0)
         grand += row_total
         cells.append(Paragraph(_fmt_mt(row_total), styles["cell_right"]))
+        cells.append(Paragraph(_fmt_mt(avg_30d), styles["cell_right"]))
+        cells.append(_pct_paragraph(row_total, avg_30d, styles))
         rows.append(cells)
 
+    total_avg = float(data.city_daily_ads.get("total", 0.0))
     total_row = [Paragraph("Total", styles["cell_bold_dark"])]
     for name in brands:
         total_row.append(Paragraph(_fmt_mt(totals[name]), styles["cell_right"]))
     total_row.append(Paragraph(_fmt_mt(grand), styles["cell_right"]))
+    total_row.append(Paragraph(_fmt_mt(total_avg), styles["cell_right"]))
+    total_row.append(_pct_paragraph(grand, total_avg, styles))
     rows.append(total_row)
 
-    col_widths = [32 * mm] + [28 * mm] * len(brands) + [28 * mm]
+    ads_row = [Paragraph("ADS (30D)", styles["cell_bold_dark"])]
+    for name in brands:
+        ads_row.append(
+            Paragraph(_fmt_mt(float(data.city_daily_ads.get(name, 0.0))), styles["cell_right"])
+        )
+    ads_row.append(Paragraph(_fmt_mt(total_avg), styles["cell_right"]))
+    ads_row.append(Paragraph("—", styles["cell_right"]))
+    ads_row.append(Paragraph("—", styles["cell_right"]))
+    rows.append(ads_row)
+
+    col_widths = [24 * mm] + [22 * mm] * len(brands) + [20 * mm, 18 * mm, 14 * mm]
     table = Table(rows, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
-    table.setStyle(TableStyle(_base_table_style(len(rows))))
+    total_idx = len(rows) - 2
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+        ("BACKGROUND", (0, total_idx), (-1, total_idx), colors.Color(0.86, 0.91, 0.88)),
+        ("LINEABOVE", (0, total_idx), (-1, total_idx), 1.0, BRAND),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.88, 0.92, 0.95)),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT),
+    ]
+    for i in range(1, total_idx):
+        if i % 2 == 0:
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    table.setStyle(TableStyle(style_cmds))
+    return table
+
+
+def _city_mtd_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
+    brands = list(CITY_BRAND_COLUMNS)
+    header = [Paragraph("City", styles["cell_bold"])] + [
+        Paragraph(name, styles["cell_bold"]) for name in brands
+    ] + [
+        Paragraph("Total", styles["cell_bold"]),
+        Paragraph("AMS", styles["cell_bold"]),
+        Paragraph("Δ%", styles["cell_bold"]),
+    ]
+    rows: list[list] = [header]
+
+    totals = {name: 0.0 for name in brands}
+    grand = 0.0
+    for _, row in data.city_mtd.iterrows():
+        cells = [Paragraph(str(row["city"]), styles["cell"])]
+        row_total = 0.0
+        for name in brands:
+            value = float(row.get(name, 0.0) or 0.0)
+            totals[name] += value
+            row_total += value
+            cells.append(Paragraph(_fmt_mt(value), styles["cell_right"]))
+        ams = float(row.get("ams", 0.0) or 0.0)
+        grand += row_total
+        cells.append(Paragraph(_fmt_mt(row_total), styles["cell_right"]))
+        cells.append(Paragraph(_fmt_mt(ams), styles["cell_right"]))
+        cells.append(_pct_paragraph(row_total, ams, styles))
+        rows.append(cells)
+
+    total_ams = float(data.city_mtd_ams.get("total", 0.0))
+    total_row = [Paragraph("Total", styles["cell_bold_dark"])]
+    for name in brands:
+        total_row.append(Paragraph(_fmt_mt(totals[name]), styles["cell_right"]))
+    total_row.append(Paragraph(_fmt_mt(grand), styles["cell_right"]))
+    total_row.append(Paragraph(_fmt_mt(total_ams), styles["cell_right"]))
+    total_row.append(_pct_paragraph(grand, total_ams, styles))
+    rows.append(total_row)
+
+    ams_row = [Paragraph("AMS (3M)", styles["cell_bold_dark"])]
+    for name in brands:
+        ams_row.append(
+            Paragraph(_fmt_mt(float(data.city_mtd_ams.get(name, 0.0))), styles["cell_right"])
+        )
+    ams_row.append(Paragraph(_fmt_mt(total_ams), styles["cell_right"]))
+    ams_row.append(Paragraph("—", styles["cell_right"]))
+    ams_row.append(Paragraph("—", styles["cell_right"]))
+    rows.append(ams_row)
+
+    col_widths = [24 * mm] + [22 * mm] * len(brands) + [20 * mm, 18 * mm, 14 * mm]
+    table = Table(rows, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
+    total_idx = len(rows) - 2
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("GRID", (0, 0), (-1, -1), 0.4, LINE),
+        ("BACKGROUND", (0, total_idx), (-1, total_idx), colors.Color(0.86, 0.91, 0.88)),
+        ("LINEABOVE", (0, total_idx), (-1, total_idx), 1.0, BRAND),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.88, 0.92, 0.95)),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT),
+    ]
+    for i in range(1, total_idx):
+        if i % 2 == 0:
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    table.setStyle(TableStyle(style_cmds))
     return table
 
 
@@ -621,6 +772,11 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             f"(latest date in workbook treated as current)<br/>"
             f"Month-to-date window: {data.month_start.strftime('%d %b %Y')} "
             f"to {data.report_date.strftime('%d %b %Y')}<br/>"
+            f"Avg Last 30 Days window: {data.trailing_30_start.strftime('%d %b %Y')} "
+            f"to {data.report_date.strftime('%d %b %Y')} "
+            f"(sum ÷ 30)<br/>"
+            f"AMS months: {', '.join(data.ams_months) if data.ams_months else 'n/a'} "
+            f"(mean of those monthly totals)<br/>"
             f"Source: {data.source_path.name} · {clients_note}",
             styles["meta"],
         ),
@@ -628,16 +784,16 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         _summary_table(data, styles),
         Spacer(1, 5 * mm),
         Paragraph("Daily Sales by City (MT)", styles["section"]),
-        _city_brand_table(data.city_daily, styles),
+        _city_daily_table(data, styles),
         Spacer(1, 5 * mm),
         Paragraph("Month-to-Date Sales by City (MT)", styles["section"]),
-        _city_brand_table(data.city_mtd, styles),
+        _city_mtd_table(data, styles),
         Spacer(1, 4 * mm),
         Paragraph(
-            "City rows use the client master <b>City-Filter</b> column and are sorted by total MT (high → low). "
-            "Category summary follows Eva Consumer → Eva Bulk → Maan Consumer → Maan Bulk → "
-            "Cusine King → Shortening → Bulk Oil → Meal → Byproducts. "
-            "Detail is sectioned by product type (and city for consumer/bulk/cuisine brands).",
+            "Δ% is green when current is above the average baseline, red when below, "
+            "and — when the baseline is zero (e.g. no prior-month history loaded yet). "
+            "ADS = average daily sales over the last 30 days; AMS = average monthly sales "
+            "over the prior 3 full months. City tables are sorted by total MT (high → low).",
             styles["meta"],
         ),
         NextPageTemplate("detail"),

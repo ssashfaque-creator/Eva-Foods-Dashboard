@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import calendar
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,9 @@ CITY_DETAIL_CATEGORIES = (
 class CategorySummaryRow:
     category1: str
     daily_mt: float
+    avg_30d_mt: float
     mtd_mt: float
+    ams_mt: float
 
 
 @dataclass(frozen=True)
@@ -74,12 +77,18 @@ class SalesReportData:
     report_date: date
     month_start: date
     month_end: date
+    trailing_30_start: date
+    ams_months: tuple[str, ...]
     category_summary: list[CategorySummaryRow]
     city_daily: pd.DataFrame
     city_mtd: pd.DataFrame
+    city_daily_ads: dict[str, float]
+    city_mtd_ams: dict[str, float]
     daily_sales: pd.DataFrame
     total_daily_mt: float
     total_mtd_mt: float
+    total_avg_30d_mt: float
+    total_ams_mt: float
 
 
 def _to_date(value: Any) -> date | None:
@@ -280,6 +289,35 @@ def _category1_sort_key(name: str) -> tuple[int, str]:
         return (len(CATEGORY1_ORDER), name)
 
 
+def _prior_three_month_ranges(current: date) -> list[tuple[date, date]]:
+    """Full calendar months immediately before the report month (oldest → newest)."""
+    year, month = current.year, current.month
+    ranges: list[tuple[date, date]] = []
+    for _ in range(3):
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+        start = date(year, month, 1)
+        end = date(year, month, calendar.monthrange(year, month)[1])
+        ranges.append((start, end))
+    ranges.reverse()
+    return ranges
+
+
+def pct_change(current: float, baseline: float) -> float | None:
+    if baseline == 0:
+        return None
+    return (current - baseline) / baseline * 100.0
+
+
+def _sum_by_category(frame: pd.DataFrame) -> dict[str, float]:
+    if frame.empty:
+        return {}
+    grouped = frame.groupby("category1")["effective_mt"].sum()
+    return {str(k): float(v) for k, v in grouped.items()}
+
+
 def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
     brands = list(CITY_BRAND_COLUMNS)
     scoped = frame[frame["category1"].isin(brands)].copy()
@@ -297,7 +335,6 @@ def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     pivot["total"] = pivot[brands].sum(axis=1)
-    # Highest total MT first
     pivot = pivot.sort_values(
         ["total", "city"], ascending=[False, True], kind="mergesort"
     ).reset_index(drop=True)
@@ -341,7 +378,6 @@ def prepare_report_data(
 
     merged["city"] = merged["city"].fillna("").astype(str).str.strip()
     merged["client_type"] = merged["client_type"].fillna("").astype(str).str.strip()
-    # Detail "Category" column shows client type when available
     merged["detail_category"] = merged["client_type"].where(
         merged["client_type"] != "", "Unmapped"
     )
@@ -360,36 +396,103 @@ def prepare_report_data(
 
     month_start = current.replace(day=1)
     month_end = available_dates[-1]
+    trailing_30_start = current - timedelta(days=29)
+    prior_months = _prior_three_month_ranges(current)
+    ams_labels = tuple(start.strftime("%b %Y") for start, _ in prior_months)
+
     month_mask = (merged["date"] >= month_start) & (merged["date"] <= current)
     daily_mask = merged["date"] == current
+    trailing_mask = (merged["date"] >= trailing_30_start) & (merged["date"] <= current)
 
     mtd = merged.loc[month_mask]
     daily = merged.loc[daily_mask].copy()
+    trailing_30 = merged.loc[trailing_mask]
 
-    mtd_by_cat = mtd.groupby("category1", as_index=False)["effective_mt"].sum()
-    daily_by_cat = daily.groupby("category1", as_index=False)["effective_mt"].sum()
-    summary = mtd_by_cat.merge(
-        daily_by_cat,
-        on="category1",
-        how="outer",
-        suffixes=("_mtd", "_daily"),
-    ).fillna(0.0)
-    summary["_ord"] = summary["category1"].map(lambda n: _category1_sort_key(n)[0])
-    summary = summary.sort_values(["_ord", "category1"], kind="mergesort").reset_index(
-        drop=True
+    # Prior 3 full months (often empty until history is loaded)
+    prior_frames = []
+    for start, end in prior_months:
+        prior_frames.append(
+            merged.loc[(merged["date"] >= start) & (merged["date"] <= end)]
+        )
+    prior_all = (
+        pd.concat(prior_frames, ignore_index=True) if prior_frames else merged.iloc[0:0]
     )
 
+    mtd_by_cat = _sum_by_category(mtd)
+    daily_by_cat = _sum_by_category(daily)
+    # Average daily MT over a fixed 30-day calendar window (zeros for missing days)
+    trailing_by_cat = {
+        key: value / 30.0 for key, value in _sum_by_category(trailing_30).items()
+    }
+    # AMS = mean of the three prior monthly totals
+    ams_by_cat: dict[str, float] = {}
+    monthly_cat_totals: list[dict[str, float]] = [
+        _sum_by_category(frame) for frame in prior_frames
+    ]
+    all_cats = set(mtd_by_cat) | set(daily_by_cat) | set(trailing_by_cat)
+    for month_totals in monthly_cat_totals:
+        all_cats.update(month_totals)
+    for cat in all_cats:
+        ams_by_cat[cat] = (
+            sum(month_totals.get(cat, 0.0) for month_totals in monthly_cat_totals) / 3.0
+        )
+
+    summary_names = sorted(all_cats, key=_category1_sort_key)
     category_summary = [
         CategorySummaryRow(
-            category1=row["category1"],
-            daily_mt=float(row["effective_mt_daily"]),
-            mtd_mt=float(row["effective_mt_mtd"]),
+            category1=name,
+            daily_mt=float(daily_by_cat.get(name, 0.0)),
+            avg_30d_mt=float(trailing_by_cat.get(name, 0.0)),
+            mtd_mt=float(mtd_by_cat.get(name, 0.0)),
+            ams_mt=float(ams_by_cat.get(name, 0.0)),
         )
-        for _, row in summary.iterrows()
+        for name in summary_names
+        if name in CATEGORY1_ORDER or name in daily_by_cat or name in mtd_by_cat
     ]
+    # Keep configured order, then any extras
+    ordered = [row for name in CATEGORY1_ORDER for row in category_summary if row.category1 == name]
+    extras = [row for row in category_summary if row.category1 not in CATEGORY1_ORDER]
+    category_summary = ordered + extras
 
     city_daily = _city_brand_pivot(daily)
     city_mtd = _city_brand_pivot(mtd)
+
+    # City-level trailing 30-day average of daily TOTAL sales
+    trailing_city = _city_brand_pivot(trailing_30)
+    trailing_city_avg = {
+        str(row["city"]): float(row["total"]) / 30.0
+        for _, row in trailing_city.iterrows()
+    }
+    city_daily["avg_30d"] = city_daily["city"].map(
+        lambda c: float(trailing_city_avg.get(str(c), 0.0))
+    )
+
+    # ADS row: brand + total average daily sales over last 30 days
+    brands = list(CITY_BRAND_COLUMNS)
+    city_daily_ads = {
+        brand: float(trailing_by_cat.get(brand, 0.0)) for brand in brands
+    }
+    city_daily_ads["total"] = float(sum(city_daily_ads.values()))
+
+    # City-level AMS for prior 3 months (mean monthly total for that city)
+    prior_city_months = [_city_brand_pivot(frame) for frame in prior_frames]
+    city_ams_map: dict[str, float] = {}
+    all_cities = set(city_mtd["city"].astype(str)) if len(city_mtd) else set()
+    for pivot in prior_city_months:
+        all_cities.update(pivot["city"].astype(str).tolist())
+    for city_name in all_cities:
+        month_totals = []
+        for pivot in prior_city_months:
+            match = pivot.loc[pivot["city"].astype(str) == city_name, "total"]
+            month_totals.append(float(match.iloc[0]) if len(match) else 0.0)
+        city_ams_map[city_name] = sum(month_totals) / 3.0
+    city_mtd["ams"] = city_mtd["city"].map(
+        lambda c: float(city_ams_map.get(str(c), 0.0))
+    )
+
+    # AMS footer row for brand columns
+    city_mtd_ams = {brand: float(ams_by_cat.get(brand, 0.0)) for brand in brands}
+    city_mtd_ams["total"] = float(sum(city_mtd_ams.values()))
 
     daily_sales = daily[
         [
@@ -425,16 +528,27 @@ def prepare_report_data(
         ["_ptype_ord", "city", "party", "product"], kind="mergesort"
     ).drop(columns=["_ptype_ord"]).reset_index(drop=True)
 
+    total_daily = float(daily_sales["mt_qty"].sum())
+    total_mtd = float(sum(row.mtd_mt for row in category_summary))
+    total_avg_30d = float(sum(row.avg_30d_mt for row in category_summary))
+    total_ams = float(sum(row.ams_mt for row in category_summary))
+
     return SalesReportData(
         source_path=path,
         clients_path=clients_file,
         report_date=current,
         month_start=month_start,
         month_end=month_end,
+        trailing_30_start=trailing_30_start,
+        ams_months=ams_labels,
         category_summary=category_summary,
         city_daily=city_daily,
         city_mtd=city_mtd,
+        city_daily_ads=city_daily_ads,
+        city_mtd_ams=city_mtd_ams,
         daily_sales=daily_sales,
-        total_daily_mt=float(daily_sales["mt_qty"].sum()),
-        total_mtd_mt=float(sum(row.mtd_mt for row in category_summary)),
+        total_daily_mt=total_daily,
+        total_mtd_mt=total_mtd,
+        total_avg_30d_mt=total_avg_30d,
+        total_ams_mt=total_ams,
     )
