@@ -153,25 +153,26 @@ DOWN = colors.Color(0.70, 0.12, 0.12)
 
 
 def _fmt_mt(value: float) -> str:
-    return f"{value:,.3f}"
+    """Display MT to 1 decimal; value itself is not pre-rounded for totals."""
+    return f"{value:,.1f}"
 
 
 def _fmt_qty(value: float) -> str:
-    if abs(value - round(value)) < 1e-9:
-        return f"{int(round(value)):,}"
-    return f"{value:,.2f}"
+    return f"{int(round(value)):,}"
 
 
 def _fmt_money(value: float) -> str:
-    return f"{value:,.2f}"
+    """Display money/rate figures as whole numbers."""
+    return f"{int(round(value)):,}"
 
 
 def _fmt_pct(change: float | None) -> tuple[str, colors.Color]:
     if change is None:
         return ("—", MUTED)
     color = UP if change >= 0 else DOWN
-    sign = "+" if change > 0 else ""
-    return (f"{sign}{change:.1f}%", color)
+    whole = int(round(change))
+    sign = "+" if whole > 0 else ""
+    return (f"{sign}{whole}%", color)
 
 
 def _pct_paragraph(
