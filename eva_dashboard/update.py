@@ -132,8 +132,18 @@ def _pip_executable(install_root: Path) -> list[str]:
 
 
 def reinstall_package(install_root: Path) -> None:
-    cmd = [*_pip_executable(install_root), "install", "-e", str(install_root)]
-    subprocess.run(cmd, check=True, cwd=str(install_root))
+    pip = _pip_executable(install_root)
+    # Force editable reinstall so site-packages cannot keep a stale copy
+    subprocess.run(
+        [*pip, "install", "-e", str(install_root), "--force-reinstall", "--no-deps"],
+        check=True,
+        cwd=str(install_root),
+    )
+    subprocess.run(
+        [*pip, "install", "-e", str(install_root)],
+        check=True,
+        cwd=str(install_root),
+    )
 
 
 def run_update(

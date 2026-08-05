@@ -44,27 +44,36 @@ def _save_upload(upload) -> Path:
     return Path(tmp.name)
 
 
+def _cell_str(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def _for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Make a frame Arrow/Streamlit-safe (mixed object columns → strings)."""
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    for col in out.columns:
-        series = out[col]
-        if pd.api.types.is_object_dtype(series):
-            out[col] = series.map(
-                lambda v: ""
-                if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v)
-                else str(v)
-            )
-    return out
+    """Make a frame Arrow/Streamlit-safe by stringifying every cell."""
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+    data = {col: [_cell_str(v) for v in df[col].tolist()] for col in df.columns}
+    return pd.DataFrame(data)
 
 
 def _dataframe(df: pd.DataFrame, **kwargs) -> None:
     """Display a dataframe safely for Streamlit/Arrow."""
     kwargs.pop("use_container_width", None)
-    kwargs.setdefault("width", "stretch")
-    st.dataframe(_for_display(df), **kwargs)
+    safe = _for_display(df)
+    try:
+        st.dataframe(safe, width="stretch", **kwargs)
+    except TypeError:
+        # Older Streamlit without width=
+        st.dataframe(safe, **kwargs)
 
 
 def _fmt_result(result: dict) -> str:
@@ -454,8 +463,8 @@ def main() -> None:
 
     st.title("Eva Foods Dashboard")
     st.caption(
-        f"v{__version__} · Data folder: `{data_root()}` · Database: `{db_path().name}` · "
-        "Update: `eva-dashboard update`"
+        f"v{__version__} · Data: `{data_root()}` · DB: `{db_path().name}` · "
+        f"Update: `eva-dashboard update` · App: `{Path(__file__).resolve()}`"
     )
 
     tab_sales, tab_costs, tab_clients, tab_reports = st.tabs(

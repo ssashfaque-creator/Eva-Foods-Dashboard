@@ -12,3 +12,10 @@ def test_for_display_stringifies_mixed_object_column() -> None:
     out = _for_display(frame)
     assert list(out["Type"]) == ["Eva Distributors", "12", ""]
     assert all(isinstance(v, str) for v in out["Type"])
+
+
+def test_for_display_stringifies_all_columns() -> None:
+    frame = pd.DataFrame({"n": [1, 2], "Type": ["x", 9]})
+    out = _for_display(frame)
+    assert list(out["n"]) == ["1", "2"]
+    assert list(out["Type"]) == ["x", "9"]
