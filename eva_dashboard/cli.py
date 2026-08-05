@@ -177,6 +177,12 @@ def cmd_app(args: argparse.Namespace) -> int:
         os.environ["EVA_DATA_DIR"] = str(args.data_dir.expanduser().resolve())
 
     app_path = Path(__file__).resolve().parent / "app.py"
+    print(f"Eva Foods Dashboard v{__version__}")
+    print(f"Launching: {app_path}")
+    if not app_path.exists():
+        print(f"error: app not found at {app_path}", file=sys.stderr)
+        return 1
+
     sys.argv = [
         "streamlit",
         "run",

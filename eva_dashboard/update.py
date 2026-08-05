@@ -133,7 +133,25 @@ def _pip_executable(install_root: Path) -> list[str]:
 
 def reinstall_package(install_root: Path) -> None:
     pip = _pip_executable(install_root)
-    # Force editable reinstall so site-packages cannot keep a stale copy
+    venv = install_root / ".venv"
+    if venv.exists():
+        # Remove stale non-editable copies that shadow the project source
+        for pattern in (
+            "**/site-packages/eva_dashboard",
+            "**/site-packages/eva_dashboard-*.dist-info",
+            "**/site-packages/eva_dashboard*.egg-link",
+            "**/site-packages/__editable__.eva_dashboard*",
+            "**/site-packages/__editable___eva_dashboard*",
+            "**/eva_dashboard*.egg-info",
+        ):
+            for path in venv.glob(pattern):
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.exists():
+                    path.unlink(missing_ok=True)
+        for cache in (install_root / "eva_dashboard").rglob("__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+
     subprocess.run(
         [*pip, "install", "-e", str(install_root), "--force-reinstall", "--no-deps"],
         check=True,
