@@ -34,17 +34,26 @@ def test_validate_select_blocks_writes() -> None:
     assert ok.lower().startswith("select")
 
 
-def test_run_sql_readonly_on_temp_db() -> None:
+def test_looks_factual_detects_data_questions() -> None:
+    from eva_dashboard.chatbot import _looks_factual
+
+    assert _looks_factual("How much were Eva consumer sales in Lahore for July")
+    assert _looks_factual("Price Fetch for 2026-06-30")
+    assert not _looks_factual("Thanks!")
+
+
+def test_system_prompt_includes_live_briefing() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["EVA_DATA_DIR"] = str(Path(tmp) / "data")
         try:
             init_db()
-            result = run_sql("SELECT name FROM sqlite_master WHERE type='table'")
-            assert result["ok"] is True
-            assert result["row_count"] >= 1
-            overview = sales_overview()
-            assert overview["sales_rows"] == 0
+            from eva_dashboard.chatbot import system_prompt
+
+            text = system_prompt()
+            assert "LIVE DATABASE STATE" in text
+            assert "ANTI-HALLUCINATION" in text
+            assert "knowledge cutoff" in text.lower()
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

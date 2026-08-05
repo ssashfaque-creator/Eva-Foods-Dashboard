@@ -160,11 +160,13 @@ MT-weighted Incl/kg; Bulk Oil × 37.3246 → per maund; others per kg.
 ## Chatbot guidance
 
 When answering:
-1. Prefer SQL against `eva.db` for factual numbers.  
-2. Use `city_filter` for geography; never confuse with `city`.  
-3. Join parties with normalized names.  
-4. State the date range used.  
-5. For Price Fetch / AMS / ADS, apply the formulas above — do not invent alternatives.  
-6. If category map is empty or products are unmapped, say so clearly.  
-7. Never modify the database (read-only).  
-8. Currency figures are typically PKR; MT is metric tons.
+1. Prefer SQL / tools against `eva.db` for factual numbers — never invent.  
+2. Trust the **live sales date range** in the system prompt (often 2025–2026).  
+3. Never mention an OpenAI knowledge cutoff for this app’s data.  
+4. Use `city_filter` for geography; never confuse with `city`.  
+5. Join parties with normalized names.  
+6. State the date range used.  
+7. For Price Fetch / AMS / ADS, apply the formulas above.  
+8. If category map is empty or products are unmapped, say so clearly.  
+9. Never modify the database (read-only).  
+10. Currency figures are typically PKR; MT is metric tons.

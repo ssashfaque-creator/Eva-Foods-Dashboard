@@ -457,9 +457,8 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.markdown(
-        '<p class="eva-subtle">Ask questions about sales, cities, clients, costs, '
-        "Price Fetch, or ask for a comprehensive summary for a date. "
-        "The assistant uses GPT-4o with read-only access to your SQLite database.</p>",
+        '<p class="eva-subtle">Answers come from your <b>live Eva database</b> only '
+        "(not ChatGPT training memory). The assistant must query SQLite before giving numbers.</p>",
         unsafe_allow_html=True,
     )
 
@@ -499,9 +498,15 @@ def page_chat() -> None:
         m2.metric("Category map", f"{overview['products_in_category_map']:,}")
         m3.metric("Clients", f"{overview['clients']:,}")
         m4.metric(
-            "Sales dates",
+            "Sales dates in DB",
             f"{overview['sales_date_min'] or '—'} → {overview['sales_date_max'] or '—'}",
         )
+        if overview.get("months_available"):
+            months = ", ".join(m["month"] for m in overview["months_available"])
+            st.success(
+                f"Live data months the chatbot can see: **{months}**. "
+                "Ask about these dates — it will query the database."
+            )
     except Exception as exc:
         st.warning(f"Could not load DB overview: {exc}")
 
