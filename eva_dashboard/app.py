@@ -157,7 +157,7 @@ def page_sales() -> None:
     with cat_col:
         st.markdown("#### Upload categories")
         st.caption(
-            "Columns: **Product**, **Category 1**, **Category 2**. "
+            "Columns: **Product**, **Business Unit**, **Oil Type**, **Packing Category**. "
             "New file replaces the previous map."
         )
         cat_cols = st.columns(2)
@@ -172,7 +172,7 @@ def page_sales() -> None:
             "Category Excel (.xlsx / .csv)",
             type=["xlsx", "csv"],
             key="category_upload",
-            help="Header row with Product, Category 1, Category 2.",
+            help="Header: Product, Business Unit, Oil Type, Packing Category.",
         )
         if cat_upload is not None and st.button(
             "Import category file (replace)", type="primary", key="category_btn"
@@ -190,11 +190,25 @@ def page_sales() -> None:
     if category_count() > 0:
         with st.expander("Current category map", expanded=False):
             try:
-                _dataframe(
-                    load_category_map_from_db(),
-                    height=320,
-                    hide_index=True,
+                cmap = load_category_map_from_db().rename(
+                    columns={
+                        "product": "Product",
+                        "business_unit": "Business Unit",
+                        "oil_type": "Oil Type",
+                        "packing_category": "Packing Category",
+                    }
                 )
+                show_cols = [
+                    c
+                    for c in (
+                        "Product",
+                        "Business Unit",
+                        "Oil Type",
+                        "Packing Category",
+                    )
+                    if c in cmap.columns
+                ]
+                _dataframe(cmap[show_cols], height=320, hide_index=True)
             except Exception as exc:
                 st.warning(str(exc))
 
@@ -394,8 +408,8 @@ def page_reports() -> None:
 
     if category_count() == 0:
         st.warning(
-            "No category file loaded. Upload Product / Category 1 / Category 2 "
-            "on the Sales data tab before generating a report."
+            "No category file loaded. Upload Product / Business Unit / Oil Type / "
+            "Packing Category on the Sales data tab before generating a report."
         )
 
     c1, c2, c3 = st.columns([2, 1, 1])
@@ -513,7 +527,7 @@ def page_chat() -> None:
     with st.expander("Example questions"):
         st.markdown(
             """
-- What was total MT by Category 1 on the latest sales date?
+- What was total MT by Business Unit on the latest sales date?
 - Top 10 cities by Eva Consumer MT this month
 - Price Fetch for Eva Distributors (Oil / Ghee) on 2026-06-30
 - Which products in sales are missing from the category file?

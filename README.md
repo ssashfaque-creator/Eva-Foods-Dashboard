@@ -99,7 +99,7 @@ eva-dashboard app
 - Upload the daily sales `.xlsx` (same format as before: **Sales** header on row 5).
 - New rows are **appended**; the file is renamed/timestamped and stored under `data/uploads/sales/`.
 - The same file content is **not imported twice** (SHA-256 hash).
-- Upload a **category** Excel/CSV with columns **Product**, **Category 1**, **Category 2**. Each upload **replaces** the previous category map (required for reports).
+- Upload a **category** Excel/CSV with columns **Product**, **Business Unit**, **Oil Type**, **Packing Category**. Each upload **replaces** the previous category map (required for reports).
 - Browse all sales **newest first**, with search and date filters.
 - **All Excel columns** are stored (in `payload_json`) for future use.
 
@@ -149,7 +149,7 @@ eva-dashboard costs product_costs.xlsx packing_costs.xlsx -o output/total_factor
 ## Excel inputs
 
 1. **Sales workbook** — Sales sheet (header on row 5)  
-2. **Category file** — columns `Product`, `Category 1`, `Category 2` (upload on Sales data tab; replaces previous map)  
+2. **Category file** — columns `Product`, `Business Unit`, `Oil Type`, `Packing Category` (upload on Sales data tab; replaces previous map)  
 3. **Clients workbook** — `City-Filter` is the report geography  
 4. **Product cost factors** — latest `Date` per client type + product; sum `Cost` lines  
 5. **Packing costs** — latest per product (`Date` or last row); join on `ProdID`

@@ -11,13 +11,13 @@ from eva_dashboard.db import connect, init_db
 from eva_dashboard.product_language import resolve_product_language
 
 
-def _seed_categories(products: list[tuple[str, str, str]]) -> None:
+def _seed_categories(products: list[tuple[str, str, str, str]]) -> None:
     init_db()
     with connect() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO category "
-            "(product, category_1, category_2, payload_json, updated_at) "
-            "VALUES (?, ?, ?, '{}', datetime('now'))",
+            "(product, category_1, category_2, packing_category, payload_json, updated_at) "
+            "VALUES (?, ?, ?, ?, '{}', datetime('now'))",
             products,
         )
         conn.commit()
@@ -30,15 +30,15 @@ def test_resolve_core_aliases() -> None:
         try:
             _seed_categories(
                 [
-                    ("Eva Canola Oil (StandUpPouch)", "Eva Consumer", "Canola"),
-                    ("Eva VTF Banaspati 16 Kg Tin", "Eva Consumer", "VTF"),
-                    ("Eva VTF Banaspati 1x5 Pouch", "Eva Consumer", "VTF"),
-                    ("BakeRight Shortening 16 Kgs Ctn", "Shortening", ""),
-                    ("Cuisine King (16 Ltr Tin)", "Cusine King", ""),
-                    ("Maan Banaspati 16 Kgs Tin", "Maan Bulk", "Ghee"),
-                    ("Maan Cooking Oil 16 Ltrs. Tin", "Maan Bulk", "Oil"),
-                    ("Eva Cooking Oil 1x5 Pillow Pouch", "Eva Consumer", "Cooking"),
-                    ("Eva Sunflower Oil 5 Ltr Pet Bottle", "Eva Consumer", "Sunflower"),
+                    ("Eva Canola Oil (StandUpPouch)", "Eva Consumer", "Eva Canola", "Stand up"),
+                    ("Eva VTF Banaspati 16 Kg Tin", "Eva Bulk", "Eva VTF Bulk", "Tin"),
+                    ("Eva VTF Banaspati 1x5 Pouch", "Eva Consumer", "Eva VTF", "Pouch"),
+                    ("BakeRight Shortening 16 Kgs Ctn", "Shortening", "Shortening", "Shortening"),
+                    ("Cuisine King (16 Ltr Tin)", "Cusine King", "Cuisine King", "Tin"),
+                    ("Maan Banaspati 16 Kgs Tin", "Maan Bulk", "Maan Bulk", "Tin"),
+                    ("Maan Cooking Oil 16 Ltrs. Tin", "Maan Bulk", "Maan Bulk", "Tin"),
+                    ("Eva Cooking Oil 1x5 Pillow Pouch", "Eva Consumer", "Eva Cooking", "Pillow"),
+                    ("Eva Sunflower Oil 5 Ltr Pet Bottle", "Eva Consumer", "Eva Sunflower", "Pet bottle"),
                 ]
             )
 
@@ -60,6 +60,8 @@ def test_resolve_core_aliases() -> None:
                 )
                 top = result["matches"][0]
                 assert top.get("category1") is not None
+                assert top.get("business_unit") is not None
+                assert "packing_category" in top
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
@@ -74,10 +76,10 @@ def test_16_ltr_vs_16_kg_rule() -> None:
         try:
             _seed_categories(
                 [
-                    ("Maan Banaspati 16 Kgs Tin", "Maan Bulk", "Ghee"),
-                    ("Maan Cooking Oil 16 Ltrs. Tin", "Maan Bulk", "Oil"),
-                    ("Eva Cooking Oil (16 Ltr Tin)", "Eva Consumer", "Cooking"),
-                    ("Eva Canola Oil 16 Ltr Tin", "Eva Consumer", "Canola"),
+                    ("Maan Banaspati 16 Kgs Tin", "Maan Bulk", "Maan Bulk", "Tin"),
+                    ("Maan Cooking Oil 16 Ltrs. Tin", "Maan Bulk", "Maan Bulk", "Tin"),
+                    ("Eva Cooking Oil (16 Ltr Tin)", "Eva Bulk", "Eva Bulk", "Tin"),
+                    ("Eva Canola Oil 16 Ltr Tin", "Eva Bulk", "Eva Bulk", "16 ltr / 16 Kg"),
                 ]
             )
             maan_kg = resolve_product_language("maan 16 kg", limit=5)
@@ -104,9 +106,11 @@ def test_system_prompt_includes_product_glossary() -> None:
             init_db()
             text = system_prompt()
             assert "PRODUCT LANGUAGE GLOSSARY" in text
+            assert "Business Unit" in text or "TAXONOMY" in text
             assert "VTF bulk" in text or "vtf bulk" in text
             assert "markdown TABLES" in text or "markdown tables" in text.lower()
             assert "resolve_product_language" in text
+            assert "Packing Category" in text or "packing_category" in text
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

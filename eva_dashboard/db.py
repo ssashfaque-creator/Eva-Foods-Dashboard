@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS category (
     product TEXT PRIMARY KEY,
     category_1 TEXT,
     category_2 TEXT,
+    packing_category TEXT,
     payload_json TEXT,
     updated_at TEXT NOT NULL
 );
@@ -164,10 +165,18 @@ CREATE TABLE IF NOT EXISTS factor_costs (
 """
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive migrations for existing eva.db files."""
+    cat_cols = {row[1] for row in conn.execute("PRAGMA table_info(category)").fetchall()}
+    if cat_cols and "packing_category" not in cat_cols:
+        conn.execute("ALTER TABLE category ADD COLUMN packing_category TEXT")
+
+
 def init_db(path: Path | None = None) -> Path:
     db = Path(path) if path else db_path()
     with connect(db) as conn:
         conn.executescript(SCHEMA_SQL)
+        _migrate_schema(conn)
     return db
 
 

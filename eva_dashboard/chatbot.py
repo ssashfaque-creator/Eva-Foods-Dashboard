@@ -71,10 +71,30 @@ def sales_overview() -> dict[str, Any]:
         ).fetchall()
         categories = conn.execute(
             """
-            SELECT category_1, COUNT(*) AS products
+            SELECT category_1 AS business_unit, COUNT(*) AS products
             FROM category
             GROUP BY category_1
             ORDER BY category_1
+            """
+        ).fetchall()
+        oil_types = conn.execute(
+            """
+            SELECT category_2 AS oil_type, COUNT(*) AS products
+            FROM category
+            WHERE category_2 IS NOT NULL AND trim(category_2) != ''
+            GROUP BY category_2
+            ORDER BY products DESC, category_2
+            LIMIT 25
+            """
+        ).fetchall()
+        packing = conn.execute(
+            """
+            SELECT packing_category, COUNT(*) AS products
+            FROM category
+            WHERE packing_category IS NOT NULL AND trim(packing_category) != ''
+            GROUP BY packing_category
+            ORDER BY products DESC, packing_category
+            LIMIT 25
             """
         ).fetchall()
         client_types = conn.execute(
@@ -120,6 +140,9 @@ def sales_overview() -> dict[str, Any]:
         "distinct_sales_days": dates["n_days"],
         "months_available": [dict(r) for r in months],
         "categories": [dict(r) for r in categories],
+        "business_units": [dict(r) for r in categories],
+        "oil_types": [dict(r) for r in oil_types],
+        "packing_categories": [dict(r) for r in packing],
         "client_types": [dict(r) for r in client_types],
         "top_cities": [dict(r) for r in sample_cities],
         "recent_days": [dict(r) for r in recent],
@@ -139,7 +162,15 @@ def live_database_briefing() -> str:
         f"{m['month']} ({m['mt_sum']} MT)" for m in ov.get("months_available") or []
     ) or "none"
     cats = ", ".join(
-        f"{c['category_1']}×{c['products']}" for c in ov.get("categories") or []
+        f"{c.get('business_unit') or c.get('category_1')}×{c['products']}"
+        for c in ov.get("business_units") or ov.get("categories") or []
+    ) or "none"
+    oils = ", ".join(
+        f"{c['oil_type']}×{c['products']}" for c in (ov.get("oil_types") or [])[:12]
+    ) or "none"
+    packs = ", ".join(
+        f"{c['packing_category']}×{c['products']}"
+        for c in (ov.get("packing_categories") or [])[:12]
     ) or "none"
     cities = ", ".join(
         f"{c['city']}" for c in (ov.get("top_cities") or [])[:10]
@@ -151,7 +182,10 @@ def live_database_briefing() -> str:
 - Sales date range: {ov['sales_date_min'] or 'n/a'} → {ov['sales_date_max'] or 'n/a'}
 - Distinct sales days: {ov['distinct_sales_days']}
 - Months present: {months}
-- Category map products: {ov['products_in_category_map']:,} ({cats})
+- Category map products: {ov['products_in_category_map']:,}
+- Business Units: {cats}
+- Oil Types (sample): {oils}
+- Packing Categories (sample): {packs}
 - Clients: {ov['clients']:,}
 - Factor cost rows: {ov['factor_cost_rows']:,}
 - Example cities (City-Filter): {cities}
@@ -181,7 +215,10 @@ CRITICAL ANTI-HALLUCINATION RULES:
 5. If the query returns zero rows, say so and show the SQL date filter you used + available range.
 6. Always state the exact date range used in the answer.
 7. Geography = clients.city_filter (City-Filter), joined via normalized party/client names.
-8. Product type = category.category_1 (e.g. 'Eva Consumer'), joined on exact product name.
+8. Product taxonomy = category table with three levels joined on exact product name:
+   - Business Unit → category.category_1 (e.g. Eva Consumer, Eva Bulk, Maan Bulk)
+   - Oil Type → category.category_2 (e.g. Eva Canola, Eva VTF, Maan Ghee)
+   - Packing Category → category.packing_category (e.g. Tin, Pet bottle, Stand up)
 9. Read-only only. Never claim you uploaded/changed data.
 10. Be useful: give MT, line counts, top parties, and short interpretation when asked for a report.
 
@@ -190,15 +227,15 @@ When the user names a product in casual speech ("VTF bulk", "canola standup", "c
 "maan 16 kg", "eva 16 ltr", "sun 5 pet", "shortening", "cusine king", etc.):
 1. Call resolve_product_language FIRST with their phrase.
 2. Use the returned exact `product` string in product_sales or in SQL `WHERE s.product = '…'`.
-3. Also use category1 / category2 from the resolver (or category table) when relevant.
+3. Always include Business Unit / Oil Type / Packing Category from the resolver or category join.
 4. Never invent product spellings — prefer exact names from tools / category table.
 5. Remember: 16 ltr ≈ oil; 16 kg ≈ ghee/banaspati.
 
 RESPONSE FORMAT (numeric answers):
 - Prefer markdown TABLES for numbers — not bullet lists of metrics.
 - Typical product answer table columns:
-  Product | Category 1 | Category 2 | MT | Qty | Incl GST/FED | Lines | Parties | Days
-- For rankings / city / category breakdowns use tables with clear headers.
+  Product | Business Unit | Oil Type | Packing | MT | Qty | Incl GST/FED | Lines | Parties | Days
+- For Business Unit / Oil Type / Packing breakdowns use tables with clear headers.
 - One short sentence of context (date range + which SKU resolved), then the table.
 - Optional second table for top parties. Avoid long bullet lists of figures.
 
@@ -206,7 +243,8 @@ HOW TO ANSWER COMMON QUESTIONS:
 - "How was VTF bulk in July?" → resolve_product_language("VTF bulk") then product_sales
 - "Canola standup pouch MTD" → resolve then product_sales (flagship = Eva Canola Oil (StandUpPouch))
 - "Eva Consumer sales in Lahore for July 2026"
-  → sales_by_city_and_category with category1='Eva Consumer', city='Lahore', …
+  → sales_by_city_and_category with category1/business_unit='Eva Consumer', city='Lahore', …
+- "MT by Oil Type" / "pet bottle sales" → run_sql grouping by category.category_2 or packing_category
 - "Full briefing for 30 Jun 2026" → report_snapshot(report_date='2026-06-30')
 - "What's in the database?" → get_sales_overview
 
@@ -281,7 +319,8 @@ def run_sql(sql: str, limit: int = MAX_SQL_ROWS) -> dict[str, Any]:
 
 def category_totals(date_from: str, date_to: str) -> dict[str, Any]:
     sql = """
-    SELECT COALESCE(c.category_1, '(unmapped)') AS category1,
+    SELECT COALESCE(c.category_1, '(unmapped)') AS business_unit,
+           COALESCE(c.category_1, '(unmapped)') AS category1,
            ROUND(SUM(
              CASE
                WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
@@ -516,7 +555,10 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "category_mt_totals",
-            "description": "MT by Category 1 for an inclusive YYYY-MM-DD range.",
+            "description": (
+                "MT by Business Unit (category_1) for an inclusive YYYY-MM-DD range. "
+                "Returns business_unit / category1 columns."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -533,8 +575,8 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "sales_by_city_and_category",
             "description": (
-                "MT + amount for one Category 1 in one City-Filter over a date range, "
-                "plus top parties. Use for questions like "
+                "MT + amount for one Business Unit (category_1) in one City-Filter "
+                "over a date range, plus top parties. Use for questions like "
                 "'Eva Consumer sales in Lahore for July 2026'."
             ),
             "parameters": {
@@ -542,7 +584,10 @@ TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "category1": {
                         "type": "string",
-                        "description": "Exact Category 1, e.g. Eva Consumer",
+                        "description": (
+                            "Exact Business Unit, e.g. Eva Consumer, Eva Bulk, "
+                            "Maan Consumer, Maan Bulk"
+                        ),
                     },
                     "city": {
                         "type": "string",

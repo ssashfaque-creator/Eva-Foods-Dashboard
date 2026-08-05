@@ -45,9 +45,11 @@ Key columns: `date`, `party`, `inv_no`, `srno`, `product`, `qty`, `unit`, `mes_q
 | Column | Meaning |
 |---|---|
 | `product` | PK — exact product name as in sales |
-| `category_1` | Brand / product type (Eva Consumer, Bulk Oil, …) |
-| `category_2` | Sub-type (Oil, Ghee, Meal, …) |
+| `category_1` | **Business Unit** — overall division (Eva Consumer, Eva Bulk, Maan Bulk, …) |
+| `category_2` | **Oil Type** — brand/variant line (Eva Canola, Eva VTF, Maan Ghee, …) |
+| `packing_category` | **Packing Category** — pack form (Tin, Pet bottle, Stand up, Jerry Can, …) |
 
+Upload file headers (required): `Product`, `Business Unit`, `Oil Type`, `Packing Category`.  
 Every category upload **replaces** the whole table.
 
 ### `clients` (upsert by ClientID)
@@ -86,17 +88,40 @@ factor_costs join to sales    = (resolved client type, sales.product)
 product_cost_lines.prod_id    = packing_cost_lines.prod_id  (for building factors)
 ```
 
-## Category 1 order (reports)
+## Business Unit order (reports)
+
+Formerly called Category 1. PDF summary / city pivots sort as:
 
 1. Eva Consumer  
 2. Eva Bulk  
 3. Maan Consumer  
 4. Maan Bulk  
-5. Cusine King *(spelling is intentional)*  
+5. Cusine King *(Excel spelling; "Cuisine King" normalizes to this)*  
 6. Shortening  
 7. Bulk Oil  
 8. Meal  
 9. Byproducts  
+
+## Oil Type & Packing (examples)
+
+**Oil Type** (`category_2`): Eva Canola, Eva Cooking, Eva Sunflower, Eva VTF, Eva VTF Bulk,
+Eva DGP, Eva Navy, Eva Bulk, Maan Ghee, Maan Bulk, Canola Oil, Olein, Fatty Acid, …
+
+**Packing Category**: Tin, Jerry Can, Pet bottle, Stand up, Pillow, Pouch, Bucket,
+`16 ltr / 16 Kg`, or commodity labels for bulk lines.
+
+Price Fetch Oil vs Ghee uses Oil Type:
+- Oil examples: Eva Cooking, Eva Canola, Eva Sunflower, Maan Oil, Eva Bulk, Eva Navy  
+- Ghee examples: Eva VTF, Eva VTF Bulk, Eva DGP, Maan Ghee  
+- Maan Bulk → Ghee if product is Maan Banaspati, else Oil
+
+## Category upload format
+
+| File | Sheet | Headers | Behavior |
+|---|---|---|---|
+| Categories | first sheet / CSV | `Product`, `Business Unit`, `Oil Type`, `Packing Category` | Full replace |
+
+Legacy `Product` / `Category 1` / `Category 2` files still parse (Packing blank).  
 
 Aliases on import: `Maan Consum` → `Maan Consumer`; `Cuisine King` → `Cusine King`.
 
@@ -126,17 +151,14 @@ PriceFetch  = (AmountPerKg − CostPerKg) × 37.3246
 Summary table by client type × (Eva/Maan × Oil/Ghee) is **MT-weighted** average of line Price Fetch.
 
 ### Oil / Ghee / brand classification
-- Oil Category 2 examples: Eva Cooking, Eva Canola, Eva Sunflower, Maan Oil, Eva Bulk  
-- Ghee Category 2 examples: Eva VTF, Eva VTF Bulk, Eva DGP, Maan Ghee  
-- Maan Bulk: product starting `Maan Banaspati` → Ghee; else Oil  
-- Industrial Bulk Oil (e.g. RBD Palm Olein) is **not** branded Oil/Ghee for Price Fetch  
+Uses **Oil Type** (`category_2`) — see “Oil Type & Packing” above.
 
 ### City brand columns (summary city tables)
 Only: Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk.  
 PDF shows top 10 cities + **Other** (remainder summed).
 
 ### Bulk average prices
-Categories: Bulk Oil, Byproducts, Meal, Shortening, Cusine King.  
+Business Units: Bulk Oil, Byproducts, Meal, Shortening, Cusine King.  
 MT-weighted Incl/kg; Bulk Oil × 37.3246 → per maund; others per kg.
 
 ## Excel upload formats
@@ -144,7 +166,7 @@ MT-weighted Incl/kg; Bulk Oil × 37.3246 → per maund; others per kg.
 | Upload | Sheet / file | Header | Notes |
 |---|---|---|---|
 | Sales | `Sales` | Excel row 5 | Daily append |
-| Categories | first sheet / CSV | `Product`, `Category 1`, `Category 2` | Full replace |
+| Categories | first sheet / CSV | `Product`, `Business Unit`, `Oil Type`, `Packing Category` | Full replace |
 | Clients | `ClientListReport` | Excel row 5 | Upsert by ClientID; needs `City-Filter` |
 | Product costs | `ProductCostFactors` | ~row 5 | Latest Date + PCFID per ClientType+ProdID; sum Cost |
 | Packing costs | first sheet | ProdID, Cost, … | Latest per ProdID |
@@ -172,7 +194,8 @@ When answering:
 10. Currency figures are typically PKR; MT is metric tons.  
 11. Resolve spoken product phrases via `resolve_product_language` before filtering `sales.product`.  
 12. Present numeric answers as **markdown tables**, not bullet lists of metrics.  
-13. Product speech rules: **16 ltr ≈ oil**, **16 kg ≈ ghee/banaspati**; VTF bulk = Eva VTF 16 Kg Tin only; canola standup pouch is the flagship canola SKU.
+13. Product speech rules: **16 ltr ≈ oil**, **16 kg ≈ ghee/banaspati**; VTF bulk = Eva VTF 16 Kg Tin only; canola standup pouch is the flagship canola SKU.  
+14. Taxonomy: **Business Unit** / **Oil Type** / **Packing Category** — always join `category` and label columns with these names in answers.
 
 ## Product language (spoken → exact)
 

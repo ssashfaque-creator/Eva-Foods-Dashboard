@@ -303,18 +303,37 @@ PRODUCT LANGUAGE RULES (Eva Foods team speech):
    - "Maan 16 kg" → Maan Banaspati / ghee 16 kg (tin or bucket).
 3. "StandUpPouch" / "standup" / "stand up" for Eva Canola is the FLAGSHIP / main canola
    product: exact name "Eva Canola Oil (StandUpPouch)".
-4. "VTF bulk" means ONLY "Eva VTF Banaspati 16 Kg Tin". All other VTF SKUs are consumer packs.
-5. "Pet" / "pet bottle" = PET bottle packs (3 Ltr / 5 Ltr).
-6. "Jerry can" / "J/Can" / "jerrycan" = jerry can packs.
-7. "Pillow" / "P.P" / "PP pouch" = pillow pouch.
-8. "Shortening" / "Bake Right" / "BakeRight" = BakeRight Shortening 16 Kgs Ctn.
+4. "VTF bulk" means ONLY "Eva VTF Banaspati 16 Kg Tin" (Business Unit Eva Bulk,
+   Oil Type Eva VTF Bulk). Other VTF SKUs are Eva Consumer packs.
+5. "Pet" / "pet bottle" = Packing Category Pet bottle (3 Ltr / 5 Ltr).
+6. "Jerry can" / "J/Can" / "jerrycan" = Packing Category Jerry Can.
+7. "Pillow" / "P.P" / "PP pouch" = Packing Category Pillow.
+8. "Shortening" / "Bake Right" / "BakeRight" = BakeRight Shortening 16 Kgs Ctn
+   (Business Unit Shortening).
 9. "Cusine King" / "Cuisine King" / "cuisine" = Cuisine King (16 Ltr Tin)
-   (Category 1 spelling in reports is often "Cusine King").
-10. "Sun" usually means Eva Sunflower Oil (not canola).
-11. "Cooking" without brand usually means Eva Cooking Oil (clarify if Maan also possible).
-12. "Maan ghee" / "maan banaspati" = Maan Banaspati line (kg packs).
-13. Prefer resolving spoken phrases to EXACT `sales.product` / `category.product` names
-    via the resolve_product_language tool before querying.
+   (Business Unit stored as "Cusine King" in reports).
+10. "Sun" usually means Eva Sunflower Oil (Oil Type Eva Sunflower).
+11. "Cooking" without brand usually means Eva Cooking Oil (Oil Type Eva Cooking).
+12. "Maan ghee" / "maan banaspati" = Maan Banaspati (Oil Type Maan Ghee or Maan Bulk).
+13. Always resolve spoken phrases to EXACT `sales.product` names, then join
+    `category` for Business Unit / Oil Type / Packing Category.
+"""
+
+TAXONOMY_RULES = """
+PRODUCT TAXONOMY (category table — three levels):
+1. Business Unit (DB column category_1) — overall division, used for PDF summary /
+   city brand pivots. Examples: Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk,
+   Cusine King, Shortening, Bulk Oil, Meal, Byproducts.
+2. Oil Type (DB column category_2) — brand/variant line. Examples: Eva Canola,
+   Eva Cooking, Eva Sunflower, Eva VTF, Eva VTF Bulk, Eva DGP, Eva Navy, Eva Bulk,
+   Maan Ghee, Maan Bulk, Canola Oil, Olein, Fatty Acid.
+3. Packing Category (DB column packing_category) — pack form. Examples: Tin,
+   Jerry Can, Pet bottle, Stand up, Pillow, Pouch, Bucket, 16 ltr / 16 Kg.
+
+Join: sales.product = category.product (exact text).
+When the user says "Eva Consumer", filter category_1 / Business Unit.
+When they say "Eva Canola" or "canola", prefer Oil Type = Eva Canola (then SKUs).
+When they say "pet bottle" / "jerry can" / "standup", filter Packing Category.
 """
 
 
@@ -334,12 +353,16 @@ def _norm(text: str) -> str:
 
 
 def load_products_from_db() -> pd.DataFrame:
-    """Return product / category_1 / category_2 from category table (fallback to alias keys)."""
+    """Return product taxonomy from category table (fallback to alias keys)."""
     init_db()
     with connect() as conn:
         frame = pd.read_sql_query(
             """
-            SELECT product, category_1 AS category1, category_2 AS category2
+            SELECT
+              product,
+              category_1 AS category1,
+              category_2 AS category2,
+              COALESCE(packing_category, '') AS packing_category
             FROM category
             ORDER BY product
             """,
@@ -351,8 +374,11 @@ def load_products_from_db() -> pd.DataFrame:
                 "product": list(PRODUCT_ALIASES.keys()),
                 "category1": "",
                 "category2": "",
+                "packing_category": "",
             }
         )
+    frame["business_unit"] = frame["category1"]
+    frame["oil_type"] = frame["category2"]
     return frame
 
 
@@ -361,6 +387,7 @@ class ProductMatch:
     product: str
     category1: str
     category2: str
+    packing_category: str
     score: float
     matched_via: str
 
@@ -377,7 +404,16 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
                 [
                     products,
                     pd.DataFrame(
-                        [{"product": name, "category1": "", "category2": ""}]
+                        [
+                            {
+                                "product": name,
+                                "category1": "",
+                                "category2": "",
+                                "packing_category": "",
+                                "business_unit": "",
+                                "oil_type": "",
+                            }
+                        ]
                     ),
                 ],
                 ignore_index=True,
@@ -398,6 +434,17 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
             return False
         return True
 
+    def _row_fields(product: str) -> tuple[str, str, str]:
+        row = products.loc[products["product"] == product]
+        if not len(row):
+            return "", "", ""
+        r0 = row.iloc[0]
+        return (
+            str(r0.get("category1") or ""),
+            str(r0.get("category2") or ""),
+            str(r0.get("packing_category") or ""),
+        )
+
     # 1) Alias phrase hits
     for product, aliases in PRODUCT_ALIASES.items():
         pn = _norm(product)
@@ -415,45 +462,56 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
                 best_alias = alias
                 best_mode = "exact"
                 break
-            # Alias fully contained in user query (user was more specific)
             if an in q and len(an) >= best_len:
                 best_len = len(an)
                 best_alias = alias
                 best_mode = "alias_in_query"
-            # User query nearly equals a longer alias — only if query covers most of alias
             elif q in an and len(q) >= max(8, int(len(an) * 0.85)) and len(an) >= best_len:
                 best_len = len(an)
                 best_alias = alias
                 best_mode = "query_in_alias"
         if best_alias is not None:
-            row = products.loc[products["product"] == product]
-            c1 = str(row.iloc[0]["category1"]) if len(row) else ""
-            c2 = str(row.iloc[0]["category2"]) if len(row) else ""
+            c1, c2, pack = _row_fields(product)
             score = 80.0 + min(best_len, 40)
             if best_mode == "exact":
                 score += 25
-            # Prefer bare "vtf pouch" → 1x5 (team default); 1x16 needs explicit 1x16
             if q in {"vtf pouch", "vtf pouches"} and product == "Eva VTF Banaspati 1x5 Pouch":
                 score += 30
             if "standup" in _norm(best_alias) and "canola" in pn:
                 score += 15
             if "vtf bulk" in q and "16 Kg Tin" in product:
                 score += 20
+            # Packing-language boosts
+            pack_n = _norm(pack)
+            if "jerry" in q and "jerry" in pack_n:
+                score += 12
+            if "pet" in q and "pet" in pack_n:
+                score += 12
+            if "pillow" in q and "pillow" in pack_n:
+                score += 12
+            if "standup" in q and ("stand" in pack_n or "standup" in pack_n):
+                score += 12
+            if "bucket" in q and "bucket" in pack_n:
+                score += 12
+            if "tin" in q and "tin" in pack_n:
+                score += 8
             matches.append(
-                ProductMatch(product, c1, c2, score, f"alias:{best_alias}")
+                ProductMatch(product, c1, c2, pack, score, f"alias:{best_alias}")
             )
 
-    # 2) Token overlap against official names
+    # 2) Token overlap against official names + packing labels
     for _, row in products.iterrows():
         product = str(row["product"])
         pn = _norm(product)
-        p_tokens = set(pn.split())
+        pack = str(row.get("packing_category") or "")
+        pack_n = _norm(pack)
+        oil_n = _norm(str(row.get("category2") or ""))
+        p_tokens = set(pn.split()) | set(pack_n.split()) | set(oil_n.split())
         if not p_tokens or not _brand_ok(pn):
             continue
         overlap = len(q_tokens & p_tokens) / max(len(q_tokens), 1)
         if overlap >= 0.4 or (q and q in pn):
             score = 40.0 + overlap * 40.0
-            # Apply speech rules
             if "16 ltr" in q and ("16 ltr" in pn or "16 litr" in pn):
                 score += 25
             if "16 kg" in q and "16 kg" in pn:
@@ -471,6 +529,7 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
                     product,
                     str(row.get("category1") or ""),
                     str(row.get("category2") or ""),
+                    pack,
                     score,
                     "name_tokens",
                 )
@@ -491,6 +550,9 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
         "matches": [
             {
                 "product": m.product,
+                "business_unit": m.category1,
+                "oil_type": m.category2,
+                "packing_category": m.packing_category,
                 "category1": m.category1,
                 "category2": m.category2,
                 "score": round(m.score, 1),
@@ -501,7 +563,8 @@ def resolve_product_language(query: str, limit: int = 8) -> dict[str, Any]:
         "top_product": ranked[0].product if ranked else None,
         "hint": (
             "Use top_product (or ask user to confirm if multiple close scores) "
-            "as the exact sales.product filter."
+            "as the exact sales.product filter. Include Business Unit / Oil Type / "
+            "Packing Category in markdown table answers."
         ),
     }
 
@@ -532,6 +595,9 @@ def product_sales(
     sql = """
     SELECT
       s.product,
+      COALESCE(c.category_1, '') AS business_unit,
+      COALESCE(c.category_2, '') AS oil_type,
+      COALESCE(c.packing_category, '') AS packing_category,
       COALESCE(c.category_1, '') AS category1,
       COALESCE(c.category_2, '') AS category2,
       COUNT(*) AS lines,
@@ -560,7 +626,7 @@ def product_sales(
     if city:
         sql += " AND lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))"
         params.append(city)
-    sql += " GROUP BY s.product, c.category_1, c.category_2"
+    sql += " GROUP BY s.product, c.category_1, c.category_2, c.packing_category"
 
     with connect() as conn:
         summary = pd.read_sql_query(sql, conn, params=params)
@@ -624,7 +690,8 @@ def product_sales(
         "top_parties": json_records(top_parties),
         "response_format_hint": (
             "Present summary as a markdown table with columns: "
-            "Product | Category 1 | Category 2 | MT | Qty | Incl GST/FED | Lines | Parties | Days. "
+            "Product | Business Unit | Oil Type | Packing | MT | Qty | "
+            "Incl GST/FED | Lines | Parties | Days. "
             "Then optional top parties table."
         ),
     }
@@ -639,7 +706,13 @@ def json_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def glossary_for_prompt() -> str:
-    lines = [LANGUAGE_RULES.strip(), "", "PRODUCT ALIAS GLOSSARY (spoken → exact name):"]
+    lines = [
+        TAXONOMY_RULES.strip(),
+        "",
+        LANGUAGE_RULES.strip(),
+        "",
+        "PRODUCT ALIAS GLOSSARY (spoken → exact name):",
+    ]
     for product, aliases in PRODUCT_ALIASES.items():
         alias_txt = "; ".join(aliases[:6])
         lines.append(f"- {product} ← {alias_txt}")

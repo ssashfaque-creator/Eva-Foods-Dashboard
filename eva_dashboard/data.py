@@ -49,7 +49,7 @@ BULK_PRICE_CATEGORIES = (
     "Cusine King",
 )
 
-# Category 2 values that map to Oil / Ghee for Price Fetch summary
+# Oil Type values that map to Oil / Ghee for Price Fetch summary
 OIL_CATEGORY2 = frozenset(
     {
         "eva cooking",
@@ -235,7 +235,7 @@ def load_category_map(path: Path | str | None = None) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(path)
 
-    # Standalone category file (Product / Category 1 / Category 2)
+    # Standalone category file (Product / Business Unit / Oil Type / Packing)
     try:
         return parse_category_file(path)
     except Exception:
@@ -244,24 +244,52 @@ def load_category_map(path: Path | str | None = None) -> pd.DataFrame:
     # Sales workbook Category sheet (CLI convenience)
     try:
         mapping = pd.read_excel(path, sheet_name=CATEGORY_SHEET, engine="openpyxl")
-        mapping = mapping.rename(
-            columns={
-                "Product": "product",
-                "Category 1": "category1",
-                "Category 2": "category2",
-            }
-        )
+        # Prefer new headers; fall back to legacy Category 1/2
+        rename = {}
+        cols_norm = {str(c).strip().lower().replace(" ", ""): c for c in mapping.columns}
+        if "product" in cols_norm:
+            rename[cols_norm["product"]] = "product"
+        for src, dest in (
+            ("businessunit", "category1"),
+            ("category1", "category1"),
+            ("oiltype", "category2"),
+            ("category2", "category2"),
+            ("packingcategory", "packing_category"),
+        ):
+            if src in cols_norm and dest not in rename.values():
+                rename[cols_norm[src]] = dest
+        mapping = mapping.rename(columns=rename)
+        if "product" not in mapping.columns or "category1" not in mapping.columns:
+            raise ValueError("Category sheet missing Product / Business Unit")
+        if "category2" not in mapping.columns:
+            mapping["category2"] = ""
+        if "packing_category" not in mapping.columns:
+            mapping["packing_category"] = ""
         mapping["product"] = mapping["product"].astype(str).str.strip()
         mapping["category1"] = mapping["category1"].astype(str).str.strip()
         mapping["category2"] = mapping["category2"].astype(str).str.strip()
-        mapping = mapping.dropna(subset=["product"])
-        from eva_dashboard.categories import _normalize_category1
+        mapping["packing_category"] = (
+            mapping["packing_category"].astype(str).str.strip()
+        )
+        from eva_dashboard.categories import _normalize_business_unit
 
-        mapping["category1"] = mapping["category1"].map(_normalize_category1)
+        mapping["category1"] = mapping["category1"].map(_normalize_business_unit)
+        mapping.loc[
+            mapping["category2"].str.lower().isin({"nan", "none"}), "category2"
+        ] = ""
+        mapping.loc[
+            mapping["packing_category"].str.lower().isin({"nan", "none"}),
+            "packing_category",
+        ] = ""
         duplicates = mapping["product"][mapping["product"].duplicated()].tolist()
         if duplicates:
             raise ValueError(f"Duplicate products in Category sheet: {duplicates}")
-        return mapping[["product", "category1", "category2"]].reset_index(drop=True)
+        out = mapping[
+            ["product", "category1", "category2", "packing_category"]
+        ].reset_index(drop=True)
+        out["business_unit"] = out["category1"]
+        out["oil_type"] = out["category2"]
+        return out
     except ValueError as exc:
         if "Category" in str(exc) or "Worksheet" in str(exc):
             return load_category_map_from_db()
@@ -312,7 +340,7 @@ def load_sales(path: Path | str) -> pd.DataFrame:
 
 
 def classify_oil_ghee(category2: Any, product: Any) -> str | None:
-    """Return 'Oil' or 'Ghee' for branded edible products, else None."""
+    """Return 'Oil' or 'Ghee' from Oil Type (category2) + product name."""
     c2 = str(category2 or "").strip().lower()
     prod = str(product or "").strip().lower()
     if not c2 and not prod:
@@ -320,7 +348,9 @@ def classify_oil_ghee(category2: Any, product: Any) -> str | None:
 
     if c2 in GHEE_CATEGORY2:
         return "Ghee"
-    if c2 == "maan bulk" and prod.startswith("maan banaspati"):
+    if c2 == "maan bulk" and (
+        prod.startswith("maan banaspati") or "ghee" in prod or "banaspati" in prod
+    ):
         return "Ghee"
     if c2 in OIL_CATEGORY2:
         return "Oil"
@@ -741,6 +771,12 @@ def prepare_report_from_frames(
         )
     merged["category1"] = merged["category1"].fillna("").astype(str).str.strip()
     merged["category2"] = merged["category2"].fillna("").astype(str).str.strip()
+    if "packing_category" in merged.columns:
+        merged["packing_category"] = (
+            merged["packing_category"].fillna("").astype(str).str.strip()
+        )
+    else:
+        merged["packing_category"] = ""
     merged["product"] = merged["product"].fillna("").astype(str).str.strip()
     merged["party"] = merged["party"].fillna("").astype(str).str.strip()
 

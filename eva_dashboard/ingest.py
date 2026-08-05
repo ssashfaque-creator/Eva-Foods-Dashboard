@@ -263,11 +263,16 @@ def ingest_categories(path: Path | str, original_name: str | None = None) -> dic
         raise IngestError("Category file has no product rows")
 
     archived = _archive_upload("categories", source, original_name)
-    records = dataframe_records(frame.rename(columns={
-        "product": "Product",
-        "category1": "Category 1",
-        "category2": "Category 2",
-    }))
+    records = []
+    for row in frame.itertuples(index=False):
+        records.append(
+            {
+                "Product": row.product,
+                "Business Unit": row.category1,
+                "Oil Type": row.category2,
+                "Packing Category": getattr(row, "packing_category", "") or "",
+            }
+        )
 
     with connect() as conn:
         # Allow re-upload of the same file content (full replace master data)
@@ -291,13 +296,17 @@ def ingest_categories(path: Path | str, original_name: str | None = None) -> dic
                 continue
             conn.execute(
                 """
-                INSERT INTO category (product, category_1, category_2, payload_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO category (
+                    product, category_1, category_2, packing_category,
+                    payload_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     product,
-                    str(_cell(payload, "Category 1") or "").strip() or None,
-                    str(_cell(payload, "Category 2") or "").strip() or None,
+                    str(_cell(payload, "Business Unit") or "").strip() or None,
+                    str(_cell(payload, "Oil Type") or "").strip() or None,
+                    str(_cell(payload, "Packing Category") or "").strip() or None,
                     json_dumps(payload),
                     now_iso(),
                 ),
@@ -317,12 +326,21 @@ def ingest_categories(path: Path | str, original_name: str | None = None) -> dic
 
 
 def load_category_map_from_db() -> pd.DataFrame:
-    """Return product / category1 / category2 from the database."""
+    """Return product taxonomy from the database.
+
+    Columns:
+      product, category1/business_unit, category2/oil_type, packing_category
+    (category1/category2 kept for report/PDF joins)
+    """
     init_db()
     with connect() as conn:
         frame = pd.read_sql_query(
             """
-            SELECT product, category_1 AS category1, category_2 AS category2
+            SELECT
+              product,
+              category_1 AS category1,
+              category_2 AS category2,
+              COALESCE(packing_category, '') AS packing_category
             FROM category
             ORDER BY product
             """,
@@ -335,6 +353,11 @@ def load_category_map_from_db() -> pd.DataFrame:
     frame["product"] = frame["product"].astype(str).str.strip()
     frame["category1"] = frame["category1"].fillna("").astype(str).str.strip()
     frame["category2"] = frame["category2"].fillna("").astype(str).str.strip()
+    frame["packing_category"] = (
+        frame["packing_category"].fillna("").astype(str).str.strip()
+    )
+    frame["business_unit"] = frame["category1"]
+    frame["oil_type"] = frame["category2"]
     return frame.reset_index(drop=True)
 
 
