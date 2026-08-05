@@ -306,6 +306,26 @@ def _summary_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> 
     return table
 
 
+def _top_cities_with_other(
+    frame: pd.DataFrame, top_n: int = 10
+) -> tuple[pd.DataFrame, dict[str, float] | None]:
+    """Return top N cities plus an aggregated Other row for the remainder."""
+    if frame is None or len(frame) == 0:
+        empty = frame if frame is not None else pd.DataFrame()
+        return empty, None
+    top = frame.head(top_n).copy()
+    if len(frame) <= top_n:
+        return top, None
+    rest = frame.iloc[top_n:]
+    other: dict[str, float] = {}
+    for col in rest.columns:
+        if col == "city":
+            continue
+        other[col] = float(pd.to_numeric(rest[col], errors="coerce").fillna(0.0).sum())
+    other["city"] = "Other"
+    return top, other
+
+
 def _city_daily_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) -> Table:
     brands = list(CITY_BRAND_COLUMNS)
     header = [Paragraph("City", styles["cell_bold"])] + [
@@ -317,23 +337,32 @@ def _city_daily_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) 
     ]
     rows: list[list] = [header]
 
-    frame = data.city_daily.head(10)
+    top, other = _top_cities_with_other(data.city_daily, top_n=10)
     totals = {name: 0.0 for name in brands}
     grand = 0.0
-    for _, row in frame.iterrows():
-        cells = [Paragraph(str(row["city"]), styles["cell"])]
+    avg_sum = 0.0
+
+    def _append_city_row(city_name: str, values: dict[str, float] | pd.Series) -> None:
+        nonlocal grand, avg_sum
+        cells = [Paragraph(str(city_name), styles["cell"])]
         row_total = 0.0
         for name in brands:
-            value = float(row.get(name, 0.0) or 0.0)
+            value = float(values.get(name, 0.0) or 0.0)
             totals[name] += value
             row_total += value
             cells.append(Paragraph(_fmt_mt(value), styles["cell_right"]))
-        avg_30d = float(row.get("avg_30d", 0.0) or 0.0)
+        avg_30d = float(values.get("avg_30d", 0.0) or 0.0)
+        avg_sum += avg_30d
         grand += row_total
         cells.append(Paragraph(_fmt_mt(row_total), styles["cell_right"]))
         cells.append(Paragraph(_fmt_mt(avg_30d), styles["cell_right"]))
         cells.append(_pct_paragraph(row_total, avg_30d, styles))
         rows.append(cells)
+
+    for _, row in top.iterrows():
+        _append_city_row(str(row["city"]), row)
+    if other is not None:
+        _append_city_row("Other", other)
 
     total_avg = float(data.city_daily_ads.get("total", 0.0))
     total_row = [Paragraph("Total", styles["cell_bold_dark"])]
@@ -371,9 +400,16 @@ def _city_daily_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) 
         ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.88, 0.92, 0.95)),
         ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT),
     ]
+    other_idx = (total_idx - 1) if other is not None else None
     for i in range(1, total_idx):
+        if other_idx is not None and i == other_idx:
+            continue
         if i % 2 == 0:
             style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    if other_idx is not None:
+        style_cmds.append(
+            ("BACKGROUND", (0, other_idx), (-1, other_idx), colors.Color(0.94, 0.95, 0.93))
+        )
     table.setStyle(TableStyle(style_cmds))
     return table
 
@@ -389,23 +425,30 @@ def _city_mtd_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) ->
     ]
     rows: list[list] = [header]
 
-    frame = data.city_mtd.head(10)
+    top, other = _top_cities_with_other(data.city_mtd, top_n=10)
     totals = {name: 0.0 for name in brands}
     grand = 0.0
-    for _, row in frame.iterrows():
-        cells = [Paragraph(str(row["city"]), styles["cell"])]
+
+    def _append_city_row(city_name: str, values: dict[str, float] | pd.Series) -> None:
+        nonlocal grand
+        cells = [Paragraph(str(city_name), styles["cell"])]
         row_total = 0.0
         for name in brands:
-            value = float(row.get(name, 0.0) or 0.0)
+            value = float(values.get(name, 0.0) or 0.0)
             totals[name] += value
             row_total += value
             cells.append(Paragraph(_fmt_mt(value), styles["cell_right"]))
-        ams = float(row.get("ams", 0.0) or 0.0)
+        ams = float(values.get("ams", 0.0) or 0.0)
         grand += row_total
         cells.append(Paragraph(_fmt_mt(row_total), styles["cell_right"]))
         cells.append(Paragraph(_fmt_mt(ams), styles["cell_right"]))
         cells.append(_pct_paragraph(row_total, ams, styles))
         rows.append(cells)
+
+    for _, row in top.iterrows():
+        _append_city_row(str(row["city"]), row)
+    if other is not None:
+        _append_city_row("Other", other)
 
     total_ams = float(data.city_mtd_ams.get("total", 0.0))
     total_row = [Paragraph("Total", styles["cell_bold_dark"])]
@@ -443,9 +486,16 @@ def _city_mtd_table(data: SalesReportData, styles: dict[str, ParagraphStyle]) ->
         ("BACKGROUND", (0, -1), (-1, -1), colors.Color(0.88, 0.92, 0.95)),
         ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT),
     ]
+    other_idx = (total_idx - 1) if other is not None else None
     for i in range(1, total_idx):
+        if other_idx is not None and i == other_idx:
+            continue
         if i % 2 == 0:
             style_cmds.append(("BACKGROUND", (0, i), (-1, i), ROW_ALT))
+    if other_idx is not None:
+        style_cmds.append(
+            ("BACKGROUND", (0, other_idx), (-1, other_idx), colors.Color(0.94, 0.95, 0.93))
+        )
     table.setStyle(TableStyle(style_cmds))
     return table
 
@@ -1212,7 +1262,8 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "Δ% is green when current is above the average baseline, red when below, "
             "and — when the baseline is zero (e.g. no prior-month history loaded yet). "
             "ADS = average daily sales over the last 30 days; AMS = average monthly sales "
-            "over the prior 3 full months. City tables show the top 10 cities by total MT. "
+            "over the prior 3 full months. City tables show the top 10 cities by total MT, "
+            "plus an Other row for all remaining cities. "
             "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 37.3246; "
             "cost factors in litres are converted to per kg at 1 Ltr = 0.915 Kg "
             "(always computed in kg). "

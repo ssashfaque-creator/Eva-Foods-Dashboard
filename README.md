@@ -142,7 +142,7 @@ eva-dashboard costs product_costs.xlsx packing_costs.xlsx -o output/total_factor
 ## Report contents (summary)
 
 - Sales by Category (MT) with 30-day avg, AMS, Δ%  
-- Daily / MTD Sales by City (top 10)  
+- Daily / MTD Sales by City (top 10 + Other)  
 - Price Fetch by Client Type — Oil (Eva), Ghee (Eva), Oil (Maan), Ghee (Maan)  
 - Bulk Product Average Prices — Daily Avg + MTD Avg  
 
