@@ -1,4 +1,6 @@
 data/*.xlsx
+data/eva.db
+data/uploads/
 output/
 .venv/
 __pycache__/
@@ -8,3 +10,7 @@ __pycache__/
 dist/
 build/
 preview/
+clients.xlsx
+packing_costs.xlsx
+product_costs.xlsx
+sales.xlsx

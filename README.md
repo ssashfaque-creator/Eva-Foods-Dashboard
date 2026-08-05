@@ -1,28 +1,88 @@
 # Eva Foods Dashboard
 
-Terminal app that reads company sales + client Excel data and generates a PDF sales dashboard.
+Local app for Eva Foods: upload sales, cost, and client Excel files into a SQLite database, browse/filter the data, and generate PDF sales reports.
 
-## Excel inputs
+## Install on Mac (Terminal)
 
-1. **Sales workbook**
-   - **Sales** sheet — transactional sales (header on row 5)
-   - **Category** sheet — product → Category 1 / Category 2 mapping
-2. **Clients workbook** (`--clients`)
-   - **ClientListReport** sheet with `Client`, `Type`, geography, credit fields
-   - Report city comes from **`City-Filter`** (last column) — not the `City` column
-3. **Product cost factors** — `ProductCostFactors` sheet (header on row 5). Per client type + product, the latest `Date` snapshot is used and all `Cost` lines in that snapshot are summed (Ltrs or Kgs from `Unit`).
-4. **Packing costs** — per product, the latest packing cost is used (`Date` when present; otherwise the last row in file order). Matched to products by `ProdID`.
-
-## Install (Mac / Linux)
+1. **Install Python 3.10+** (if needed)
 
 ```bash
+brew install python
+```
+
+Or download from [python.org](https://www.python.org/downloads/). Check with:
+
+```bash
+python3 --version
+```
+
+2. **Get the project**
+
+```bash
+cd ~
+git clone https://github.com/ssashfaque-creator/Eva-Foods-Dashboard.git
 cd Eva-Foods-Dashboard
+```
+
+If you already have the folder, `cd` into it instead.
+
+3. **Create a virtual environment and install**
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -U pip
 pip install -e .
 ```
 
-## Generate a report
+4. **Launch the app**
+
+```bash
+eva-dashboard app
+```
+
+Your browser should open to `http://localhost:8501`.  
+Leave the Terminal window open while you use the app. Stop with `Ctrl+C`.
+
+Optional:
+
+```bash
+eva-dashboard app --port 8502
+eva-dashboard app --data-dir ~/Documents/EvaFoodsData
+```
+
+Data (database + archived uploads) lives in `./data` by default, or in `EVA_DATA_DIR` / `--data-dir`.
+
+### Next time you open the app
+
+```bash
+cd ~/Eva-Foods-Dashboard
+source .venv/bin/activate
+eva-dashboard app
+```
+
+## App tabs
+
+### Sales data
+- Upload the daily sales `.xlsx` (same format as before: **Sales** header on row 5, optional **Category** sheet).
+- New rows are **appended**; the file is renamed/timestamped and stored under `data/uploads/sales/`.
+- The same file content is **not imported twice** (SHA-256 hash).
+- Browse all sales **newest first**, with search and date filters.
+- **All Excel columns** are stored (in `payload_json`) for future use.
+
+### Cost structure
+- Upload **product cost factors** and **packing costs**.
+- When both are present, **total factor costs** are refreshed.
+- Choose a **client type** to see current Product Cost + Packing + Total Factor Cost per product.
+
+### Client list
+- Upload the clients workbook (`ClientListReport`, header row 5).
+- Clients are **upserted by ClientID**; all columns are kept.
+- Search / filter by type.
+
+## PDF report (CLI)
+
+Still available from Terminal:
 
 ```bash
 eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx \
@@ -30,45 +90,22 @@ eva-dashboard report /path/to/sales.xlsx --clients /path/to/clients.xlsx \
   --packing-costs /path/to/packing_costs.xlsx
 ```
 
-Or pass a precomputed factor-costs file:
-
 ```bash
-eva-dashboard report sales.xlsx --clients clients.xlsx \
-  --factor-costs output/total_factor_costs.csv
+eva-dashboard costs product_costs.xlsx packing_costs.xlsx -o output/total_factor_costs.csv
 ```
 
-## Compute total factor costs
+## Excel inputs
 
-For each client type and product:
+1. **Sales workbook** — Sales + Category sheets  
+2. **Clients workbook** — `City-Filter` is the report geography  
+3. **Product cost factors** — latest `Date` per client type + product; sum `Cost` lines  
+4. **Packing costs** — latest per product (`Date` or last row); join on `ProdID`
 
-`TotalFactorCost = (sum of latest product cost centers) + (latest packing cost)`
+## Report contents (summary)
 
-Unit stays Ltrs or Kgs from the product cost file.
+- Sales by Category (MT) with 30-day avg, AMS, Δ%  
+- Daily / MTD Sales by City (top 10)  
+- Price Fetch by Client Type — Oil (Eva), Ghee (Eva), Oil (Maan), Ghee (Maan)  
+- Bulk Product Average Prices — Daily Avg + MTD Avg  
 
-```bash
-eva-dashboard costs /path/to/product_costs.xlsx /path/to/packing_costs.xlsx \
-  -o output/total_factor_costs.csv
-```
-
-## Report contents
-
-**Summary**
-
-1. **Sales by Category** (fixed order): Eva Consumer → Eva Bulk → Maan Consumer → Maan Bulk → Cusine King → Shortening → Bulk Oil → Meal → Byproducts
-2. **Daily / MTD Sales by City** — City-Filter rows sorted by total MT high → low; columns Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk
-3. **Price Fetch by Client Type** — Oil (Eva), Ghee (Eva), Oil (Maan), Ghee (Maan) in Rs/maund. Oil vs Ghee from Category 2 (Eva Cooking/Canola/Sunflower = Oil; Eva VTF = Ghee; Maan Oil/Ghee; Maan Bulk uses product name — `Maan Banaspati*` = Ghee). Always in kg: Price Fetch = (Incl GST/FED per kg − cost factor per kg) × **37.3246**; Ltrs costs ÷ 0.915 to get per kg.
-4. **Bulk Product Average Prices** — Daily Avg + MTD Avg; Bulk Oil per maund (× 37.3246); Byproducts / Meal / Shortening / Cusine King per kg
-
-**Detail** (landscape), sectioned by product type
-
-- **Eva Consumer / Eva Bulk / Maan Consumer / Maan Bulk / Cusine King**
-  - Product-type heading
-  - City subsections (same city order as summary)
-  - Customers inside each city sorted by total MT high → low
-  - City total + product total
-- **Shortening / Bulk Oil / Meal / Byproducts**
-  - Product-type heading only (no city sections)
-  - Customers sorted by total MT high → low
-  - Product total
-
-Customer blocks merge Category (client Type), City, Party; SKU lines plus customer total (MT, Basic, Incl Gst/Fed, blended Rate = Incl ÷ kg). Detail also shows **Cost Factor** and **Price Fetch** when cost files are supplied.
+Price Fetch = `(Incl GST/FED per kg − cost factor per kg) × 37.3246` (Ltrs costs ÷ 0.915).
