@@ -88,24 +88,10 @@ def _sales_frame_from_db() -> pd.DataFrame:
 
 
 def _category_frame_from_db() -> pd.DataFrame:
-    init_db()
-    with connect() as conn:
-        frame = pd.read_sql_query(
-            """
-            SELECT product, category_1 AS category1, category_2 AS category2
-            FROM category
-            """,
-            conn,
-        )
-    if frame.empty:
-        raise ValueError(
-            "No product categories in the database. Re-import a sales file that includes the Category sheet."
-        )
-    frame["product"] = frame["product"].astype(str).str.strip()
-    frame["category1"] = frame["category1"].fillna("").astype(str).str.strip()
-    frame["category2"] = frame["category2"].fillna("").astype(str).str.strip()
-    frame = frame.drop_duplicates("product", keep="last")
-    return frame.reset_index(drop=True)
+    """Use the hardcoded category map (not the DB Category sheet import)."""
+    from eva_dashboard.categories import get_category_map
+
+    return get_category_map()
 
 
 def _payload_get(payload: dict, *names: str) -> Any:

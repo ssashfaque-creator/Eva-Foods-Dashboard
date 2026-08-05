@@ -100,7 +100,7 @@ eva-dashboard costs product_costs.xlsx packing_costs.xlsx -o output/total_factor
 
 ## Excel inputs
 
-1. **Sales workbook** — Sales + Category sheets  
+1. **Sales workbook** — Sales sheet (header on row 5). Product categories are hardcoded in the app (not read from Excel).  
 2. **Clients workbook** — `City-Filter` is the report geography  
 3. **Product cost factors** — latest `Date` per client type + product; sum `Cost` lines  
 4. **Packing costs** — latest per product (`Date` or last row); join on `ProdID`

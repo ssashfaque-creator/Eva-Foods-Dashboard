@@ -55,6 +55,7 @@ OIL_CATEGORY2 = frozenset(
         "eva cooking",
         "eva canola",
         "eva sunflower",
+        "eva navy",
         "maan oil",
         "eva bulk",
     }
@@ -63,6 +64,7 @@ GHEE_CATEGORY2 = frozenset(
     {
         "eva vtf",
         "eva vtf bulk",
+        "eva dgp",
         "maan ghee",
     }
 )
@@ -216,24 +218,15 @@ def resolve_credit_days(cr_days: Any, payment_type: Any) -> float:
     return 30.0
 
 
-def load_category_map(path: Path | str) -> pd.DataFrame:
-    path = Path(path)
-    mapping = pd.read_excel(path, sheet_name=CATEGORY_SHEET, engine="openpyxl")
-    mapping = mapping.rename(
-        columns={
-            "Product": "product",
-            "Category 1": "category1",
-            "Category 2": "category2",
-        }
-    )
-    mapping["product"] = mapping["product"].astype(str).str.strip()
-    mapping["category1"] = mapping["category1"].astype(str).str.strip()
-    mapping["category2"] = mapping["category2"].astype(str).str.strip()
-    mapping = mapping.dropna(subset=["product"])
-    duplicates = mapping["product"][mapping["product"].duplicated()].tolist()
-    if duplicates:
-        raise ValueError(f"Duplicate products in Category sheet: {duplicates}")
-    return mapping[["product", "category1", "category2"]]
+def load_category_map(path: Path | str | None = None) -> pd.DataFrame:
+    """Return the hardcoded product → Category 1 / Category 2 map.
+
+    ``path`` is ignored (kept for call-site compatibility). Categories are no
+    longer read from the sales workbook Category sheet.
+    """
+    from eva_dashboard.categories import get_category_map
+
+    return get_category_map()
 
 
 def load_sales(path: Path | str) -> pd.DataFrame:
@@ -670,7 +663,7 @@ def prepare_report_from_frames(
     unmatched = sorted(merged.loc[merged["category1"].isna(), "product"].unique())
     if unmatched:
         raise ValueError(
-            "Products missing from Category sheet: " + ", ".join(unmatched)
+            "Products missing from hardcoded category map: " + ", ".join(unmatched)
         )
 
     if clients is not None and len(clients):

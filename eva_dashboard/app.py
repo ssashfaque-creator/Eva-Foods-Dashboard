@@ -96,7 +96,7 @@ def page_sales() -> None:
         "Upload sales Excel (.xlsx)",
         type=["xlsx"],
         key="sales_upload",
-        help="Sales sheet header on row 5; Category sheet is imported too.",
+        help="Sales sheet header on row 5. Product categories are built into the app.",
     )
     if upload is not None and st.button("Import sales file", type="primary", key="sales_btn"):
         tmp = _save_upload(upload)
