@@ -13,6 +13,11 @@ import pandas as pd
 
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.paths import data_root, db_path
+from eva_dashboard.product_language import (
+    glossary_for_prompt,
+    product_sales,
+    resolve_product_language,
+)
 
 DEFAULT_MODEL = "gpt-4o"
 MAX_SQL_ROWS = 200
@@ -159,6 +164,7 @@ Never say the data "only goes to 2023" or cite an OpenAI knowledge cutoff for th
 def system_prompt() -> str:
     catalog = load_data_catalog()
     live = live_database_briefing()
+    glossary = glossary_for_prompt()
     return f"""You are the Eva Foods in-app data analyst. You answer ONLY from the live SQLite database
 and the catalog below. You are not a general web assistant.
 
@@ -167,8 +173,9 @@ and the catalog below. You are not a general web assistant.
 CRITICAL ANTI-HALLUCINATION RULES:
 1. NEVER invent numbers, dates, cities, or "I only have data until …" statements.
 2. NEVER use your pretraining knowledge cutoff. This app's sales data is often in 2025–2026.
-3. For ANY factual question (sales, MT, Price Fetch, cities, clients, costs), you MUST call tools
-   before answering. Prefer run_sql / category_mt_totals / sales_by_city_and_category / report_snapshot.
+3. For ANY factual question (sales, MT, Price Fetch, cities, clients, costs, products), you MUST call tools
+   before answering. Prefer resolve_product_language / product_sales / run_sql /
+   category_mt_totals / sales_by_city_and_category / report_snapshot.
 4. If a month/year is ambiguous (e.g. "July"), use the year from LIVE DATABASE STATE
    (usually the max sales year), and say which year you used.
 5. If the query returns zero rows, say so and show the SQL date filter you used + available range.
@@ -178,13 +185,33 @@ CRITICAL ANTI-HALLUCINATION RULES:
 9. Read-only only. Never claim you uploaded/changed data.
 10. Be useful: give MT, line counts, top parties, and short interpretation when asked for a report.
 
+PRODUCT LANGUAGE (spoken team phrases → exact SKU names):
+When the user names a product in casual speech ("VTF bulk", "canola standup", "cooking pillow",
+"maan 16 kg", "eva 16 ltr", "sun 5 pet", "shortening", "cusine king", etc.):
+1. Call resolve_product_language FIRST with their phrase.
+2. Use the returned exact `product` string in product_sales or in SQL `WHERE s.product = '…'`.
+3. Also use category1 / category2 from the resolver (or category table) when relevant.
+4. Never invent product spellings — prefer exact names from tools / category table.
+5. Remember: 16 ltr ≈ oil; 16 kg ≈ ghee/banaspati.
+
+RESPONSE FORMAT (numeric answers):
+- Prefer markdown TABLES for numbers — not bullet lists of metrics.
+- Typical product answer table columns:
+  Product | Category 1 | Category 2 | MT | Qty | Incl GST/FED | Lines | Parties | Days
+- For rankings / city / category breakdowns use tables with clear headers.
+- One short sentence of context (date range + which SKU resolved), then the table.
+- Optional second table for top parties. Avoid long bullet lists of figures.
+
 HOW TO ANSWER COMMON QUESTIONS:
+- "How was VTF bulk in July?" → resolve_product_language("VTF bulk") then product_sales
+- "Canola standup pouch MTD" → resolve then product_sales (flagship = Eva Canola Oil (StandUpPouch))
 - "Eva Consumer sales in Lahore for July 2026"
-  → tool sales_by_city_and_category with category1='Eva Consumer', city='Lahore',
-    date_from='2026-07-01', date_to='2026-07-31'
-  OR equivalent run_sql joining sales→category→clients.
+  → sales_by_city_and_category with category1='Eva Consumer', city='Lahore', …
 - "Full briefing for 30 Jun 2026" → report_snapshot(report_date='2026-06-30')
 - "What's in the database?" → get_sales_overview
+
+=== PRODUCT LANGUAGE GLOSSARY ===
+{glossary}
 
 === DATA CATALOG (business rules & formulas) ===
 {catalog}
@@ -557,6 +584,62 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_product_language",
+            "description": (
+                "Map spoken product language to exact sales.product names and categories. "
+                "ALWAYS call this before querying when the user says shorthand like "
+                "'VTF bulk', 'canola standup', 'cooking pillow', 'maan 16 kg', "
+                "'eva 16 ltr', 'sun 5 pet', 'shortening', 'cusine king', 'jerry can'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Spoken product phrase from the user",
+                    },
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "product_sales",
+            "description": (
+                "Sales summary for one product over a date range (optional city). "
+                "Pass exact product OR product_query (spoken). Returns summary + top parties "
+                "with a hint to format as a markdown table."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product": {
+                        "type": "string",
+                        "description": "Exact product name from category/sales",
+                    },
+                    "product_query": {
+                        "type": "string",
+                        "description": "Spoken phrase if exact name unknown",
+                    },
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+                    "city": {
+                        "type": "string",
+                        "description": "Optional City-Filter",
+                    },
+                },
+                "required": ["date_from", "date_to"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -583,6 +666,19 @@ def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
         return unmapped_products(limit=int(arguments.get("limit") or 50))
     if name == "report_snapshot":
         return prepare_report_snapshot(arguments["report_date"])
+    if name == "resolve_product_language":
+        return resolve_product_language(
+            arguments.get("query", ""),
+            limit=int(arguments.get("limit") or 8),
+        )
+    if name == "product_sales":
+        return product_sales(
+            product=arguments.get("product"),
+            product_query=arguments.get("product_query"),
+            date_from=arguments["date_from"],
+            date_to=arguments["date_to"],
+            city=arguments.get("city"),
+        )
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -592,6 +688,9 @@ def _looks_factual(text: str) -> bool:
         "sale", "mt", "july", "june", "202", "lahore", "karachi", "eva", "maan",
         "price", "fetch", "ams", "ads", "city", "client", "cost", "report",
         "how much", "total", "top", "compare", "month", "daily", "mtd",
+        "canola", "cooking", "sunflower", "sun ", "vtf", "banaspati", "ghee",
+        "shortening", "bake", "cuisine", "cusine", "jerry", "pet", "pouch",
+        "pillow", "standup", "stand up", "product", "sku", "tin", "bucket",
     )
     return any(k in t for k in keys)
 

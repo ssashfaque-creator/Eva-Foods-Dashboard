@@ -169,4 +169,29 @@ When answering:
 7. For Price Fetch / AMS / ADS, apply the formulas above.  
 8. If category map is empty or products are unmapped, say so clearly.  
 9. Never modify the database (read-only).  
-10. Currency figures are typically PKR; MT is metric tons.
+10. Currency figures are typically PKR; MT is metric tons.  
+11. Resolve spoken product phrases via `resolve_product_language` before filtering `sales.product`.  
+12. Present numeric answers as **markdown tables**, not bullet lists of metrics.  
+13. Product speech rules: **16 ltr ≈ oil**, **16 kg ≈ ghee/banaspati**; VTF bulk = Eva VTF 16 Kg Tin only; canola standup pouch is the flagship canola SKU.
+
+## Product language (spoken → exact)
+
+Team shorthand maps to exact `sales.product` / `category.product` names. Key rules:
+
+| Spoken | Means |
+|--------|--------|
+| shortening / bake right | BakeRight Shortening 16 Kgs Ctn |
+| cuisine / cusine king | Cuisine King (16 Ltr Tin) |
+| canola standup / flagship | Eva Canola Oil (StandUpPouch) |
+| cooking pillow | Eva Cooking Oil 1x5 Pillow Pouch |
+| cooking jerry can / 16 jerry | Eva Cooking Oil 16 Ltr J/Can |
+| sun / sunflower + pet/pillow/standup | Eva Sunflower Oil packs |
+| VTF bulk / VTF 16 kg | Eva VTF Banaspati 16 Kg Tin only |
+| VTF pouch / 1x5 / 1x16 / 1x4 / 5 kg tin | other VTF consumer packs |
+| maan 16 kg / maan ghee | Maan Banaspati (kg) — not oil |
+| eva 16 ltr / maan 16 ltr | oil tins/jerry (not kg ghee) |
+| jerry can (maan) | Maan Cooking Oil jerry packs |
+| pet / pet bottle | 3 Ltr or 5 Ltr PET bottles |
+
+Always join `category` for Category 1 / Category 2 when answering product questions.
+
