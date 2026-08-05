@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
@@ -659,7 +660,12 @@ def _section_sales_table(
     party_mt = _party_mt_totals(frame)
     keys = sorted(
         party_mt.keys(),
-        key=lambda key: (-party_mt[key], key[2], key[0], key[1]),
+        key=lambda key: (
+            -float(party_mt[key] or 0.0),
+            str(key[2] or ""),
+            str(key[0] or ""),
+            str(key[1] or ""),
+        ),
     )
 
     for index, (category, city, party) in enumerate(keys):
@@ -788,20 +794,27 @@ def _product_total_banner(
 
 
 def _ordered_product_types(frame) -> list[str]:
-    present = set(frame["product_type"].unique())
+    present = {
+        str(v).strip()
+        for v in frame["product_type"].tolist()
+        if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v).strip()
+    }
     ordered = [name for name in CATEGORY1_ORDER if name in present]
     extras = sorted(present - set(CATEGORY1_ORDER))
     return ordered + extras
 
 
 def _ordered_cities_for_product(product_frame, city_rank: list[str]) -> list[str]:
-    present = set(product_frame["city"].unique())
+    present = {
+        str(v).strip() if v is not None and not (isinstance(v, float) and pd.isna(v)) else "Unmapped"
+        for v in product_frame["city"].tolist()
+    }
     ordered = [city for city in city_rank if city in present]
     leftover = sorted(
         present - set(ordered),
         key=lambda c: (
-            -float(product_frame.loc[product_frame["city"] == c, "mt_qty"].sum()),
-            c,
+            -float(product_frame.loc[product_frame["city"] == c, "mt_qty"].sum() or 0.0),
+            str(c),
         ),
     )
     return ordered + leftover

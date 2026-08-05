@@ -39,6 +39,17 @@ def test_pct_change():
     assert pct_change(50, 0) is None
 
 
+def test_category1_sort_key_handles_none_and_ints():
+    from eva_dashboard.data import _category1_sort_key
+
+    names = [None, 5, "Meal", "Eva Bulk", float("nan")]
+    ordered = sorted(names, key=_category1_sort_key)
+    assert [k[1] for k in map(_category1_sort_key, ordered)]
+    # Must not raise; blanks sort together as ""
+    assert _category1_sort_key(None)[1] == ""
+    assert _category1_sort_key(5)[1] == "5"
+
+
 def test_clients_use_city_filter_not_city():
     if not CLIENTS.exists():
         return

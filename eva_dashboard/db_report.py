@@ -128,7 +128,7 @@ def _clients_frame_from_db() -> pd.DataFrame | None:
         records.append(
             {
                 "party_key": normalize_name(client),
-                "client_id": str(row["client_id"] or "").strip() or None,
+                "client_id": str(row["client_id"] or _payload_get(payload, "ClientID") or "").strip(),
                 "client": client,
                 "locality": str(_payload_get(payload, "Locality") or "").strip(),
                 "zone": str(_payload_get(payload, "Zone") or "").strip(),
@@ -157,6 +157,9 @@ def _clients_frame_from_db() -> pd.DataFrame | None:
     for col in ("locality", "zone", "area", "territory", "client_type", "payment_type", "city"):
         clients[col] = clients[col].fillna("").astype(str).str.strip()
         clients.loc[clients[col].str.lower().isin({"nan", "none"}), col] = ""
+    # Never leave None in sort keys (mixed None/int ClientIDs crash sort)
+    clients["client_id"] = clients["client_id"].fillna("").astype(str).str.strip()
+    clients.loc[clients["client_id"].str.lower().isin({"nan", "none"}), "client_id"] = ""
     clients = clients.sort_values(
         ["_inactive", "_city_missing", "client_id"], kind="mergesort"
     )

@@ -606,6 +606,7 @@ def load_clients(path: Path | str) -> pd.DataFrame:
     clients["_city_missing"] = clients["city"].eq("") | clients["city"].str.lower().eq(
         "undefined"
     )
+    clients["client_id"] = clients["client_id"].fillna("").astype(str).str.strip()
     clients = clients.sort_values(
         ["_inactive", "_city_missing", "client_id"],
         kind="mergesort",
@@ -631,10 +632,14 @@ def load_clients(path: Path | str) -> pd.DataFrame:
 
 
 def _category1_sort_key(name: str) -> tuple[int, str]:
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        text = ""
+    else:
+        text = str(name).strip()
     try:
-        return (CATEGORY1_ORDER.index(name), name)
+        return (CATEGORY1_ORDER.index(text), text)
     except ValueError:
-        return (len(CATEGORY1_ORDER), name)
+        return (len(CATEGORY1_ORDER), text)
 
 
 def _prior_three_month_ranges(current: date) -> list[tuple[date, date]]:
@@ -706,6 +711,10 @@ def prepare_report_from_frames(
         raise ValueError(
             "Products missing from the category file: " + ", ".join(unmatched)
         )
+    merged["category1"] = merged["category1"].fillna("").astype(str).str.strip()
+    merged["category2"] = merged["category2"].fillna("").astype(str).str.strip()
+    merged["product"] = merged["product"].fillna("").astype(str).str.strip()
+    merged["party"] = merged["party"].fillna("").astype(str).str.strip()
 
     if clients is not None and len(clients):
         merged = merged.merge(clients, on="party_key", how="left")

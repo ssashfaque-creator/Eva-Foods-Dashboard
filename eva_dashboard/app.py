@@ -421,7 +421,10 @@ def page_reports() -> None:
                 st.success(f"Created `{pdf_path.name}`")
                 st.session_state["last_sales_pdf"] = str(pdf_path)
             except Exception as exc:
-                st.error(str(exc))
+                import traceback
+
+                st.error(f"{type(exc).__name__}: {exc}")
+                st.code(traceback.format_exc())
 
     last = st.session_state.get("last_sales_pdf")
     if last and Path(last).exists():
