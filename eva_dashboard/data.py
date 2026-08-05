@@ -655,15 +655,17 @@ def _city_brand_pivot(frame: pd.DataFrame) -> pd.DataFrame:
     return pivot
 
 
-def prepare_report_data(
-    path: Path | str,
-    clients_path: Path | str | None = None,
+def prepare_report_from_frames(
+    sales: pd.DataFrame,
+    categories: pd.DataFrame,
+    clients: pd.DataFrame | None = None,
     report_date: date | None = None,
     factor_costs: pd.DataFrame | None = None,
+    *,
+    source_path: Path | None = None,
+    clients_path: Path | None = None,
 ) -> SalesReportData:
-    path = Path(path)
-    sales = load_sales(path)
-    categories = load_category_map(path)
+    """Build report metrics from already-loaded sales / category / client frames."""
     merged = sales.merge(categories, on="product", how="left")
     unmatched = sorted(merged.loc[merged["category1"].isna(), "product"].unique())
     if unmatched:
@@ -671,10 +673,7 @@ def prepare_report_data(
             "Products missing from Category sheet: " + ", ".join(unmatched)
         )
 
-    clients_file: Path | None = None
-    if clients_path is not None:
-        clients_file = Path(clients_path)
-        clients = load_clients(clients_file)
+    if clients is not None and len(clients):
         merged = merged.merge(clients, on="party_key", how="left")
     else:
         for col, default in (
@@ -885,8 +884,8 @@ def prepare_report_data(
     total_ams = float(sum(row.ams_mt for row in category_summary))
 
     return SalesReportData(
-        source_path=path,
-        clients_path=clients_file,
+        source_path=Path(source_path) if source_path else Path("."),
+        clients_path=Path(clients_path) if clients_path else None,
         report_date=current,
         month_start=month_start,
         month_end=month_end,
@@ -904,4 +903,25 @@ def prepare_report_data(
         total_mtd_mt=total_mtd,
         total_avg_30d_mt=total_avg_30d,
         total_ams_mt=total_ams,
+    )
+
+
+def prepare_report_data(
+    path: Path | str,
+    clients_path: Path | str | None = None,
+    report_date: date | None = None,
+    factor_costs: pd.DataFrame | None = None,
+) -> SalesReportData:
+    path = Path(path)
+    sales = load_sales(path)
+    categories = load_category_map(path)
+    clients = load_clients(clients_path) if clients_path is not None else None
+    return prepare_report_from_frames(
+        sales,
+        categories,
+        clients=clients,
+        report_date=report_date,
+        factor_costs=factor_costs,
+        source_path=path,
+        clients_path=Path(clients_path) if clients_path is not None else None,
     )

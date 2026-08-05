@@ -10,6 +10,11 @@ import streamlit as st
 
 from eva_dashboard import __version__
 from eva_dashboard.db import init_db
+from eva_dashboard.db_report import (
+    available_sales_dates,
+    generate_sales_dashboard_pdf,
+    list_generated_reports,
+)
 from eva_dashboard.ingest import (
     DuplicateFileError,
     IngestError,
@@ -281,6 +286,73 @@ def page_clients() -> None:
         st.dataframe(list_ingested_files("clients"), use_container_width=True, hide_index=True)
 
 
+def page_reports() -> None:
+    st.subheader("Reports")
+    st.markdown(
+        '<p class="eva-subtle">Build reports from data already imported into the app. '
+        "No need to re-upload Excel files here.</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Sales dashboard PDF")
+    st.write(
+        "Daily sales summary + detail (category / city tables, Price Fetch, "
+        "bulk averages, and line-level Cost Factor / Price Fetch)."
+    )
+
+    dates = available_sales_dates()
+    if not dates:
+        st.info("Import sales data (and ideally clients + costs) before generating a report.")
+        return
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    default_idx = len(dates) - 1
+    selected = c1.selectbox(
+        "Report date",
+        options=dates,
+        index=default_idx,
+        format_func=lambda d: d.strftime("%d %b %Y"),
+    )
+    c2.metric("Sales rows in DB", f"{sales_count():,}")
+    c3.metric("Latest sales date", dates[-1].strftime("%d %b %Y"))
+
+    if st.button("Generate sales dashboard", type="primary", key="gen_sales_pdf"):
+        with st.spinner("Building PDF…"):
+            try:
+                pdf_path = generate_sales_dashboard_pdf(report_date=selected)
+                st.success(f"Created `{pdf_path.name}`")
+                st.session_state["last_sales_pdf"] = str(pdf_path)
+            except Exception as exc:
+                st.error(str(exc))
+
+    last = st.session_state.get("last_sales_pdf")
+    if last and Path(last).exists():
+        pdf_file = Path(last)
+        st.download_button(
+            label=f"Download {pdf_file.name}",
+            data=pdf_file.read_bytes(),
+            file_name=pdf_file.name,
+            mime="application/pdf",
+            key="download_last_sales_pdf",
+        )
+
+    st.markdown("#### Recent generated reports")
+    recent = list_generated_reports()
+    if not recent:
+        st.caption("No reports generated yet.")
+        return
+    for path in recent:
+        cols = st.columns([4, 1])
+        cols[0].write(f"`{path.name}`")
+        cols[1].download_button(
+            "Download",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime="application/pdf",
+            key=f"dl_{path.name}",
+        )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Eva Foods Dashboard",
@@ -296,8 +368,8 @@ def main() -> None:
         f"v{__version__} · Data folder: `{data_root()}` · Database: `{db_path().name}`"
     )
 
-    tab_sales, tab_costs, tab_clients = st.tabs(
-        ["Sales data", "Cost structure", "Client list"]
+    tab_sales, tab_costs, tab_clients, tab_reports = st.tabs(
+        ["Sales data", "Cost structure", "Client list", "Reports"]
     )
     with tab_sales:
         page_sales()
@@ -305,6 +377,8 @@ def main() -> None:
         page_costs()
     with tab_clients:
         page_clients()
+    with tab_reports:
+        page_reports()
 
 
 if __name__ == "__main__":

@@ -80,6 +80,10 @@ eva-dashboard app
 - Clients are **upserted by ClientID**; all columns are kept.
 - Search / filter by type.
 
+### Reports
+- **Sales dashboard PDF** — built from data already in the database (pick a report date).
+- Download from the app; files are also saved under `data/reports/`.
+
 ## PDF report (CLI)
 
 Still available from Terminal:

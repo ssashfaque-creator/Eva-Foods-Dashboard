@@ -1,6 +1,7 @@
 data/*.xlsx
 data/eva.db
 data/uploads/
+data/reports/
 output/
 .venv/
 __pycache__/
