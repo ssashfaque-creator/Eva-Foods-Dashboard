@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
-BRANCH="${EVA_UPDATE_BRANCH:-cursor/sales-dashboard-pdf-8203}"
+BRANCH="${EVA_UPDATE_BRANCH:-cursor/category-taxonomy-8203}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard}}"
 
 if [ ! -d "$TARGET" ]; then
