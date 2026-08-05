@@ -748,10 +748,20 @@ def load_clients_table(search: str = "", client_type: str | None = None) -> pd.D
     frame = pd.DataFrame(records)
     if frame.empty:
         return frame
+
+    # Excel payloads often mix int/str in the same column (breaks Streamlit/Arrow)
+    for col in frame.columns:
+        if pd.api.types.is_object_dtype(frame[col]):
+            frame[col] = frame[col].map(
+                lambda v: ""
+                if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v)
+                else str(v)
+            )
+
     if client_type:
         type_col = "Type" if "Type" in frame.columns else "type"
         if type_col in frame.columns:
-            frame = frame[frame[type_col].astype(str) == client_type]
+            frame = frame[frame[type_col].astype(str) == str(client_type)]
     if search:
         mask = pd.Series(False, index=frame.index)
         for col in frame.columns:

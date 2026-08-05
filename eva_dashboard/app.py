@@ -44,6 +44,29 @@ def _save_upload(upload) -> Path:
     return Path(tmp.name)
 
 
+def _for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Make a frame Arrow/Streamlit-safe (mixed object columns → strings)."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        series = out[col]
+        if pd.api.types.is_object_dtype(series):
+            out[col] = series.map(
+                lambda v: ""
+                if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v)
+                else str(v)
+            )
+    return out
+
+
+def _dataframe(df: pd.DataFrame, **kwargs) -> None:
+    """Display a dataframe safely for Streamlit/Arrow."""
+    kwargs.pop("use_container_width", None)
+    kwargs.setdefault("width", "stretch")
+    st.dataframe(_for_display(df), **kwargs)
+
+
 def _fmt_result(result: dict) -> str:
     parts = [f"**{result.get('original_name', 'file')}** saved"]
     if "inserted" in result:
@@ -158,9 +181,8 @@ def page_sales() -> None:
     if category_count() > 0:
         with st.expander("Current category map", expanded=False):
             try:
-                st.dataframe(
+                _dataframe(
                     load_category_map_from_db(),
-                    use_container_width=True,
                     height=320,
                     hide_index=True,
                 )
@@ -200,12 +222,12 @@ def page_sales() -> None:
     }
     display = display.rename(columns=rename)
     st.caption(f"{len(display):,} rows (newest first)")
-    st.dataframe(display, use_container_width=True, height=480)
+    _dataframe(display, height=480)
 
     with st.expander("Imported sales files"):
-        st.dataframe(list_ingested_files("sales"), use_container_width=True, hide_index=True)
+        _dataframe(list_ingested_files("sales"), hide_index=True)
     with st.expander("Imported category files"):
-        st.dataframe(list_ingested_files("categories"), use_container_width=True, hide_index=True)
+        _dataframe(list_ingested_files("categories"), hide_index=True)
 
 
 def page_costs() -> None:
@@ -233,9 +255,8 @@ def page_costs() -> None:
                 st.error(str(exc))
             finally:
                 tmp.unlink(missing_ok=True)
-        st.dataframe(
+        _dataframe(
             list_ingested_files("product_costs"),
-            use_container_width=True,
             hide_index=True,
         )
 
@@ -254,9 +275,8 @@ def page_costs() -> None:
                 st.error(str(exc))
             finally:
                 tmp.unlink(missing_ok=True)
-        st.dataframe(
+        _dataframe(
             list_ingested_files("packing_costs"),
-            use_container_width=True,
             hide_index=True,
         )
 
@@ -290,7 +310,7 @@ def page_costs() -> None:
         }
     )
     st.caption(f"{len(show):,} products for {client_type}")
-    st.dataframe(show, use_container_width=True, height=420)
+    _dataframe(show, height=420)
 
 
 def page_clients() -> None:
@@ -338,10 +358,10 @@ def page_clients() -> None:
         client_type=None if selected_type == "All" else selected_type,
     )
     st.caption(f"{len(frame):,} clients")
-    st.dataframe(frame, use_container_width=True, height=480)
+    _dataframe(frame, height=480)
 
     with st.expander("Imported client files"):
-        st.dataframe(list_ingested_files("clients"), use_container_width=True, hide_index=True)
+        _dataframe(list_ingested_files("clients"), hide_index=True)
 
 
 def page_reports() -> None:
