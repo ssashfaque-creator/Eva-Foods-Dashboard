@@ -454,6 +454,114 @@ def page_reports() -> None:
         )
 
 
+def page_chat() -> None:
+    st.subheader("AI Chat")
+    st.markdown(
+        '<p class="eva-subtle">Ask questions about sales, cities, clients, costs, '
+        "Price Fetch, or ask for a comprehensive summary for a date. "
+        "The assistant uses GPT-4o with read-only access to your SQLite database.</p>",
+        unsafe_allow_html=True,
+    )
+
+    from eva_dashboard.chatbot import (
+        DEFAULT_MODEL,
+        chat_completion,
+        resolve_api_key,
+        sales_overview,
+    )
+
+    env_key = resolve_api_key()
+    c1, c2, c3 = st.columns([2, 1, 1])
+    api_key_input = c1.text_input(
+        "OpenAI API key",
+        value="",
+        type="password",
+        placeholder="sk-… (or set OPENAI_API_KEY)",
+        help="Used only for this session unless OPENAI_API_KEY is already set in the environment.",
+    )
+    model = c2.selectbox(
+        "Model",
+        options=["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+        index=0,
+    )
+    if c3.button("Clear chat", key="chat_clear"):
+        st.session_state.pop("eva_chat_messages", None)
+        st.rerun()
+
+    api_key = resolve_api_key(api_key_input) or env_key
+    if env_key and not api_key_input:
+        st.caption("Using `OPENAI_API_KEY` from the environment.")
+
+    try:
+        overview = sales_overview()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Sales rows", f"{overview['sales_rows']:,}")
+        m2.metric("Category map", f"{overview['products_in_category_map']:,}")
+        m3.metric("Clients", f"{overview['clients']:,}")
+        m4.metric(
+            "Sales dates",
+            f"{overview['sales_date_min'] or '—'} → {overview['sales_date_max'] or '—'}",
+        )
+    except Exception as exc:
+        st.warning(f"Could not load DB overview: {exc}")
+
+    with st.expander("Example questions"):
+        st.markdown(
+            """
+- What was total MT by Category 1 on the latest sales date?
+- Top 10 cities by Eva Consumer MT this month
+- Price Fetch for Eva Distributors (Oil / Ghee) on 2026-06-30
+- Which products in sales are missing from the category file?
+- Give me a full daily sales briefing for 30 Jun 2026 like the PDF summary
+- Compare Maan vs Eva oil volumes last 7 days
+            """
+        )
+
+    if "eva_chat_messages" not in st.session_state:
+        st.session_state["eva_chat_messages"] = []
+
+    for msg in st.session_state["eva_chat_messages"]:
+        role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = msg.get("content") or ""
+        if not content and msg.get("tool_calls"):
+            continue
+        with st.chat_message(role):
+            st.markdown(content)
+
+    prompt = st.chat_input("Ask about Eva Foods data…")
+    if not prompt:
+        return
+
+    if not api_key:
+        st.error(
+            "Add an OpenAI API key above, or export `OPENAI_API_KEY` before launching the app."
+        )
+        return
+
+    st.session_state["eva_chat_messages"].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    status = st.empty()
+    with st.chat_message("assistant"):
+        try:
+            answer, updated = chat_completion(
+                st.session_state["eva_chat_messages"],
+                api_key=api_key,
+                model=model or DEFAULT_MODEL,
+                on_status=lambda s: status.caption(s),
+            )
+            status.empty()
+            st.markdown(answer or "_(No response)_")
+            # Keep only user/assistant visible turns + latest tool transcript for continuity
+            st.session_state["eva_chat_messages"] = updated
+        except Exception as exc:
+            status.empty()
+            st.error(str(exc))
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Eva Foods Dashboard",
@@ -470,8 +578,8 @@ def main() -> None:
         f"Update: `eva-dashboard update` · App: `{Path(__file__).resolve()}`"
     )
 
-    tab_sales, tab_costs, tab_clients, tab_reports = st.tabs(
-        ["Sales data", "Cost structure", "Client list", "Reports"]
+    tab_sales, tab_costs, tab_clients, tab_reports, tab_chat = st.tabs(
+        ["Sales data", "Cost structure", "Client list", "Reports", "AI Chat"]
     )
     with tab_sales:
         page_sales()
@@ -481,6 +589,8 @@ def main() -> None:
         page_clients()
     with tab_reports:
         page_reports()
+    with tab_chat:
+        page_chat()
 
 
 if __name__ == "__main__":

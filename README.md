@@ -117,6 +117,19 @@ eva-dashboard app
 - **Sales dashboard PDF** — built from data already in the database (pick a report date).
 - Download from the app; files are also saved under `data/reports/`.
 
+### AI Chat
+- Ask natural-language questions about the live database (sales, cities, clients, costs, Price Fetch).
+- Uses **OpenAI GPT-4o** by default with read-only SQL tools + report snapshot tools.
+- Set `OPENAI_API_KEY` in the environment, or paste a key in the tab (session only).
+
+```bash
+export OPENAI_API_KEY=sk-...
+pip install -e .
+eva-dashboard app
+```
+
+Full data model reference for the assistant (and for you): [`docs/DATA_CATALOG.md`](docs/DATA_CATALOG.md).
+
 ## PDF report (CLI)
 
 Still available from Terminal:
