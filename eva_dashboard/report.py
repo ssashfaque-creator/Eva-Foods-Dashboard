@@ -1252,7 +1252,7 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         Paragraph("Month-to-Date Sales by City (MT)", styles["section"]),
         _city_mtd_table(data, styles),
         Spacer(1, 5 * mm),
-        Paragraph("Price Fetch by Client Type (Rs / Maund)", styles["section"]),
+        Paragraph("Price Fetch by Client Type (Rs / Maund, MT-weighted)", styles["section"]),
         _price_fetch_table(data, styles),
         Spacer(1, 5 * mm),
         Paragraph("Bulk Product Average Prices", styles["section"]),
@@ -1267,6 +1267,8 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             "Price Fetch = (Incl GST/FED per kg − cost factor per kg) × 37.3246; "
             "cost factors in litres are converted to per kg at 1 Ltr = 0.915 Kg "
             "(always computed in kg). "
+            "Price Fetch summary cells are MT-weighted averages of line Price Fetch "
+            "(Mes Qty weighted when MT is missing). "
             "Price Fetch columns split Eva / Maan × Oil / Ghee. "
             "Bulk product Daily Avg uses report-date sales; MTD Avg uses the month-to-date "
             "window. Bulk Oil prices are per maund (× 37.3246); other bulk categories per kg.",

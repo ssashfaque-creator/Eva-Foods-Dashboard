@@ -123,6 +123,27 @@ def test_prepare_report_with_costs_sample():
     assert MAUND_FACTOR_PRICE_FETCH == 37.3246
 
 
+def test_price_fetch_summary_is_mt_weighted() -> None:
+    """Unequal MT lines must not collapse to a simple mean."""
+    from eva_dashboard.data import _build_price_fetch_summary
+
+    daily = pd.DataFrame(
+        {
+            "detail_category": ["Eva Distributors", "Eva Distributors"],
+            "price_fetch_segment": ["Eva Oil", "Eva Oil"],
+            "price_fetch": [100.0, 200.0],
+            "effective_mt": [9.0, 1.0],
+            "mes_qty": [90.0, 10.0],
+        }
+    )
+    rows = _build_price_fetch_summary(daily)
+    assert len(rows) == 1
+    assert rows[0].eva_oil is not None
+    expected = (100.0 * 9.0 + 200.0 * 1.0) / 10.0
+    assert abs(rows[0].eva_oil - expected) < 1e-9
+    assert abs(rows[0].eva_oil - 150.0) > 1.0  # not simple mean
+
+
 def test_price_fetch_matches_kg_maund_example():
     """Screenshot example: ~630/kg sell, 150/Ltr cost → ~17,401 / maund."""
     amount_per_kg = 4_799_997 / (7.617375 * 1000.0)

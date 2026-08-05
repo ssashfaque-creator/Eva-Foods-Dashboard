@@ -443,10 +443,22 @@ def _amount_per_kg_series(incl: pd.Series, mt: pd.Series) -> pd.Series:
     ]
 
 
-def weighted_avg(values: pd.Series, weights: pd.Series) -> float | None:
+def weighted_avg(
+    values: pd.Series,
+    weights: pd.Series,
+    *,
+    allow_unweighted_fallback: bool = True,
+) -> float | None:
+    """Return weight-weighted average of ``values``.
+
+    When no positive weights are available, optionally falls back to a simple
+    mean (``allow_unweighted_fallback=True``). Price Fetch summary disables
+    that fallback so missing tonnage cannot silently become an unweighted mean.
+    """
     mask = values.notna() & weights.notna() & (weights.astype(float) > 0)
     if not mask.any():
-        # fall back to simple mean of available values
+        if not allow_unweighted_fallback:
+            return None
         vals = values.dropna()
         if vals.empty:
             return None
@@ -455,19 +467,35 @@ def weighted_avg(values: pd.Series, weights: pd.Series) -> float | None:
     v = values[mask].astype(float)
     total_w = float(w.sum())
     if total_w <= 0:
+        if not allow_unweighted_fallback:
+            return None
         return float(v.mean())
     return float((v * w).sum() / total_w)
 
 
 def _build_price_fetch_summary(daily: pd.DataFrame) -> list[PriceFetchRow]:
+    """Client-type Price Fetch cells are MT-weighted averages of line Price Fetch."""
     scoped = daily[daily["price_fetch_segment"].notna()].copy()
     if scoped.empty:
         return []
     rows: list[PriceFetchRow] = []
     for client_type, group in scoped.groupby("detail_category", sort=True):
-        def avg_for(segment: str) -> float | None:
-            part = group[group["price_fetch_segment"] == segment]
-            return weighted_avg(part["price_fetch"], part["effective_mt"])
+        def avg_for(segment: str, frame: pd.DataFrame = group) -> float | None:
+            part = frame[frame["price_fetch_segment"] == segment]
+            if part.empty:
+                return None
+            weights = part["effective_mt"]
+            # Prefer MT; if tonnage is missing, fall back to Mes Qty (litres/kg).
+            if (
+                not (weights.fillna(0).astype(float) > 0).any()
+                and "mes_qty" in part.columns
+            ):
+                weights = part["mes_qty"]
+            return weighted_avg(
+                part["price_fetch"],
+                weights,
+                allow_unweighted_fallback=False,
+            )
 
         rows.append(
             PriceFetchRow(
