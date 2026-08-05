@@ -110,6 +110,32 @@ def build_parser() -> argparse.ArgumentParser:
             "Default: output/total_factor_costs.csv"
         ),
     )
+
+    update = sub.add_parser(
+        "update",
+        help="Download the latest app from GitHub and reinstall (keeps data/)",
+    )
+    update.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        help="Install folder (default: current folder, EVA_HOME, or package root)",
+    )
+    update.add_argument(
+        "--branch",
+        default=None,
+        help="GitHub branch (default: EVA_UPDATE_BRANCH or cursor/sales-dashboard-pdf-8203)",
+    )
+    update.add_argument(
+        "--repo",
+        default=None,
+        help="GitHub owner/repo (default: EVA_UPDATE_REPO or ssashfaque-creator/Eva-Foods-Dashboard)",
+    )
+    update.add_argument(
+        "--no-reinstall",
+        action="store_true",
+        help="Only refresh files; skip pip install -e .",
+    )
     return parser
 
 
@@ -234,6 +260,35 @@ def cmd_costs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    from eva_dashboard.update import run_update
+
+    print("Downloading latest Eva Foods Dashboard…")
+    try:
+        result = run_update(
+            install_dir=args.dir,
+            repo=args.repo,
+            branch=args.branch,
+            reinstall=not args.no_reinstall,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Install folder : {result['install_root']}")
+    print(f"Source         : {result['repo']} @ {result['branch']}")
+    print(f"Version        : {result['old_version']} → {result['new_version']}")
+    print(f"Files updated  : {', '.join(result['copied'])}")
+    print(f"Data kept      : {'yes' if result['data_preserved'] else 'n/a'}")
+    print(f"venv kept      : {'yes' if result['venv_preserved'] else 'n/a'}")
+    print()
+    print("Done. Restart the app:")
+    print(f'  cd "{result["install_root"]}"')
+    print("  source .venv/bin/activate")
+    print("  eva-dashboard app")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -243,6 +298,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(cmd_report(args))
     if args.command == "costs":
         raise SystemExit(cmd_costs(args))
+    if args.command == "update":
+        raise SystemExit(cmd_update(args))
     parser.error(f"Unknown command: {args.command}")
 
 

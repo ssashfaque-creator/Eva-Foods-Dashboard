@@ -434,7 +434,8 @@ def main() -> None:
 
     st.title("Eva Foods Dashboard")
     st.caption(
-        f"v{__version__} · Data folder: `{data_root()}` · Database: `{db_path().name}`"
+        f"v{__version__} · Data folder: `{data_root()}` · Database: `{db_path().name}` · "
+        "Update: `eva-dashboard update`"
     )
 
     tab_sales, tab_costs, tab_clients, tab_reports = st.tabs(

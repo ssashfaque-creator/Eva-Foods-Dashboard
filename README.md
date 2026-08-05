@@ -64,6 +64,27 @@ eva-dashboard app --data-dir ~/Documents/EvaFoodsData
 
 Data (database + archived uploads) lives in `./data` by default, or in `EVA_DATA_DIR` / `--data-dir`.
 
+### Update to latest (no git / no ZIP each time)
+
+Stop the app (`Ctrl+C`), then:
+
+```bash
+cd ~/Eva-Foods-Dashboard
+source .venv/bin/activate
+eva-dashboard update
+eva-dashboard app
+```
+
+Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.2.2**).
+
+**First time only** (if `eva-dashboard update` is not available yet):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/sales-dashboard-pdf-8203/scripts/update.sh | bash -s -- ~/Eva-Foods-Dashboard
+```
+
+Then use `eva-dashboard update` for every future change.
+
 ### Next time you open the app
 
 ```bash
