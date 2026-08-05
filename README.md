@@ -119,6 +119,8 @@ eva-dashboard app
 
 ### AI Chat
 - Ask natural-language questions about the live database (sales, cities, clients, costs, Price Fetch).
+- Understands **team product language** (e.g. "VTF bulk", "canola standup", "cooking pillow", "maan 16 kg") and resolves to exact SKUs + categories.
+- Returns **markdown tables** for numeric answers (not bullet lists of metrics).
 - Uses **OpenAI GPT-4o** by default with read-only SQL tools + report snapshot tools.
 - Set `OPENAI_API_KEY` in the environment, or paste a key in the tab (session only).
 
