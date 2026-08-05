@@ -638,14 +638,8 @@ def _party_mt_totals(frame) -> dict[tuple[str, str, str], float]:
     )
 
 
-def _section_sales_table(
-    frame,
-    styles: dict[str, ParagraphStyle],
-    section_total_label: str,
-) -> Table:
-    """City/product section table: header over data, repeats on each new page."""
-    rows: list[list] = [_sales_header_cells(styles)]
-    style_cmds: list = [
+def _base_detail_table_style() -> list:
+    return [
         ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
         ("TEXTCOLOR", (0, 0), (-1, 0), HEADER_FG),
         ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
@@ -656,6 +650,109 @@ def _section_sales_table(
         ("GRID", (0, 0), (-1, -1), 0.3, LINE),
         ("BOX", (0, 0), (-1, -1), 0.7, BRAND),
     ]
+
+
+def _party_detail_table(
+    category: str,
+    city: str,
+    party: str,
+    group,
+    styles: dict[str, ParagraphStyle],
+) -> Table:
+    """One customer block — no row SPANs so ReportLab can split across pages."""
+    rows: list[list] = [_sales_header_cells(styles)]
+    sku_rows = list(group.iterrows())
+    for offset, (_, row) in enumerate(sku_rows):
+        if offset == 0:
+            identity = [
+                Paragraph(str(category), styles["cell_center"]),
+                Paragraph(str(city), styles["cell_center"]),
+                Paragraph(str(party), styles["cell_center"]),
+            ]
+        else:
+            identity = _blank_identity()
+        rows.append(identity + _sku_cells(row, styles))
+
+    total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
+        _frame_totals(group)
+    )
+    total_idx = len(rows)
+    rows.append(
+        _blank_identity()
+        + _total_cells(
+            "Customer Total",
+            total_mt,
+            total_basic,
+            total_incl,
+            weighted_rate,
+            amount_per_kg,
+            styles,
+            blended_price_fetch=blended_pf,
+        )
+    )
+    style_cmds = _base_detail_table_style() + [
+        ("BACKGROUND", (0, 1), (-1, total_idx - 1), colors.white),
+        ("BACKGROUND", (0, total_idx), (-1, total_idx), colors.Color(0.86, 0.91, 0.88)),
+        ("LINEABOVE", (0, 1), (-1, 1), 0.7, ACCENT),
+        ("LINEABOVE", (0, total_idx), (-1, total_idx), 0.7, BRAND),
+        ("VALIGN", (0, 1), (2, 1), "MIDDLE"),
+        ("ALIGN", (0, 1), (2, 1), "CENTER"),
+    ]
+    table = Table(
+        rows,
+        colWidths=_sales_identity_and_sku_widths(),
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    table.setStyle(TableStyle(style_cmds))
+    return table
+
+
+def _section_total_table(
+    frame,
+    styles: dict[str, ParagraphStyle],
+    section_total_label: str,
+) -> Table:
+    total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
+        _frame_totals(frame)
+    )
+    row = _blank_identity() + _total_cells(
+        section_total_label,
+        total_mt,
+        total_basic,
+        total_incl,
+        weighted_rate,
+        amount_per_kg,
+        styles,
+        blended_price_fetch=blended_pf,
+    )
+    table = Table([row], colWidths=_sales_identity_and_sku_widths(), hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("SPAN", (0, 0), (2, 0)),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.82, 0.89, 0.85)),
+                ("BOX", (0, 0), (-1, 0), 0.7, BRAND),
+                ("LINEABOVE", (0, 0), (-1, 0), 1.0, BRAND),
+                ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    return table
+
+
+def _section_sales_flowables(
+    frame,
+    styles: dict[str, ParagraphStyle],
+    section_total_label: str,
+) -> list:
+    """One table per customer (page-break safe) + section total."""
+    if frame is None or len(frame) == 0:
+        return []
 
     party_mt = _party_mt_totals(frame)
     keys = sorted(
@@ -668,93 +765,20 @@ def _section_sales_table(
         ),
     )
 
-    for index, (category, city, party) in enumerate(keys):
+    flowables: list = []
+    for category, city, party in keys:
         group = frame[
             (frame["category"] == category)
             & (frame["city"] == city)
             & (frame["party"] == party)
         ]
-        start = len(rows)
-        sku_rows = list(group.iterrows())
-        for offset, (_, row) in enumerate(sku_rows):
-            if offset == 0:
-                identity = [
-                    Paragraph(str(category), styles["cell_center"]),
-                    Paragraph(str(city), styles["cell_center"]),
-                    Paragraph(str(party), styles["cell_center"]),
-                ]
-            else:
-                identity = _blank_identity()
-            rows.append(identity + _sku_cells(row, styles))
+        if group.empty:
+            continue
+        flowables.append(_party_detail_table(category, city, party, group, styles))
+        flowables.append(Spacer(1, 1.5 * mm))
 
-        total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
-            _frame_totals(group)
-        )
-        rows.append(
-            _blank_identity()
-            + _total_cells(
-                "Customer Total",
-                total_mt,
-                total_basic,
-                total_incl,
-                weighted_rate,
-                amount_per_kg,
-                styles,
-                blended_price_fetch=blended_pf,
-            )
-        )
-        end = len(rows) - 1  # customer total row
-        last_sku = end - 1
-        style_cmds.extend(
-            [
-                # Span identity only across SKU lines — not the total row —
-                # otherwise ReportLab paints the total-row green over the whole block.
-                ("SPAN", (0, start), (0, last_sku)),
-                ("SPAN", (1, start), (1, last_sku)),
-                ("SPAN", (2, start), (2, last_sku)),
-                ("VALIGN", (0, start), (2, last_sku), "MIDDLE"),
-                ("ALIGN", (0, start), (2, last_sku), "CENTER"),
-                ("BACKGROUND", (0, start), (-1, last_sku), colors.white),
-                ("BACKGROUND", (0, end), (-1, end), colors.Color(0.86, 0.91, 0.88)),
-                ("LINEABOVE", (0, start), (-1, start), 0.7, ACCENT),
-                ("LINEABOVE", (0, end), (-1, end), 0.7, BRAND),
-            ]
-        )
-
-    total_mt, total_basic, total_incl, weighted_rate, amount_per_kg, blended_pf = (
-        _frame_totals(frame)
-    )
-    section_row = len(rows)
-    rows.append(
-        _blank_identity()
-        + _total_cells(
-            section_total_label,
-            total_mt,
-            total_basic,
-            total_incl,
-            weighted_rate,
-            amount_per_kg,
-            styles,
-            blended_price_fetch=blended_pf,
-        )
-    )
-    style_cmds.extend(
-        [
-            ("SPAN", (0, section_row), (2, section_row)),
-            ("BACKGROUND", (0, section_row), (-1, section_row), colors.Color(0.82, 0.89, 0.85)),
-            ("LINEABOVE", (0, section_row), (-1, section_row), 1.0, BRAND),
-            ("VALIGN", (0, section_row), (-1, section_row), "MIDDLE"),
-        ]
-    )
-
-    table = Table(
-        rows,
-        colWidths=_sales_identity_and_sku_widths(),
-        repeatRows=1,
-        hAlign="LEFT",
-    )
-    table.setStyle(TableStyle(style_cmds))
-    return table
+    flowables.append(_section_total_table(frame, styles, section_total_label))
+    return flowables
 
 
 def _product_total_banner(
@@ -843,8 +867,8 @@ def _sales_detail_flowables(
                 if city_frame.empty:
                     continue
                 flowables.append(Paragraph(f"City: {city}", styles["city_heading"]))
-                flowables.append(
-                    _section_sales_table(
+                flowables.extend(
+                    _section_sales_flowables(
                         city_frame,
                         styles,
                         section_total_label=f"City Total — {city}",
@@ -854,8 +878,8 @@ def _sales_detail_flowables(
             flowables.append(_product_total_banner(product_type, product_frame, styles))
             flowables.append(Spacer(1, 4 * mm))
         else:
-            flowables.append(
-                _section_sales_table(
+            flowables.extend(
+                _section_sales_flowables(
                     product_frame,
                     styles,
                     section_total_label=f"Product Total — {product_type}",
@@ -988,5 +1012,16 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
         *_sales_detail_flowables(data, styles),
     ]
 
-    doc.build(story)
+    try:
+        doc.build(story)
+    except TypeError as exc:
+        # ReportLab's Table._culprit() can raise TypeError(None > int) when a
+        # table fails to split; surface a clearer layout error instead.
+        if "NoneType" in str(exc) and "int" in str(exc):
+            raise RuntimeError(
+                "A sales detail table was too large for the page and could not be "
+                "split. Try again with the latest app version, or contact support "
+                f"with report date {data.report_date.isoformat()}."
+            ) from exc
+        raise
     return output_path
