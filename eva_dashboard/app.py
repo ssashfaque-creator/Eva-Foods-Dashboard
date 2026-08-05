@@ -97,59 +97,63 @@ def page_sales() -> None:
     else:
         c3.metric("Last import", "—")
 
-    upload = st.file_uploader(
-        "Upload sales Excel (.xlsx)",
-        type=["xlsx"],
-        key="sales_upload",
-        help="Sales sheet header on row 5.",
-    )
-    if upload is not None and st.button("Import sales file", type="primary", key="sales_btn"):
-        tmp = _save_upload(upload)
-        try:
-            result = ingest_sales(tmp, original_name=upload.name)
-            st.success(_fmt_result(result))
-            st.rerun()
-        except DuplicateFileError as exc:
-            st.warning(str(exc))
-        except IngestError as exc:
-            st.error(str(exc))
-        finally:
-            tmp.unlink(missing_ok=True)
+    sales_col, cat_col = st.columns(2)
 
-    st.markdown("#### Product categories")
-    st.markdown(
-        '<p class="eva-subtle">Upload a category file with columns '
-        "<b>Product</b>, <b>Category 1</b>, <b>Category 2</b>. "
-        "Each upload <b>replaces</b> the previous category list.</p>",
-        unsafe_allow_html=True,
-    )
-    cat_cols = st.columns(3)
-    cat_cols[0].metric("Products mapped", f"{category_count():,}")
-    cat_files = list_ingested_files("categories")
-    cat_cols[1].metric("Category files", f"{len(cat_files):,}")
-    if not cat_files.empty:
-        cat_cols[2].metric("Last category import", str(cat_files.iloc[0]["ingested_at"]))
-    else:
-        cat_cols[2].metric("Last category import", "—")
+    with sales_col:
+        st.markdown("#### Upload sales")
+        upload = st.file_uploader(
+            "Sales Excel (.xlsx)",
+            type=["xlsx"],
+            key="sales_upload",
+            help="Sales sheet header on row 5.",
+        )
+        if upload is not None and st.button(
+            "Import sales file", type="primary", key="sales_btn"
+        ):
+            tmp = _save_upload(upload)
+            try:
+                result = ingest_sales(tmp, original_name=upload.name)
+                st.success(_fmt_result(result))
+                st.rerun()
+            except DuplicateFileError as exc:
+                st.warning(str(exc))
+            except IngestError as exc:
+                st.error(str(exc))
+            finally:
+                tmp.unlink(missing_ok=True)
 
-    cat_upload = st.file_uploader(
-        "Upload category Excel (.xlsx)",
-        type=["xlsx", "csv"],
-        key="category_upload",
-        help="Header row with Product, Category 1, Category 2.",
-    )
-    if cat_upload is not None and st.button(
-        "Import category file (replace)", type="primary", key="category_btn"
-    ):
-        tmp = _save_upload(cat_upload)
-        try:
-            result = ingest_categories(tmp, original_name=cat_upload.name)
-            st.success(_fmt_result(result))
-            st.rerun()
-        except (DuplicateFileError, IngestError, ValueError) as exc:
-            st.error(str(exc))
-        finally:
-            tmp.unlink(missing_ok=True)
+    with cat_col:
+        st.markdown("#### Upload categories")
+        st.caption(
+            "Columns: **Product**, **Category 1**, **Category 2**. "
+            "New file replaces the previous map."
+        )
+        cat_cols = st.columns(2)
+        cat_cols[0].metric("Products mapped", f"{category_count():,}")
+        cat_files = list_ingested_files("categories")
+        if not cat_files.empty:
+            cat_cols[1].metric("Last import", str(cat_files.iloc[0]["ingested_at"])[:19])
+        else:
+            cat_cols[1].metric("Last import", "—")
+
+        cat_upload = st.file_uploader(
+            "Category Excel (.xlsx / .csv)",
+            type=["xlsx", "csv"],
+            key="category_upload",
+            help="Header row with Product, Category 1, Category 2.",
+        )
+        if cat_upload is not None and st.button(
+            "Import category file (replace)", type="primary", key="category_btn"
+        ):
+            tmp = _save_upload(cat_upload)
+            try:
+                result = ingest_categories(tmp, original_name=cat_upload.name)
+                st.success(_fmt_result(result))
+                st.rerun()
+            except (DuplicateFileError, IngestError, ValueError) as exc:
+                st.error(str(exc))
+            finally:
+                tmp.unlink(missing_ok=True)
 
     if category_count() > 0:
         with st.expander("Current category map", expanded=False):

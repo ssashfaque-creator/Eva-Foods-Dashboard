@@ -20,11 +20,22 @@ python3 --version
 
 ```bash
 cd ~
-git clone https://github.com/ssashfaque-creator/Eva-Foods-Dashboard.git
+git clone -b cursor/sales-dashboard-pdf-8203 https://github.com/ssashfaque-creator/Eva-Foods-Dashboard.git
 cd Eva-Foods-Dashboard
 ```
 
-If you already have the folder, `cd` into it instead.
+If you already have the folder, `cd` into it and switch to the app branch:
+
+```bash
+cd ~/Eva-Foods-Dashboard
+git fetch origin
+git checkout cursor/sales-dashboard-pdf-8203
+git pull origin cursor/sales-dashboard-pdf-8203
+```
+
+No git? Download the branch ZIP instead:  
+https://github.com/ssashfaque-creator/Eva-Foods-Dashboard/archive/refs/heads/cursor/sales-dashboard-pdf-8203.zip  
+Unzip, then `cd` into that folder for the steps below.
 
 3. **Create a virtual environment and install**
 
