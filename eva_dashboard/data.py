@@ -219,14 +219,55 @@ def resolve_credit_days(cr_days: Any, payment_type: Any) -> float:
 
 
 def load_category_map(path: Path | str | None = None) -> pd.DataFrame:
-    """Return the hardcoded product → Category 1 / Category 2 map.
+    """Load product categories.
 
-    ``path`` is ignored (kept for call-site compatibility). Categories are no
-    longer read from the sales workbook Category sheet.
+    - If ``path`` is a category workbook/CSV → parse it
+    - If ``path`` is a sales workbook with a Category sheet → use that sheet
+    - Otherwise load the latest categories from the app database
     """
-    from eva_dashboard.categories import get_category_map
+    from eva_dashboard.categories import parse_category_file
+    from eva_dashboard.ingest import load_category_map_from_db
 
-    return get_category_map()
+    if path is None:
+        return load_category_map_from_db()
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    # Standalone category file (Product / Category 1 / Category 2)
+    try:
+        return parse_category_file(path)
+    except Exception:
+        pass
+
+    # Sales workbook Category sheet (CLI convenience)
+    try:
+        mapping = pd.read_excel(path, sheet_name=CATEGORY_SHEET, engine="openpyxl")
+        mapping = mapping.rename(
+            columns={
+                "Product": "product",
+                "Category 1": "category1",
+                "Category 2": "category2",
+            }
+        )
+        mapping["product"] = mapping["product"].astype(str).str.strip()
+        mapping["category1"] = mapping["category1"].astype(str).str.strip()
+        mapping["category2"] = mapping["category2"].astype(str).str.strip()
+        mapping = mapping.dropna(subset=["product"])
+        from eva_dashboard.categories import _normalize_category1
+
+        mapping["category1"] = mapping["category1"].map(_normalize_category1)
+        duplicates = mapping["product"][mapping["product"].duplicated()].tolist()
+        if duplicates:
+            raise ValueError(f"Duplicate products in Category sheet: {duplicates}")
+        return mapping[["product", "category1", "category2"]].reset_index(drop=True)
+    except ValueError as exc:
+        if "Category" in str(exc) or "Worksheet" in str(exc):
+            return load_category_map_from_db()
+        raise
+    except Exception:
+        return load_category_map_from_db()
 
 
 def load_sales(path: Path | str) -> pd.DataFrame:
@@ -663,7 +704,7 @@ def prepare_report_from_frames(
     unmatched = sorted(merged.loc[merged["category1"].isna(), "product"].unique())
     if unmatched:
         raise ValueError(
-            "Products missing from hardcoded category map: " + ", ".join(unmatched)
+            "Products missing from the category file: " + ", ".join(unmatched)
         )
 
     if clients is not None and len(clients):

@@ -88,10 +88,10 @@ def _sales_frame_from_db() -> pd.DataFrame:
 
 
 def _category_frame_from_db() -> pd.DataFrame:
-    """Use the hardcoded category map (not the DB Category sheet import)."""
-    from eva_dashboard.categories import get_category_map
+    """Load product categories from the database (uploaded category file)."""
+    from eva_dashboard.ingest import load_category_map_from_db
 
-    return get_category_map()
+    return load_category_map_from_db()
 
 
 def _payload_get(payload: dict, *names: str) -> Any:

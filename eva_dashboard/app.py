@@ -18,13 +18,16 @@ from eva_dashboard.db_report import (
 from eva_dashboard.ingest import (
     DuplicateFileError,
     IngestError,
+    category_count,
     clients_count,
+    ingest_categories,
     ingest_clients,
     ingest_packing_costs,
     ingest_product_costs,
     ingest_sales,
     list_factor_client_types,
     list_ingested_files,
+    load_category_map_from_db,
     load_clients_table,
     load_factor_costs_table,
     load_sales_table,
@@ -45,6 +48,8 @@ def _fmt_result(result: dict) -> str:
     parts = [f"**{result.get('original_name', 'file')}** saved"]
     if "inserted" in result:
         parts.append(f"{result['inserted']:,} new rows")
+    if "replaced" in result:
+        parts.append(f"{result['replaced']:,} products (replaced)")
     if "upserted" in result:
         parts.append(f"{result['upserted']:,} clients updated")
     if "skipped" in result and result["skipped"]:
@@ -96,7 +101,7 @@ def page_sales() -> None:
         "Upload sales Excel (.xlsx)",
         type=["xlsx"],
         key="sales_upload",
-        help="Sales sheet header on row 5. Product categories are built into the app.",
+        help="Sales sheet header on row 5.",
     )
     if upload is not None and st.button("Import sales file", type="primary", key="sales_btn"):
         tmp = _save_upload(upload)
@@ -110,6 +115,53 @@ def page_sales() -> None:
             st.error(str(exc))
         finally:
             tmp.unlink(missing_ok=True)
+
+    st.markdown("#### Product categories")
+    st.markdown(
+        '<p class="eva-subtle">Upload a category file with columns '
+        "<b>Product</b>, <b>Category 1</b>, <b>Category 2</b>. "
+        "Each upload <b>replaces</b> the previous category list.</p>",
+        unsafe_allow_html=True,
+    )
+    cat_cols = st.columns(3)
+    cat_cols[0].metric("Products mapped", f"{category_count():,}")
+    cat_files = list_ingested_files("categories")
+    cat_cols[1].metric("Category files", f"{len(cat_files):,}")
+    if not cat_files.empty:
+        cat_cols[2].metric("Last category import", str(cat_files.iloc[0]["ingested_at"]))
+    else:
+        cat_cols[2].metric("Last category import", "—")
+
+    cat_upload = st.file_uploader(
+        "Upload category Excel (.xlsx)",
+        type=["xlsx", "csv"],
+        key="category_upload",
+        help="Header row with Product, Category 1, Category 2.",
+    )
+    if cat_upload is not None and st.button(
+        "Import category file (replace)", type="primary", key="category_btn"
+    ):
+        tmp = _save_upload(cat_upload)
+        try:
+            result = ingest_categories(tmp, original_name=cat_upload.name)
+            st.success(_fmt_result(result))
+            st.rerun()
+        except (DuplicateFileError, IngestError, ValueError) as exc:
+            st.error(str(exc))
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    if category_count() > 0:
+        with st.expander("Current category map", expanded=False):
+            try:
+                st.dataframe(
+                    load_category_map_from_db(),
+                    use_container_width=True,
+                    height=320,
+                    hide_index=True,
+                )
+            except Exception as exc:
+                st.warning(str(exc))
 
     st.markdown("#### Browse sales")
     f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
@@ -148,6 +200,8 @@ def page_sales() -> None:
 
     with st.expander("Imported sales files"):
         st.dataframe(list_ingested_files("sales"), use_container_width=True, hide_index=True)
+    with st.expander("Imported category files"):
+        st.dataframe(list_ingested_files("categories"), use_container_width=True, hide_index=True)
 
 
 def page_costs() -> None:
@@ -305,6 +359,12 @@ def page_reports() -> None:
         st.info("Import sales data (and ideally clients + costs) before generating a report.")
         return
 
+    if category_count() == 0:
+        st.warning(
+            "No category file loaded. Upload Product / Category 1 / Category 2 "
+            "on the Sales data tab before generating a report."
+        )
+
     c1, c2, c3 = st.columns([2, 1, 1])
     default_idx = len(dates) - 1
     selected = c1.selectbox(
@@ -316,7 +376,12 @@ def page_reports() -> None:
     c2.metric("Sales rows in DB", f"{sales_count():,}")
     c3.metric("Latest sales date", dates[-1].strftime("%d %b %Y"))
 
-    if st.button("Generate sales dashboard", type="primary", key="gen_sales_pdf"):
+    if st.button(
+        "Generate sales dashboard",
+        type="primary",
+        key="gen_sales_pdf",
+        disabled=category_count() == 0,
+    ):
         with st.spinner("Building PDF…"):
             try:
                 pdf_path = generate_sales_dashboard_pdf(report_date=selected)

@@ -150,20 +150,14 @@ def _sales_row_hash(payload: dict) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def _read_sales_frame(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _read_sales_frame(path: Path) -> pd.DataFrame:
     sales = pd.read_excel(path, sheet_name="Sales", header=SALES_HEADER_ROW, engine="openpyxl")
     sales = sales.dropna(how="all")
-    # Drop totals / undated junk rows later during insert
-    try:
-        category = pd.read_excel(path, sheet_name="Category", engine="openpyxl")
-        category = category.dropna(how="all")
-    except ValueError:
-        category = pd.DataFrame()
-    return sales, category
+    return sales
 
 
 def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
-    """Archive and append sales (+ Category sheet) into the database."""
+    """Archive and append sales rows into the database (categories are separate)."""
     init_db()
     source = Path(path)
     if not source.exists():
@@ -179,7 +173,7 @@ def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
                 f"on {existing['ingested_at']} ({existing['row_count']} rows)"
             )
 
-    sales, category = _read_sales_frame(source)
+    sales = _read_sales_frame(source)
     records = dataframe_records(sales)
     archived = _archive_upload("sales", source, original_name)
 
@@ -238,31 +232,6 @@ def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
                 # Unique row_hash → already present from an earlier file
                 skipped += 1
 
-        if not category.empty:
-            cat_records = dataframe_records(category)
-            for payload in cat_records:
-                product = str(_cell(payload, "Product") or "").strip()
-                if not product or product.lower() == "nan":
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO category (product, category_1, category_2, payload_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(product) DO UPDATE SET
-                        category_1 = excluded.category_1,
-                        category_2 = excluded.category_2,
-                        payload_json = excluded.payload_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        product,
-                        str(_cell(payload, "Category 1") or "").strip() or None,
-                        str(_cell(payload, "Category 2") or "").strip() or None,
-                        json_dumps(payload),
-                        now_iso(),
-                    ),
-                )
-
         conn.execute(
             "UPDATE ingested_files SET row_count = ?, notes = ? WHERE id = ?",
             (inserted, f"skipped={skipped}", file_id),
@@ -276,6 +245,103 @@ def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
         "skipped": skipped,
         "content_hash": content_hash,
     }
+
+
+def ingest_categories(path: Path | str, original_name: str | None = None) -> dict:
+    """Archive a category file and replace the entire category table."""
+    from eva_dashboard.categories import parse_category_file
+
+    init_db()
+    source = Path(path)
+    if not source.exists():
+        raise IngestError(f"File not found: {source}")
+    original_name = original_name or source.name
+    content_hash = _file_hash(source)
+
+    frame = parse_category_file(source)
+    if frame.empty:
+        raise IngestError("Category file has no product rows")
+
+    archived = _archive_upload("categories", source, original_name)
+    records = dataframe_records(frame.rename(columns={
+        "product": "Product",
+        "category1": "Category 1",
+        "category2": "Category 2",
+    }))
+
+    with connect() as conn:
+        # Allow re-upload of the same file content (full replace master data)
+        conn.execute(
+            "DELETE FROM ingested_files WHERE file_type = ? AND content_hash = ?",
+            ("categories", content_hash),
+        )
+        file_id = _register_file(
+            conn,
+            file_type="categories",
+            original_name=original_name,
+            stored_path=archived,
+            content_hash=content_hash,
+            row_count=0,
+            notes="replaced",
+        )
+        conn.execute("DELETE FROM category")
+        for payload in records:
+            product = str(_cell(payload, "Product") or "").strip()
+            if not product:
+                continue
+            conn.execute(
+                """
+                INSERT INTO category (product, category_1, category_2, payload_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    product,
+                    str(_cell(payload, "Category 1") or "").strip() or None,
+                    str(_cell(payload, "Category 2") or "").strip() or None,
+                    json_dumps(payload),
+                    now_iso(),
+                ),
+            )
+        conn.execute(
+            "UPDATE ingested_files SET row_count = ? WHERE id = ?",
+            (len(frame), file_id),
+        )
+
+    return {
+        "file_type": "categories",
+        "original_name": original_name,
+        "stored_path": str(archived),
+        "replaced": len(frame),
+        "content_hash": content_hash,
+    }
+
+
+def load_category_map_from_db() -> pd.DataFrame:
+    """Return product / category1 / category2 from the database."""
+    init_db()
+    with connect() as conn:
+        frame = pd.read_sql_query(
+            """
+            SELECT product, category_1 AS category1, category_2 AS category2
+            FROM category
+            ORDER BY product
+            """,
+            conn,
+        )
+    if frame.empty:
+        raise ValueError(
+            "No product categories loaded. Upload a category file on the Sales data tab."
+        )
+    frame["product"] = frame["product"].astype(str).str.strip()
+    frame["category1"] = frame["category1"].fillna("").astype(str).str.strip()
+    frame["category2"] = frame["category2"].fillna("").astype(str).str.strip()
+    return frame.reset_index(drop=True)
+
+
+def category_count() -> int:
+    init_db()
+    with connect() as conn:
+        return int(conn.execute("SELECT COUNT(*) AS n FROM category").fetchone()["n"])
 
 
 def ingest_clients(path: Path | str, original_name: str | None = None) -> dict:

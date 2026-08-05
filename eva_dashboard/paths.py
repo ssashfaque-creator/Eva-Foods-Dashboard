@@ -32,6 +32,7 @@ def uploads_dir(file_type: str) -> Path:
 
 FILE_TYPES = (
     "sales",
+    "categories",
     "clients",
     "product_costs",
     "packing_costs",
