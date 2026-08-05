@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import pandas as pd
 from reportlab.lib import colors
@@ -12,6 +15,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     BaseDocTemplate,
+    Flowable,
     Frame,
     NextPageTemplate,
     PageBreak,
@@ -25,7 +29,6 @@ from reportlab.platypus import (
 from eva_dashboard.data import (
     CATEGORY1_ORDER,
     CITY_BRAND_COLUMNS,
-    CITY_DETAIL_CATEGORIES,
     SalesReportData,
     pct_change,
 )
@@ -145,6 +148,48 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=9,
             alignment=TA_RIGHT,
             textColor=colors.black,
+        ),
+        "toc_title": ParagraphStyle(
+            "TocTitle",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=12,
+            textColor=BRAND,
+            spaceBefore=1 * mm,
+            spaceAfter=3 * mm,
+        ),
+        "toc_category": ParagraphStyle(
+            "TocCategory",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=9,
+            leading=12,
+            textColor=BRAND,
+            spaceBefore=2.2 * mm,
+            spaceAfter=0.6 * mm,
+            leftIndent=0,
+        ),
+        "toc_city": ParagraphStyle(
+            "TocCity",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=8,
+            leading=10,
+            textColor=ACCENT,
+            spaceBefore=0.8 * mm,
+            spaceAfter=0.3 * mm,
+            leftIndent=6 * mm,
+        ),
+        "toc_party": ParagraphStyle(
+            "TocParty",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7.5,
+            leading=9.5,
+            textColor=colors.black,
+            spaceBefore=0,
+            spaceAfter=0.2 * mm,
+            leftIndent=12 * mm,
         ),
     }
 
@@ -844,10 +889,142 @@ def _ordered_cities_for_product(product_frame, city_rank: list[str]) -> list[str
     return ordered + leftover
 
 
+def _dest_key(*parts: str) -> str:
+    """Stable PDF destination name from category / city / party labels."""
+    raw = "||".join("" if p is None else str(p) for p in parts)
+    digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:20]
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_")[:36]
+    return f"d_{slug}_{digest}" if slug else f"d_{digest}"
+
+
+class _NamedDest(Flowable):
+    """Invisible destination + optional PDF outline entry for internal links."""
+
+    def __init__(
+        self,
+        name: str,
+        outline_title: str | None = None,
+        outline_level: int = 0,
+        *,
+        outline_closed: bool = False,
+    ):
+        super().__init__()
+        self._name = name
+        self._outline_title = outline_title
+        self._outline_level = outline_level
+        self._outline_closed = outline_closed
+        self.width = 0
+        self.height = 0
+
+    def wrap(self, availWidth, availHeight):  # noqa: N802
+        # Tiny non-zero height so the flowable is drawn (anchors register).
+        return (0, 0.1)
+
+    def draw(self) -> None:
+        # Anchor at the current vertical position (not just page top).
+        self.canv.bookmarkHorizontal(self._name, 0, 0.1)
+        if self._outline_title:
+            try:
+                self.canv.addOutlineEntry(
+                    self._outline_title,
+                    self._name,
+                    level=self._outline_level,
+                    closed=self._outline_closed,
+                )
+            except Exception:
+                # Outline entries can fail if parent levels are missing; links still work.
+                pass
+
+
+def _toc_link(text: str, dest: str, *, mt: float | None = None) -> str:
+    label = escape(str(text))
+    if mt is not None:
+        label = f"{label}  ({mt:,.1f} MT)"
+    return (
+        f'<link href="#{escape(dest)}" color="#1a5c3a">'
+        f"<u>{label}</u></link>"
+    )
+
+
+def _parties_for_city(city_frame) -> list[tuple[str, str, str, float]]:
+    """Return (category, city, party, mt) ordered by MT desc."""
+    party_mt = _party_mt_totals(city_frame)
+    keys = sorted(
+        party_mt.keys(),
+        key=lambda key: (
+            -float(party_mt[key] or 0.0),
+            str(key[2] or ""),
+            str(key[0] or ""),
+            str(key[1] or ""),
+        ),
+    )
+    return [
+        (str(cat), str(city), str(party), float(party_mt[key] or 0.0))
+        for key in keys
+        for cat, city, party in [key]
+    ]
+
+
+def _detail_toc_flowables(
+    data: SalesReportData, styles: dict[str, ParagraphStyle]
+) -> list:
+    """Clickable Category → City → Customer contents for the detail section."""
+    frame = data.daily_sales
+    if frame is None or len(frame) == 0:
+        return []
+
+    city_rank = (
+        [str(c) for c in data.city_daily["city"].tolist()] if len(data.city_daily) else []
+    )
+    flowables: list = [
+        Paragraph("Contents — Daily Sales Detail", styles["toc_title"]),
+        Paragraph(
+            "Click a category, city, or customer to jump to that section.",
+            styles["meta"],
+        ),
+    ]
+
+    for product_type in _ordered_product_types(frame):
+        product_frame = frame[frame["product_type"] == product_type]
+        if product_frame.empty:
+            continue
+        cat_mt = float(product_frame["mt_qty"].sum())
+        cat_dest = _dest_key("cat", product_type)
+        flowables.append(
+            Paragraph(
+                _toc_link(product_type, cat_dest, mt=cat_mt),
+                styles["toc_category"],
+            )
+        )
+        for city in _ordered_cities_for_product(product_frame, city_rank):
+            city_frame = product_frame[product_frame["city"] == city]
+            if city_frame.empty:
+                continue
+            city_mt = float(city_frame["mt_qty"].sum())
+            city_dest = _dest_key("city", product_type, city)
+            flowables.append(
+                Paragraph(
+                    _toc_link(city, city_dest, mt=city_mt),
+                    styles["toc_city"],
+                )
+            )
+            for _cat, _city, party, party_mt in _parties_for_city(city_frame):
+                party_dest = _dest_key("party", product_type, city, party)
+                flowables.append(
+                    Paragraph(
+                        _toc_link(party, party_dest, mt=party_mt),
+                        styles["toc_party"],
+                    )
+                )
+
+    flowables.append(Spacer(1, 4 * mm))
+    return flowables
+
+
 def _sales_detail_flowables(
     data: SalesReportData, styles: dict[str, ParagraphStyle]
 ) -> list:
-    """Section titles first; column header is the first row of each section table."""
+    """Category → City → Customer detail blocks with link destinations."""
     frame = data.daily_sales
     city_rank = (
         [str(c) for c in data.city_daily["city"].tolist()] if len(data.city_daily) else []
@@ -859,33 +1036,76 @@ def _sales_detail_flowables(
         if product_frame.empty:
             continue
 
+        cat_dest = _dest_key("cat", product_type)
+        flowables.append(
+            _NamedDest(
+                cat_dest,
+                outline_title=str(product_type),
+                outline_level=0,
+                outline_closed=False,
+            )
+        )
         flowables.append(Paragraph(str(product_type), styles["product_heading"]))
 
-        if product_type in CITY_DETAIL_CATEGORIES:
-            for city in _ordered_cities_for_product(product_frame, city_rank):
-                city_frame = product_frame[product_frame["city"] == city]
-                if city_frame.empty:
-                    continue
-                flowables.append(Paragraph(f"City: {city}", styles["city_heading"]))
-                flowables.extend(
-                    _section_sales_flowables(
-                        city_frame,
-                        styles,
-                        section_total_label=f"City Total — {city}",
-                    )
-                )
-                flowables.append(Spacer(1, 3 * mm))
-            flowables.append(_product_total_banner(product_type, product_frame, styles))
-            flowables.append(Spacer(1, 4 * mm))
-        else:
-            flowables.extend(
-                _section_sales_flowables(
-                    product_frame,
-                    styles,
-                    section_total_label=f"Product Total — {product_type}",
+        for city in _ordered_cities_for_product(product_frame, city_rank):
+            city_frame = product_frame[product_frame["city"] == city]
+            if city_frame.empty:
+                continue
+
+            city_dest = _dest_key("city", product_type, city)
+            flowables.append(
+                _NamedDest(
+                    city_dest,
+                    outline_title=str(city),
+                    outline_level=1,
+                    outline_closed=True,
                 )
             )
-            flowables.append(Spacer(1, 4 * mm))
+            flowables.append(Paragraph(f"City: {city}", styles["city_heading"]))
+
+            party_mt = _party_mt_totals(city_frame)
+            keys = sorted(
+                party_mt.keys(),
+                key=lambda key: (
+                    -float(party_mt[key] or 0.0),
+                    str(key[2] or ""),
+                    str(key[0] or ""),
+                    str(key[1] or ""),
+                ),
+            )
+            for category, _city, party in keys:
+                group = city_frame[
+                    (city_frame["category"] == category)
+                    & (city_frame["city"] == _city)
+                    & (city_frame["party"] == party)
+                ]
+                if group.empty:
+                    continue
+                party_dest = _dest_key("party", product_type, city, party)
+                flowables.append(
+                    _NamedDest(
+                        party_dest,
+                        outline_title=str(party)[:80],
+                        outline_level=2,
+                        outline_closed=True,
+                    )
+                )
+                flowables.append(
+                    _party_detail_table(category, city, party, group, styles)
+                )
+                flowables.append(Spacer(1, 1.5 * mm))
+
+            flowables.append(
+                _section_total_table(
+                    city_frame,
+                    styles,
+                    section_total_label=f"City Total — {city}",
+                )
+            )
+            flowables.append(Spacer(1, 3 * mm))
+
+        flowables.append(_product_total_banner(product_type, product_frame, styles))
+        flowables.append(Spacer(1, 4 * mm))
 
     return flowables
 
@@ -1009,6 +1229,8 @@ def generate_pdf(data: SalesReportData, output_path: Path | str) -> Path:
             f"{data.daily_sales.groupby(['category', 'city', 'party'], sort=False).ngroups} customers",
             styles["section"],
         ),
+        *_detail_toc_flowables(data, styles),
+        PageBreak(),
         *_sales_detail_flowables(data, styles),
     ]
 
