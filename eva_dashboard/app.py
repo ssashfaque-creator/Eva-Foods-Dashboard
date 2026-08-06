@@ -530,11 +530,17 @@ def page_chat() -> None:
 **Matrix** — *what were / show / breakdown*:
 - What were Eva Consumer sales in Karachi so far in August? *(rows = Packing)*
 - Month-wise breakdown of Eva Consumer sales *(last 6 months + Average)*
+- Average sale for Imtiaz store last 6 months *(Client Type filter)*
 - Then: Add Eva Bulk to this table *(extends the same month table)*
 
 **Analytical** — *how were / evaluate / assess*:
 - How are Eva Consumer sales doing in Karachi so far in August?
 - Evaluate Stand up pouch sales in July
+
+**Client / price**:
+- Who is Al Bari?
+- Canola standup price for Distributors last week
+- What’s the Price Fetch? *(follow-up)*
             """
         )
 

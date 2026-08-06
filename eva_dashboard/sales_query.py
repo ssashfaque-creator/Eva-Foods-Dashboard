@@ -10,7 +10,21 @@ from typing import Any
 import pandas as pd
 
 from eva_dashboard.categories import BUSINESS_UNIT_ALIASES
-from eva_dashboard.data import CATEGORY1_ORDER, _prior_three_month_ranges, pct_change
+from eva_dashboard.client_language import (
+    normalize_client_type,
+    normalize_oil_type,
+    normalize_packing_category,
+)
+from eva_dashboard.data import (
+    CATEGORY1_ORDER,
+    LTR_TO_KG,
+    MAUND_FACTOR_PRICE_FETCH,
+    _prior_three_month_ranges,
+    cost_factor_per_kg,
+    pct_change,
+    price_fetch_per_maund,
+    weighted_avg,
+)
 from eva_dashboard.db import connect, init_db
 
 _PARTY_JOIN = """
@@ -143,6 +157,41 @@ def resolve_period(
         start = date(y, mth, 1)
         end = date(y, mth, calendar.monthrange(y, mth)[1])
         return _period_result(start, end, False, max_d, label=start.strftime("%b %Y"))
+
+    # last week / past week / previous week (7 days ending at max sales date)
+    if re.search(r"\b(last|past|previous)\s+weeks?\b", text) or text in {
+        "last week",
+        "past week",
+        "previous week",
+    }:
+        from datetime import timedelta
+
+        end = max_d
+        start = max_d - timedelta(days=6)
+        if min_d and start < min_d:
+            start = min_d
+        return _period_result(
+            start,
+            end,
+            False,
+            max_d,
+            label=f"Last 7 days ({start.isoformat()} → {end.isoformat()})",
+        )
+
+    # this week (Mon–max_d or last 7 days of current week ending max_d)
+    if "this week" in text:
+        from datetime import timedelta
+
+        start = max_d - timedelta(days=max_d.weekday())  # Monday
+        if min_d and start < min_d:
+            start = min_d
+        return _period_result(
+            start,
+            max_d,
+            True,
+            max_d,
+            label=f"This week ({start.isoformat()} → {max_d.isoformat()})",
+        )
 
     # this month / so far / MTD
     so_far = any(
@@ -277,6 +326,7 @@ def _fetch_lines(
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
+    client_type: str | None = None,
 ) -> pd.DataFrame:
     """Pull line-level MT with taxonomy + geography + client type."""
     init_db()
@@ -305,6 +355,17 @@ def _fetch_lines(
     if packing_category:
         where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
         params.append(packing_category)
+    if client_type:
+        where.append(
+            """
+            lower(trim(COALESCE(
+              NULLIF(trim(cl.type), ''),
+              NULLIF(trim(s.client_type), ''),
+              'Unmapped'
+            ))) = lower(trim(?))
+            """
+        )
+        params.append(client_type)
 
     sql = f"""
     SELECT
@@ -512,6 +573,7 @@ def _ams_by_row(
     business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
+    client_type: str | None = None,
 ) -> dict[str, float]:
     """Mean of the three prior full calendar months' MT by row dimension."""
     ranges = _prior_three_month_ranges(as_of)
@@ -526,6 +588,7 @@ def _ams_by_row(
             business_units=business_units,
             oil_type=oil_type,
             packing_category=packing_category,
+            client_type=client_type,
         )
         if frame.empty:
             monthly.append({})
@@ -549,6 +612,7 @@ def _trend_table(
     business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
+    client_type: str | None = None,
 ) -> dict[str, Any]:
     as_of = date.fromisoformat(period["date_to"])
     ams = _ams_by_row(
@@ -559,6 +623,7 @@ def _trend_table(
         business_units=business_units,
         oil_type=oil_type,
         packing_category=packing_category,
+        client_type=client_type,
     )
     volume = (
         period_frame.groupby(row_dim)["mt"].sum().to_dict()
@@ -635,7 +700,7 @@ def _trend_table(
         "ams_definition": (
             "AMS = average of the three full calendar months before this month, "
             f"same filters (city={city!r}, business_unit={business_unit!r}, "
-            f"business_units={business_units!r})"
+            f"business_units={business_units!r}, client_type={client_type!r})"
         ),
         "columns": columns,
         "rows": rows,
@@ -661,6 +726,7 @@ def query_sales(
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
+    client_type: str | None = None,
     columns: str = "client_type",
     months_back: int = 6,
     mode: str = "matrix",
@@ -677,6 +743,8 @@ def query_sales(
     columns: client_type | city | month
       month → last ``months_back`` months as columns + Average
 
+    client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
+
     prior_spec: previous table_spec for follow-ups like "add Eva Bulk".
     """
     # Merge follow-up additions into prior filters
@@ -689,9 +757,10 @@ def query_sales(
     if bu_one and bu_one not in units:
         units.append(bu_one)
 
-    oil = (oil_type or "").strip() or None
-    pack = (packing_category or "").strip() or None
+    oil = normalize_oil_type((oil_type or "").strip() or None)
+    pack = normalize_packing_category((packing_category or "").strip() or None)
     city_f = (city or "").strip() or None
+    ctype = normalize_client_type((client_type or "").strip() or None)
     col = (columns or "client_type").strip().lower().replace(" ", "_")
     mb = int(months_back or 6)
 
@@ -711,6 +780,8 @@ def query_sales(
             oil = prior_filters.get("oil_type") or None
         if not pack:
             pack = prior_filters.get("packing_category") or None
+        if not ctype:
+            ctype = prior_filters.get("client_type") or None
         if col in {"client_type", "auto", ""} and prior_spec.get("column_dimension"):
             col = str(prior_spec["column_dimension"])
         if prior_spec.get("months_back"):
@@ -729,6 +800,10 @@ def query_sales(
         col = "month"
     if col not in {"client_type", "city", "month"}:
         col = "client_type"
+
+    # When filtering to one client type, client_type columns are useless → city
+    if ctype and col == "client_type":
+        col = "city"
 
     # Month-wise: date range = last N months ending at max sales date
     if col == "month":
@@ -777,6 +852,7 @@ def query_sales(
         business_units=units if len(units) > 1 else None,
         oil_type=oil,
         packing_category=pack,
+        client_type=ctype,
     )
 
     if col == "month":
@@ -803,6 +879,7 @@ def query_sales(
             "business_unit": bu,
             "oil_type": oil,
             "packing_category": pack,
+            "client_type": ctype,
         },
         "business_units": units,
         "column_dimension": col,
@@ -824,7 +901,6 @@ def query_sales(
 
     if mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
         city_matrix = _pivot_mt(frame, row_dim, "city")
-        client_matrix = _pivot_mt(frame, row_dim, "client_type")
         trend = _trend_table(
             frame,
             row_dim=row_dim,
@@ -834,36 +910,56 @@ def query_sales(
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
+            client_type=ctype,
         )
         result["mode"] = "analytical"
         result["city_matrix"] = city_matrix
-        result["client_matrix"] = client_matrix
         result["trend"] = trend
         trend_cols = "Volume | AMS | " + (
             "Expected | % vs Expected"
             if period_info.get("partial_month")
             else "% vs AMS (no Expected — full month)"
         )
-        result["tables"] = [
+        tables = [
             {
                 "index": 1,
                 "title": "City-wise breakdown",
                 "source": "city_matrix",
                 "data": city_matrix,
             },
-            {
-                "index": 2,
-                "title": "Client-type breakdown",
-                "source": "client_matrix",
-                "data": client_matrix,
-            },
+        ]
+        if ctype:
+            # Already filtered to one client type — show packing breakdown by city
+            pack_matrix = _pivot_mt(frame, "packing_category", "city")
+            result["client_matrix"] = pack_matrix
+            tables.append(
+                {
+                    "index": 2,
+                    "title": f"Packing × city ({ctype})",
+                    "source": "client_matrix",
+                    "data": pack_matrix,
+                }
+            )
+        else:
+            client_matrix = _pivot_mt(frame, row_dim, "client_type")
+            result["client_matrix"] = client_matrix
+            tables.append(
+                {
+                    "index": 2,
+                    "title": "Client-type breakdown",
+                    "source": "client_matrix",
+                    "data": client_matrix,
+                }
+            )
+        tables.append(
             {
                 "index": 3,
                 "title": f"Trend vs AMS ({trend_cols})",
                 "source": "trend",
                 "data": trend,
-            },
-        ]
+            }
+        )
+        result["tables"] = tables
         result["required_table_count"] = 3
     else:
         result["mode"] = "matrix"
@@ -973,6 +1069,8 @@ def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[s
     bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
+    if filters.get("client_type"):
+        bits.append(f"Client Type **{filters['client_type']}**")
     show_units = units or ([filters["business_unit"]] if filters.get("business_unit") else [])
     if len(show_units) > 1:
         bits.append("Business Units **" + "**, **".join(show_units) + "**")
@@ -1039,9 +1137,14 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
         parts.append(
             _matrix_to_markdown(result.get("city_matrix") or {}, row_dim)
         )
-        parts.append("### 2. Client-type breakdown\n")
+        second_title = "Client-type breakdown"
+        second_row = row_dim
+        if filters.get("client_type"):
+            second_title = f"Packing × city ({filters['client_type']})"
+            second_row = "packing_category"
+        parts.append(f"### 2. {second_title}\n")
         parts.append(
-            _matrix_to_markdown(result.get("client_matrix") or {}, row_dim)
+            _matrix_to_markdown(result.get("client_matrix") or {}, second_row)
         )
         parts.append("### 3. Trend vs AMS\n")
         parts.append(_trend_to_markdown(result.get("trend") or {}))
@@ -1056,3 +1159,366 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
         parts.append(_matrix_to_markdown(result.get("matrix") or {}, row_dim))
 
     return "\n".join(parts).strip() + "\n"
+
+
+def query_price(
+    *,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    city: str | None = None,
+    business_unit: str | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    product: str | None = None,
+    product_query: str | None = None,
+    include_price_fetch: bool = False,
+    prior_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Average Rate (and optional Price Fetch) from sales lines.
+
+    Rate = MT-weighted average of ``sales.rate``.
+    Amount/kg = Incl GST/FED ÷ (MT × 1000).
+    Price Fetch = (amount/kg − cost factor/kg) × maund factor, when factor_costs match.
+    """
+    oil = normalize_oil_type((oil_type or "").strip() or None)
+    pack = normalize_packing_category((packing_category or "").strip() or None)
+    city_f = (city or "").strip() or None
+    ctype = normalize_client_type((client_type or "").strip() or None)
+    bu = _normalize_business_unit(business_unit)
+    exact_product = (product or "").strip() or None
+    resolution = None
+
+    if prior_spec:
+        prior_filters = prior_spec.get("filters") or {}
+        if not city_f:
+            city_f = prior_filters.get("city")
+        if not oil:
+            oil = prior_filters.get("oil_type") or None
+        if not pack:
+            pack = prior_filters.get("packing_category") or None
+        if not ctype:
+            ctype = prior_filters.get("client_type") or None
+        if not bu:
+            bu = prior_filters.get("business_unit") or None
+        if not exact_product:
+            exact_product = prior_filters.get("product") or None
+        if not period and not date_from and prior_spec.get("period_phrase"):
+            period = prior_spec.get("period_phrase")
+        if not period and not date_from and prior_spec.get("period"):
+            date_from = (prior_spec["period"] or {}).get("date_from")
+            date_to = (prior_spec["period"] or {}).get("date_to")
+        if prior_spec.get("include_price_fetch"):
+            include_price_fetch = True
+
+    if not exact_product and product_query:
+        from eva_dashboard.product_language import resolve_product_language
+
+        resolution = resolve_product_language(product_query, limit=5)
+        exact_product = resolution.get("top_product") or None
+        # Soft fill oil/packing from resolution when not set
+        top = (resolution.get("matches") or [None])[0] or {}
+        if not oil and top.get("oil_type"):
+            oil = top["oil_type"]
+        if not pack and top.get("packing_category"):
+            pack = top["packing_category"]
+        if not bu and top.get("business_unit"):
+            bu = top["business_unit"]
+
+    period_info = resolve_period(period, date_from=date_from, date_to=date_to)
+    if period_info.get("ok") is False or not period_info.get("date_from"):
+        return {
+            "ok": False,
+            "error": period_info.get("error") or "Bad period",
+            "period": period_info,
+        }
+    d0 = period_info["date_from"]
+    d1 = period_info["date_to"]
+
+    params: list[Any] = [d0, d1]
+    where = ["s.date >= ?", "s.date <= ?"]
+    if city_f:
+        where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
+        params.append(city_f)
+    if bu:
+        where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
+        params.append(bu)
+    if oil:
+        where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
+        params.append(oil)
+    if pack:
+        where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
+        params.append(pack)
+    if ctype:
+        where.append(
+            """
+            lower(trim(COALESCE(
+              NULLIF(trim(cl.type), ''),
+              NULLIF(trim(s.client_type), ''),
+              'Unmapped'
+            ))) = lower(trim(?))
+            """
+        )
+        params.append(ctype)
+    if exact_product:
+        where.append("s.product = ?")
+        params.append(exact_product)
+
+    sql = f"""
+    SELECT
+      s.product,
+      s.rate,
+      s.mes_qty,
+      s.incl_gst_fed_amount,
+      s.basic_amount,
+      COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
+      COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
+      COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
+      COALESCE(
+        NULLIF(trim(cl.type), ''),
+        NULLIF(trim(s.client_type), ''),
+        'Unmapped'
+      ) AS client_type,
+      CASE
+        WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
+        WHEN lower(trim(COALESCE(s.unit,''))) IN ('kg','kgs')
+          THEN COALESCE(s.qty,0)/1000.0
+        WHEN lower(trim(COALESCE(s.unit,''))) IN
+             ('mt','m.t','m.t.','ton','tons','tonne','tonnes')
+          THEN COALESCE(s.qty,0)
+        ELSE 0
+      END AS mt,
+      fc.total_factor_cost,
+      fc.unit AS cost_unit
+    FROM sales s
+    {_PARTY_JOIN}
+    LEFT JOIN factor_costs fc
+      ON lower(trim(fc.client_type)) = lower(trim(COALESCE(
+           NULLIF(trim(cl.type), ''),
+           NULLIF(trim(s.client_type), ''),
+           ''
+         )))
+     AND lower(trim(fc.product)) = lower(trim(s.product))
+    WHERE {' AND '.join(where)}
+    """
+    init_db()
+    with connect() as conn:
+        frame = pd.read_sql_query(sql, conn, params=params)
+
+    if frame.empty:
+        filters = {
+            "city": city_f,
+            "business_unit": bu,
+            "oil_type": oil,
+            "packing_category": pack,
+            "client_type": ctype,
+            "product": exact_product,
+        }
+        return {
+            "ok": True,
+            "period": period_info,
+            "filters": filters,
+            "lines": 0,
+            "mt": 0.0,
+            "avg_rate": None,
+            "amount_per_kg": None,
+            "price_fetch": None,
+            "by_product": [],
+            "resolution": resolution,
+            "answer_markdown": (
+                f"No sales lines for {_filter_blurb(filters, period_info)} "
+                "— cannot compute Rate / Price Fetch.\n"
+            ),
+            "price_spec": {
+                "period_phrase": period,
+                "period": {"date_from": d0, "date_to": d1, "label": period_info.get("label")},
+                "filters": filters,
+                "include_price_fetch": include_price_fetch,
+            },
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    mt_w = frame["mt"].fillna(0).astype(float)
+    rate_w = frame["rate"]
+    # Prefer MT weights; fall back to mes_qty for rate when MT is zero
+    mes_w = frame["mes_qty"].fillna(0).astype(float) if "mes_qty" in frame.columns else mt_w
+    rate_weights = mt_w.where(mt_w > 0, mes_w)
+    avg_rate = weighted_avg(rate_w, rate_weights)
+
+    incl = frame["incl_gst_fed_amount"].fillna(0).astype(float)
+    total_incl = float(incl.sum())
+    total_mt = float(mt_w.sum())
+    total_kg = total_mt * 1000.0
+    amount_per_kg = (total_incl / total_kg) if total_kg else None
+
+    # Line-level price fetch then MT-weighted average
+    pf_vals: list[float] = []
+    pf_weights: list[float] = []
+    for _, row in frame.iterrows():
+        mt = float(row.get("mt") or 0)
+        incl_v = float(row.get("incl_gst_fed_amount") or 0)
+        kg = mt * 1000.0
+        apk = (incl_v / kg) if kg else None
+        cf = cost_factor_per_kg(row.get("total_factor_cost"), row.get("cost_unit"))
+        if apk is None or cf is None:
+            continue
+        pf = price_fetch_per_maund(apk, cf)
+        if pf is None:
+            continue
+        w = mt if mt > 0 else float(row.get("mes_qty") or 0)
+        if w <= 0:
+            continue
+        pf_vals.append(float(pf))
+        pf_weights.append(w)
+
+    blended_pf = None
+    if pf_vals:
+        blended_pf = weighted_avg(
+            pd.Series(pf_vals),
+            pd.Series(pf_weights),
+            allow_unweighted_fallback=False,
+        )
+
+    # By product breakdown
+    by_product: list[dict[str, Any]] = []
+    for product_name, grp in frame.groupby("product", sort=False):
+        g_mt = float(grp["mt"].fillna(0).sum())
+        g_weights = grp["mt"].fillna(0).astype(float)
+        g_weights = g_weights.where(g_weights > 0, grp["mes_qty"].fillna(0).astype(float))
+        g_rate = weighted_avg(grp["rate"], g_weights)
+        g_incl = float(grp["incl_gst_fed_amount"].fillna(0).sum())
+        g_kg = g_mt * 1000.0
+        g_apk = (g_incl / g_kg) if g_kg else None
+        entry: dict[str, Any] = {
+            "product": str(product_name),
+            "business_unit": str(grp["business_unit"].iloc[0]),
+            "oil_type": str(grp["oil_type"].iloc[0]),
+            "packing_category": str(grp["packing_category"].iloc[0]),
+            "lines": int(len(grp)),
+            "mt": round(g_mt, 3),
+            "avg_rate": round(float(g_rate), 2) if g_rate is not None else None,
+            "amount_per_kg": round(float(g_apk), 4) if g_apk is not None else None,
+        }
+        # product-level PF
+        p_vals: list[float] = []
+        p_w: list[float] = []
+        for _, r in grp.iterrows():
+            mt = float(r.get("mt") or 0)
+            incl_v = float(r.get("incl_gst_fed_amount") or 0)
+            kg = mt * 1000.0
+            apk = (incl_v / kg) if kg else None
+            cf = cost_factor_per_kg(r.get("total_factor_cost"), r.get("cost_unit"))
+            if apk is None or cf is None:
+                continue
+            pf = price_fetch_per_maund(apk, cf)
+            if pf is None:
+                continue
+            w = mt if mt > 0 else float(r.get("mes_qty") or 0)
+            if w <= 0:
+                continue
+            p_vals.append(float(pf))
+            p_w.append(w)
+        if p_vals:
+            entry["price_fetch"] = round(
+                float(
+                    weighted_avg(
+                        pd.Series(p_vals),
+                        pd.Series(p_w),
+                        allow_unweighted_fallback=False,
+                    )
+                    or 0
+                ),
+                2,
+            )
+        else:
+            entry["price_fetch"] = None
+        by_product.append(entry)
+
+    by_product.sort(key=lambda r: -float(r.get("mt") or 0))
+
+    filters = {
+        "city": city_f,
+        "business_unit": bu,
+        "oil_type": oil,
+        "packing_category": pack,
+        "client_type": ctype,
+        "product": exact_product,
+    }
+    price_spec = {
+        "period_phrase": period,
+        "period": {"date_from": d0, "date_to": d1, "label": period_info.get("label")},
+        "filters": filters,
+        "include_price_fetch": include_price_fetch,
+    }
+
+    blurb = _filter_blurb(filters, period_info)
+    lines_md = [
+        f"Prices for {blurb}.\n",
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Lines | {len(frame)} |",
+        f"| Volume (MT) | {round(total_mt, 3)} |",
+        f"| **Avg Rate** | "
+        f"**{round(float(avg_rate), 2) if avg_rate is not None else '—'}** |",
+        f"| Amount / kg (Incl GST/FED) | "
+        f"{round(float(amount_per_kg), 4) if amount_per_kg is not None else '—'} |",
+    ]
+    if include_price_fetch:
+        pf_txt = (
+            round(float(blended_pf), 2) if blended_pf is not None else "— (no factor cost match)"
+        )
+        lines_md.append(f"| **Price Fetch** (per maund) | **{pf_txt}** |")
+        lines_md.append(
+            "\n_Price Fetch = (Incl GST/FED per kg − cost factor per kg) × "
+            f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund "
+            f"(Ltrs costs ÷ {LTR_TO_KG})._"
+        )
+    else:
+        lines_md.append(
+            "\n_Ask “what’s the Price Fetch?” for the recovery figure on the same scope._"
+        )
+
+    if len(by_product) > 1:
+        lines_md.append("\n### By product\n")
+        hdr = "| Product | Packing | MT | Avg Rate | Amount/kg |"
+        if include_price_fetch:
+            hdr += " Price Fetch |"
+        lines_md.append(hdr)
+        lines_md.append(
+            "| --- | --- | --- | --- | --- |"
+            + (" --- |" if include_price_fetch else "")
+        )
+        for row in by_product[:15]:
+            cells = [
+                str(row["product"]).replace("|", "/"),
+                str(row["packing_category"]).replace("|", "/"),
+                str(row["mt"]),
+                str(row["avg_rate"] if row["avg_rate"] is not None else "—"),
+                str(row["amount_per_kg"] if row["amount_per_kg"] is not None else "—"),
+            ]
+            if include_price_fetch:
+                cells.append(
+                    str(row["price_fetch"] if row["price_fetch"] is not None else "—")
+                )
+            lines_md.append("| " + " | ".join(cells) + " |")
+
+    return {
+        "ok": True,
+        "period": period_info,
+        "filters": filters,
+        "lines": int(len(frame)),
+        "mt": round(total_mt, 3),
+        "avg_rate": round(float(avg_rate), 2) if avg_rate is not None else None,
+        "amount_per_kg": round(float(amount_per_kg), 4) if amount_per_kg is not None else None,
+        "price_fetch": round(float(blended_pf), 2) if blended_pf is not None else None,
+        "include_price_fetch": include_price_fetch,
+        "by_product": by_product,
+        "resolution": resolution,
+        "price_spec": price_spec,
+        "answer_markdown": "\n".join(lines_md).strip() + "\n",
+        "response_instructions": (
+            "REQUIRED: Reply with `answer_markdown` verbatim. "
+            "Keep `price_spec` for follow-ups like 'what's the Price Fetch?'."
+        ),
+    }

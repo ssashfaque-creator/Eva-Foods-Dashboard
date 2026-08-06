@@ -186,10 +186,22 @@ For sales questions the assistant should call **`query_sales` once** (not multi-
 | User specifies | Rows | Columns (default) |
 |---|---|---|
 | Nothing (e.g. Lahore last month) | Business Unit | Client Type |
-| Business Unit (e.g. Eva Consumer) | Oil Type | Client Type |
-| Business Unit + Oil Type | Packing Category | Client Type |
+| One Business Unit (e.g. Eva Consumer) | **Packing Category** | Client Type |
+| Multiple Business Units | Business Unit | (same as prior / requested) |
+| Oil Type set | Packing Category | Client Type |
 | Packing Category | Product | Client Type |
 | Asks “city-wise” | (same row rule) | City |
+| Asks “month-wise” / last N months | (same row rule) | Months + **Average** |
+| **Client Type** filter (Imtiaz / Distributors / …) | (same row rule) | City (or months) |
+
+All matrices include a **Total** footer row (column totals) and a row **Total** column.
+
+**Client Type aliases:** Imtiaz / store(s) → `Imtiaz Store`; Distributor(s) / Eva distributors → `Eva Distributors`.  
+Do not invent a Business Unit when the user only named a client type.
+
+**Other tools:**
+- `lookup_party` — “Who is Al Bari?” → fuzzy client/party matches (name, type, city, MT)
+- `query_price` — Rate from sales; optional Price Fetch follow-up on the same scope
 
 **Mode from language (not from filters):**
 - “what were / show / breakdown” → **matrix** (one pivot)
@@ -217,6 +229,8 @@ When answering:
 12. Present numeric answers as **markdown tables**, not bullet lists of metrics.  
 13. Product speech rules: **16 ltr ≈ oil**, **16 kg ≈ ghee/banaspati**; VTF bulk = Eva VTF 16 Kg Tin only; canola standup pouch is the flagship canola SKU.  
 14. Taxonomy: **Business Unit** / **Oil Type** / **Packing Category** — always join `category` and label columns with these names in answers.
+15. Filter by **Client Type** when named; use `lookup_party` for individual client names.  
+16. Rate / price → `query_price`; “Price Fetch?” follow-up reuses the prior price scope.
 
 ## Product language (spoken → exact)
 

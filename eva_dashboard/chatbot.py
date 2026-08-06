@@ -11,6 +11,13 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from eva_dashboard.client_language import (
+    extract_client_type_from_text,
+    extract_oil_type_from_text,
+    extract_packing_from_text,
+    lookup_party,
+    normalize_client_type,
+)
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.paths import data_root, db_path
 from eva_dashboard.product_language import (
@@ -18,7 +25,7 @@ from eva_dashboard.product_language import (
     product_sales,
     resolve_product_language,
 )
-from eva_dashboard.sales_query import query_sales
+from eva_dashboard.sales_query import query_price, query_sales
 
 DEFAULT_MODEL = "gpt-4o"
 MAX_SQL_ROWS = 200
@@ -205,13 +212,25 @@ def system_prompt() -> str:
 {live}
 
 SPEED & TOOL RULES:
-1. For almost all SALES questions, call **query_sales ONCE** with structured filters.
+1. For almost all SALES volume questions, call **query_sales ONCE** with structured filters
+   (including **client_type** when the user names a client type).
    Do NOT write multi-step SQL. Do NOT call get_schema / run_sql first for sales pivots.
-2. Interpret the user question → fill query_sales parameters → format the returned matrices
-   as markdown tables. One tool round is the goal.
+2. Interpret the user question → fill parameters → use returned markdown tables.
+   One tool round is the goal.
 3. NEVER invent numbers or cite an OpenAI knowledge cutoff.
 4. Geography = City-Filter (`city` parameter). Always state the period label from the tool.
 5. Read-only only.
+6. Client / party name questions ("who is Al Bari?") → **lookup_party** (not query_sales).
+7. Rate / price / Price Fetch questions → **query_price** (Rate from sales; Price Fetch when asked).
+
+CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit instead):
+  • Imtiaz / Imtiaz store(s) / store → client_type='Imtiaz Store'
+  • Distributor / Distributors / Eva distributors → client_type='Eva Distributors'
+  • Mentions of Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, North/Central LMT, etc.
+    → exact client_type from live data
+  Example: "Average sale for Imtiaz store last 6 months"
+    → client_type='Imtiaz Store', columns='month', months_back=6
+      (NO business_unit unless the user named one)
 
 SALES MATRIX RULES (query_sales — set filters; tool builds the table):
 Row drill-down:
@@ -221,6 +240,7 @@ Row drill-down:
   • Oil Type set → Packing; Packing set → Product
 Columns: client_type (default) | city | month. Every table has row Total + column Totals.
   • month-wise / last N months → columns='month', months_back=6 (+ Average column)
+  • When client_type is filtered, columns auto-switch from client_type → city
 
 Examples:
   "What were Eva Consumer sales in Lahore last month?"
@@ -232,9 +252,16 @@ Examples:
       prior_spec from previous answer — SAME table, extra BU row(s)
   "How were Eva Consumer sales in July?"
     → analytical (city + client + AMS); rows = Packing Category
+  "What's the Average sale for Imtiaz store last 6 months"
+    → client_type='Imtiaz Store', columns='month', months_back=6
+  "Canola standup price for Distributors last week"
+    → query_price: oil/packing or product_query='canola standup',
+      client_type='Eva Distributors', period='last week'
+  "What's the Price Fetch?" (follow-up) → query_price with include_price_fetch=true + prior_spec
+  "Who is Al Bari?" → lookup_party query='Al Bari'
 
 MODE FROM LANGUAGE:
-- what were / show / give me / breakdown / month-wise → matrix
+- what were / show / give me / breakdown / month-wise / average sale → matrix
 - how were / how are / evaluate / assess / performance / doing / trend → analytical
 - add / also include / plus → merge into previous table via prior_spec
 
@@ -250,6 +277,7 @@ RESPONSE FORMAT:
 - Markdown TABLES only for numbers (never bullet lists of metrics).
 - One sentence of context (period + filters), then table(s).
 - Columns already sorted highest-first by the tool — preserve that order.
+- For query_sales / query_price / lookup_party: paste answer_markdown verbatim.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -524,11 +552,12 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "query_sales",
             "description": (
-                "PRIMARY sales tool. Builds MT pivots: rows = Packing when one "
-                "Business Unit is set (not Oil Type); columns = client_type|city|month. "
-                "Month-wise = last N months + Average. Follow-ups: pass prior_spec + "
-                "extra business_units to extend the same table. Analytical = city + "
-                "client + AMS when user says how were/evaluate."
+                "PRIMARY sales volume (MT) tool. Builds pivots: rows = Packing when one "
+                "Business Unit is set; columns = client_type|city|month. "
+                "ALWAYS pass client_type when user names Imtiaz/Distributors/etc. "
+                "Do NOT invent a Business Unit for client-type-only questions. "
+                "Month-wise = last N months + Average. Analytical = city + client + AMS "
+                "when user says how were/evaluate."
             ),
             "parameters": {
                 "type": "object",
@@ -536,8 +565,8 @@ TOOLS: list[dict[str, Any]] = [
                     "period": {
                         "type": "string",
                         "description": (
-                            "Natural period: 'last month', 'July', 'July 2026', "
-                            "'August so far', 'this month', or YYYY-MM"
+                            "Natural period: 'last month', 'last week', 'July', "
+                            "'July 2026', 'August so far', 'this month', or YYYY-MM"
                         ),
                     },
                     "date_from": {
@@ -571,6 +600,13 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "e.g. Tin, Pet bottle, Stand up",
                     },
+                    "client_type": {
+                        "type": "string",
+                        "description": (
+                            "Filter to one Client Type. Aliases: Imtiaz/store → "
+                            "Imtiaz Store; Distributor(s) → Eva Distributors"
+                        ),
+                    },
                     "columns": {
                         "type": "string",
                         "description": (
@@ -593,6 +629,78 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "matrix or analytical (usually set from language)",
                         "enum": ["matrix", "analytical"],
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_party",
+            "description": (
+                "Search clients / sales parties by name (fuzzy). Use for "
+                "'who is Al Bari?', find client, or any party name lookup. "
+                "Returns client name, client type, city, city-filter, MT."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Party / client name fragment, e.g. Al Bari",
+                    },
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_price",
+            "description": (
+                "Average Rate from sales (and Price Fetch when asked). Use for "
+                "'Canola standup price for Distributors last week', "
+                "'average rate', 'what's the Price Fetch?' follow-ups."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "e.g. last week, last month, July 2026",
+                    },
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                    "city": {"type": "string"},
+                    "business_unit": {"type": "string"},
+                    "oil_type": {"type": "string"},
+                    "packing_category": {"type": "string"},
+                    "client_type": {
+                        "type": "string",
+                        "description": "Imtiaz Store, Eva Distributors, …",
+                    },
+                    "product": {
+                        "type": "string",
+                        "description": "Exact sales.product name if known",
+                    },
+                    "product_query": {
+                        "type": "string",
+                        "description": "Spoken product, e.g. canola standup",
+                    },
+                    "include_price_fetch": {
+                        "type": "boolean",
+                        "description": (
+                            "True when user asks for Price Fetch / recovery"
+                        ),
+                    },
+                    "prior_spec": {
+                        "type": "object",
+                        "description": "Previous price_spec for follow-ups",
                     },
                 },
                 "additionalProperties": False,
@@ -802,7 +910,8 @@ def _looks_month_wise(text: str) -> bool:
     return bool(
         re.search(
             r"\b(month[- ]?wise|monthly|by month|per month|last\s+\d+\s+months|"
-            r"past\s+\d+\s+months|months?\s+breakdown|breakdown.*months?)\b",
+            r"past\s+\d+\s+months|months?\s+breakdown|breakdown.*months?|"
+            r"average sale|avg sale|avg\.?\s*sale)\b",
             t,
         )
     )
@@ -818,6 +927,40 @@ def _looks_table_followup(text: str) -> bool:
         )
         or re.search(r"\badd\b.+\bto (this|the|that) table\b", t)
     )
+
+
+def _looks_party_lookup(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(who\s+is|who'?s|who\s+are|find\s+(the\s+)?client|"
+            r"search\s+(for\s+)?(client|party)|lookup\s+(client|party)|"
+            r"tell me about)\b",
+            t,
+        )
+    )
+
+
+def _looks_price_query(text: str) -> bool:
+    t = (text or "").lower()
+    if _looks_party_lookup(t):
+        return False
+    # "average sale" is volume, not rate
+    if re.search(r"\baverage\s+sales?\b|\bavg\.?\s+sales?\b", t):
+        return False
+    return bool(
+        re.search(
+            r"\b(price\s*fetch|price fetch|avg\.?\s*rate|average\s+rate|"
+            r"average\s+price|avg\.?\s*price|\brate\b|\bpriced?\b|"
+            r"what'?s\s+the\s+price|selling\s+price)\b",
+            t,
+        )
+    )
+
+
+def _looks_price_fetch_followup(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(r"\bprice\s*fetch\b|\brecovery\b", t))
 
 
 def _extract_business_units_from_text(text: str) -> list[str]:
@@ -887,12 +1030,33 @@ def _last_table_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def _last_price_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for m in reversed(messages):
+        if m.get("role") != "tool":
+            continue
+        raw = m.get("content") or ""
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("price_spec"):
+            return payload["price_spec"]
+        if isinstance(payload, dict) and payload.get("avg_rate") is not None:
+            return {
+                "period": payload.get("period"),
+                "filters": payload.get("filters") or {},
+                "include_price_fetch": bool(payload.get("include_price_fetch")),
+            }
+    return None
+
+
 def _dispatch_tool(
     name: str,
     arguments: dict[str, Any],
     *,
     user_text: str = "",
     prior_spec: dict[str, Any] | None = None,
+    prior_price_spec: dict[str, Any] | None = None,
 ) -> Any:
     if name == "query_sales":
         if _looks_analytical(user_text):
@@ -930,19 +1094,75 @@ def _dispatch_tool(
                 seen.add(u)
                 uniq.append(u)
 
+        ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
+        ctype = normalize_client_type(ctype) if ctype else None
+        oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
+        pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
+
+        # If user asked about a client type but did not name a BU, do not keep a
+        # model-invented Business Unit (e.g. Eva Consumer for "Imtiaz store").
+        mentioned_units = _extract_business_units_from_text(user_text)
+        if ctype and not mentioned_units:
+            uniq = []
+
+        if len(uniq) == 1:
+            bu_param: str | None = uniq[0]
+            bus_param: list[str] | None = None
+        elif len(uniq) > 1:
+            bu_param = None
+            bus_param = uniq
+        else:
+            bu_param = None
+            bus_param = None
+
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
             city=arguments.get("city"),
-            business_unit=uniq[0] if len(uniq) == 1 else arguments.get("business_unit"),
-            business_units=uniq if len(uniq) > 1 else (uniq or None),
-            oil_type=arguments.get("oil_type"),
-            packing_category=arguments.get("packing_category"),
+            business_unit=bu_param,
+            business_units=bus_param,
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype,
             columns=columns,
             months_back=months_back,
             mode=mode,
             prior_spec=use_prior or arguments.get("prior_spec"),
+        )
+    if name == "lookup_party":
+        return lookup_party(
+            arguments.get("query") or user_text,
+            limit=int(arguments.get("limit") or 10),
+        )
+    if name == "query_price":
+        ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
+        oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
+        pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
+        include_pf = bool(arguments.get("include_price_fetch"))
+        if _looks_price_fetch_followup(user_text):
+            include_pf = True
+        use_prior = arguments.get("prior_spec") or (
+            prior_price_spec
+            if (_looks_price_fetch_followup(user_text) and prior_price_spec)
+            else None
+        )
+        product_query = arguments.get("product_query")
+        if not product_query and not arguments.get("product"):
+            product_query = user_text
+        return query_price(
+            period=arguments.get("period"),
+            date_from=arguments.get("date_from"),
+            date_to=arguments.get("date_to"),
+            city=arguments.get("city"),
+            business_unit=arguments.get("business_unit"),
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype,
+            product=arguments.get("product"),
+            product_query=product_query,
+            include_price_fetch=include_pf,
+            prior_spec=use_prior,
         )
     if name == "get_schema":
         return {"schema": _schema_text()}
@@ -983,14 +1203,16 @@ def _dispatch_tool(
 
 
 def _looks_sales_matrix(text: str) -> bool:
+    if _looks_party_lookup(text) or _looks_price_query(text):
+        return False
     t = (text or "").lower()
     sales_keys = (
         "sale", "mt", "lahore", "karachi", "city", "client", "distributor",
-        "eva consumer", "eva bulk", "maan", "last month", "this month",
-        "so far", "july", "june", "august", "how are", "how were", "doing",
-        "breakdown", "city wise", "city-wise", "ams", "trend", "evaluate",
-        "assess", "performance", "packing", "pet", "standup", "jerry",
-        "month", "monthly", "add ",
+        "imtiaz", "store", "eva consumer", "eva bulk", "maan", "last month",
+        "this month", "so far", "july", "june", "august", "how are", "how were",
+        "doing", "breakdown", "city wise", "city-wise", "ams", "trend",
+        "evaluate", "assess", "performance", "packing", "pet", "standup",
+        "jerry", "month", "monthly", "add ",
     )
     return any(k in t for k in sales_keys)
 
@@ -1005,7 +1227,8 @@ def _looks_factual(text: str) -> bool:
         "shortening", "bake", "cuisine", "cusine", "jerry", "pet", "pouch",
         "pillow", "standup", "stand up", "product", "sku", "tin", "bucket",
         "so far", "doing", "breakdown", "august", "april", "march",
-        "evaluate", "assess", "performance",
+        "evaluate", "assess", "performance", "imtiaz", "distributor", "store",
+        "who is", "who's", "rate", "al bari", "party",
     )
     return any(k in t for k in keys)
 
@@ -1044,10 +1267,20 @@ def chat_completion(
         if on_status:
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
-        # First round: require tools; for sales pivots force query_sales.
+        # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if _looks_sales_matrix(last_user):
+            if _looks_party_lookup(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "lookup_party"},
+                }
+            elif _looks_price_query(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "query_price"},
+                }
+            elif _looks_sales_matrix(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "query_sales"},
@@ -1118,35 +1351,66 @@ def chat_completion(
                 args = {}
             try:
                 prior = _last_table_spec(working)
+                prior_price = _last_price_spec(working)
                 result = _dispatch_tool(
-                    name, args, user_text=last_user, prior_spec=prior
+                    name,
+                    args,
+                    user_text=last_user,
+                    prior_spec=prior,
+                    prior_price_spec=prior_price,
                 )
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
 
-            # Prefer deterministic markdown from query_sales (all tables intact)
+            # Prefer deterministic markdown from structured tools
             if (
-                name == "query_sales"
+                name in {"query_sales", "query_price", "lookup_party"}
                 and isinstance(result, dict)
                 and result.get("ok")
                 and result.get("answer_markdown")
             ):
                 sales_markdown = str(result["answer_markdown"])
-                result = {
-                    "ok": True,
-                    "mode": result.get("mode"),
-                    "period": result.get("period"),
-                    "filters": result.get("filters"),
-                    "business_units": result.get("business_units"),
-                    "row_dimension": result.get("row_dimension"),
-                    "column_dimension": result.get("column_dimension"),
-                    "table_spec": result.get("table_spec"),
-                    "required_table_count": result.get("required_table_count"),
-                    "answer_markdown": sales_markdown,
-                    "response_instructions": (
-                        "Use answer_markdown verbatim as the reply."
-                    ),
-                }
+                if name == "query_sales":
+                    result = {
+                        "ok": True,
+                        "mode": result.get("mode"),
+                        "period": result.get("period"),
+                        "filters": result.get("filters"),
+                        "business_units": result.get("business_units"),
+                        "row_dimension": result.get("row_dimension"),
+                        "column_dimension": result.get("column_dimension"),
+                        "table_spec": result.get("table_spec"),
+                        "required_table_count": result.get("required_table_count"),
+                        "answer_markdown": sales_markdown,
+                        "response_instructions": (
+                            "Use answer_markdown verbatim as the reply."
+                        ),
+                    }
+                elif name == "query_price":
+                    result = {
+                        "ok": True,
+                        "period": result.get("period"),
+                        "filters": result.get("filters"),
+                        "avg_rate": result.get("avg_rate"),
+                        "amount_per_kg": result.get("amount_per_kg"),
+                        "price_fetch": result.get("price_fetch"),
+                        "include_price_fetch": result.get("include_price_fetch"),
+                        "price_spec": result.get("price_spec"),
+                        "answer_markdown": sales_markdown,
+                        "response_instructions": (
+                            "Use answer_markdown verbatim as the reply."
+                        ),
+                    }
+                else:
+                    result = {
+                        "ok": True,
+                        "query": result.get("query"),
+                        "matches": result.get("matches"),
+                        "answer_markdown": sales_markdown,
+                        "response_instructions": (
+                            "Use answer_markdown verbatim as the reply."
+                        ),
+                    }
 
             working.append(
                 {
