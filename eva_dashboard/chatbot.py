@@ -280,6 +280,9 @@ Examples:
   "Top 10 parties by AMS in Karachi"
     → analyze_parties city='Karachi', metric='ams', limit=10
   "Top 5 distributors for Eva VTF" → client_type + oil_type, metric='ams' (default)
+  "Who were the top distributors in this" (follow-up after a sales table)
+    → analyze_parties with prior_spec filters (city/BU/period) +
+      client_type='Eva Distributors', metric='volume' (same sales as the table)
   "Which distributors are performing poorly in Lahore?"
     → metric='vs_ams', sort='asc', city='Lahore'
   "New parties last 6 months" / "new distributors last month"
@@ -1160,12 +1163,15 @@ def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
     if re.search(
         r"\b("
-        r"top\s+\d|highest|grow|growth|doing well|share of|percent|% of|ams|"
+        r"top\s+\d|top\s+(distributors?|parties|clients|imtiaz)|"
+        r"who\s+(are|were)\s+the\s+top|highest|grow|growth|doing well|"
+        r"share of|percent|% of|ams|"
         r"poorly|poor performance|falling|behind|underperform|not doing well|"
         r"new\s+(parties|clients|distributors)|new in\b|"
         r"lost\s+(parties|clients|distributors)|silent|"
         r"product mix|packing mix|product break|sku[- ]?wise|breakdown|"
-        r"invoice|frequency|city league|by volume|vs\s*ams"
+        r"invoice|frequency|city league|by volume|vs\s*ams|"
+        r"in this|from this|this table"
         r")\b",
         t,
     ):
@@ -1184,12 +1190,29 @@ def _looks_client_list(text: str) -> bool:
     )
 
 
+def _looks_context_followup(text: str) -> bool:
+    """True when the user refers to the previous answer/table (in this / from that)."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"in this|from this|in that|from that|this table|that table|"
+            r"above|these sales|those sales|in the above|from the above|"
+            r"same (period|filters?|scope|table)|for this"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _looks_party_analytics(text: str) -> bool:
     t = (text or "").lower()
     return bool(
         re.search(
             r"\b("
             r"top\s+\d+|highest sale|highest share|which\s+(imtiaz|distributor)|"
+            r"who\s+(are|were)\s+the\s+top|"
+            r"top\s+(distributors?|parties|clients|imtiaz|stores?)|"
             r"doing well|performing well|performing poorly|poorly|"
             r"falling behind|falling in sales|behind on|not doing well|"
             r"underperform|grew|grow(th|n)?|"
@@ -1207,7 +1230,50 @@ def _looks_party_analytics(text: str) -> bool:
             r")\b",
             t,
         )
+        or (
+            _looks_context_followup(t)
+            and re.search(
+                r"\b(distributors?|parties|clients|imtiaz|stores?)\b",
+                t,
+            )
+            and re.search(r"\b(top|best|highest|rank)\b", t)
+        )
     )
+
+
+def _party_filters_from_prior(
+    prior_spec: dict[str, Any] | None,
+    user_text: str,
+) -> dict[str, Any]:
+    """Carry city / BU / period / etc. from the last sales table when user says 'in this'."""
+    if not prior_spec or not _looks_context_followup(user_text):
+        return {}
+    pf = prior_spec.get("filters") or {}
+    out: dict[str, Any] = {}
+    if pf.get("city"):
+        out["city"] = pf["city"]
+    if pf.get("oil_type"):
+        out["oil_type"] = pf["oil_type"]
+    if pf.get("packing_category"):
+        out["packing_category"] = pf["packing_category"]
+    if pf.get("client_type"):
+        out["client_type"] = pf["client_type"]
+    bu = pf.get("business_unit")
+    units = list(prior_spec.get("business_units") or [])
+    if not bu and len(units) == 1:
+        bu = units[0]
+    if bu:
+        out["business_unit"] = bu
+    # Prefer explicit period phrase; else fixed dates from prior period
+    if prior_spec.get("period_phrase"):
+        out["period"] = prior_spec["period_phrase"]
+    elif prior_spec.get("period"):
+        p = prior_spec["period"] or {}
+        if p.get("date_from") and p.get("date_to"):
+            out["date_from"] = p["date_from"]
+            out["date_to"] = p["date_to"]
+            out["period"] = None
+    return out
 
 
 def _looks_price_query(text: str) -> bool:
@@ -1441,24 +1507,52 @@ def _dispatch_tool(
         )
     if name == "analyze_parties":
         inferred = infer_party_analytics_from_text(user_text)
+        prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+        # Context follow-up ("in this"): match the sales table numbers → volume
+        metric = (
+            arguments.get("metric")
+            or inferred.get("metric")
+            or ("volume" if prior_ctx else None)
+            or "ams"
+        )
+        if (
+            prior_ctx
+            and metric == "ams"
+            and (inferred.get("metric") or "ams") == "ams"
+            and not arguments.get("metric")
+        ):
+            if not re.search(
+                r"\b(ams|average (monthly )?sale|growth|yoy|vs\s*ams)\b",
+                (user_text or "").lower(),
+            ):
+                metric = "volume"
         return analyze_parties(
-            period=arguments.get("period") or inferred.get("period"),
-            date_from=arguments.get("date_from"),
-            date_to=arguments.get("date_to"),
-            city=arguments.get("city") or inferred.get("city"),
+            period=arguments.get("period")
+            or inferred.get("period")
+            or prior_ctx.get("period"),
+            date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
+            date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
+            city=arguments.get("city")
+            or inferred.get("city")
+            or prior_ctx.get("city"),
             client_type=normalize_client_type(
-                arguments.get("client_type") or inferred.get("client_type")
+                arguments.get("client_type")
+                or inferred.get("client_type")
+                or prior_ctx.get("client_type")
             ),
             business_unit=arguments.get("business_unit")
-            or inferred.get("business_unit"),
+            or inferred.get("business_unit")
+            or prior_ctx.get("business_unit"),
             oil_type=arguments.get("oil_type")
             or inferred.get("oil_type")
-            or extract_oil_type_from_text(user_text),
+            or extract_oil_type_from_text(user_text)
+            or prior_ctx.get("oil_type"),
             packing_category=arguments.get("packing_category")
             or inferred.get("packing_category")
-            or extract_packing_from_text(user_text),
+            or extract_packing_from_text(user_text)
+            or prior_ctx.get("packing_category"),
             brand=arguments.get("brand") or inferred.get("brand"),
-            metric=arguments.get("metric") or inferred.get("metric") or "ams",
+            metric=metric,
             compare_period=arguments.get("compare_period")
             or inferred.get("compare_period"),
             share_city=arguments.get("share_city")

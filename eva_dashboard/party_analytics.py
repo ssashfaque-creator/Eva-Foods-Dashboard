@@ -1343,7 +1343,9 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     m_lim = re.search(r"\btop\s+(\d{1,3})\b", t)
     if m_lim:
         out["limit"] = int(m_lim.group(1))
-    elif re.search(r"\bhighest\b|\bwhich\b", t) and not re.search(r"\btop\s+\d", t):
+    elif re.search(r"\b(highest|who\s+(are|were)\s+the\s+top|top\s+distributors?)\b", t):
+        out["limit"] = 10
+    elif re.search(r"\bwhich\b", t) and not re.search(r"\btop\s+\d", t):
         out["limit"] = 10
 
     # City league
@@ -1363,6 +1365,13 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         out["limit"] = 200
 
     # Metrics (order matters)
+    context_ref = bool(
+        re.search(
+            r"\b(in this|from this|in that|from that|this table|that table|"
+            r"above|these sales|those sales|for this)\b",
+            t,
+        )
+    )
     if re.search(
         r"\b(new\s+(parties|clients|distributors|imtiaz)|new in\b|first sale|"
         r"newly\s+added)\b",
@@ -1439,6 +1448,11 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
             out["metric"] = "doing_well"
     elif re.search(r"\bvs\s*ams\b|\bagainst ams\b|\brelative to ams\b", t):
         out["metric"] = "vs_ams"
+    elif context_ref and re.search(
+        r"\b(top|highest|who\s+(are|were)\s+the\s+top)\b", t
+    ):
+        # "top distributors in this" → volume of the prior sales table
+        out["metric"] = "volume"
     elif re.search(r"\b(by )?volume\b|\btop sales\b|\bhighest sale\b", t) and not re.search(
         r"\bgrowth\b", t
     ):

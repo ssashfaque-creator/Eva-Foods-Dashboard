@@ -11,6 +11,7 @@ from eva_dashboard.chatbot import (
     _looks_client_list,
     _looks_party_analytics,
     _looks_party_lookup,
+    _looks_sales_matrix,
 )
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.party_analytics import (
@@ -111,6 +112,65 @@ def test_routing_client_list_vs_name_lookup() -> None:
     assert _looks_party_lookup("Who is Al Bari?")
     assert _looks_party_analytics("Top 10 parties by AMS in Karachi")
     assert _looks_party_analytics("Which distributors grew VTF vs July last year")
+    assert _looks_party_analytics("Who were the top distributors in this")
+
+
+def test_top_distributors_in_this_followup() -> None:
+    """After a Consumer×Lahore×July matrix, 'top distributors in this' ranks parties."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            q = "Who were the top distributors in this"
+            assert _looks_party_analytics(q)
+            assert not _looks_client_list(q)
+            assert not _looks_sales_matrix(q)
+
+            inferred = infer_party_analytics_from_text(q)
+            assert inferred["metric"] == "volume"
+            assert inferred["client_type"] == "Eva Distributors"
+
+            prior = {
+                "period_phrase": "July 2026",
+                "period": {
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-31",
+                    "label": "Jul 2026",
+                },
+                "filters": {
+                    "city": "Lahore",
+                    "business_unit": "Eva Consumer",
+                    "oil_type": None,
+                    "packing_category": None,
+                    "client_type": None,
+                },
+                "business_units": ["Eva Consumer"],
+                "column_dimension": "client_type",
+                "row_dimension": "packing_category",
+            }
+            out = _dispatch_tool(
+                "analyze_parties",
+                {},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out["ok"] is True
+            assert out["metric"] == "volume"
+            assert out["filters"]["city"] == "Lahore"
+            assert out["filters"]["client_type"] == "Eva Distributors"
+            assert out["filters"]["business_unit"] == "Eva Consumer"
+            assert out["period"]["date_from"].startswith("2026-07")
+            parties = [p["party"] for p in out["parties"]]
+            assert "Alpha Dist" in parties
+            assert "Imtiaz A" not in parties
+            # Alpha has more July Consumer volume in Lahore than Beta
+            assert parties[0] == "Alpha Dist"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
 
 
 def test_list_distributors_in_lahore() -> None:
