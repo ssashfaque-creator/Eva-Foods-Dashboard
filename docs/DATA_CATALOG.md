@@ -188,10 +188,13 @@ For sales questions the assistant should call **`query_sales` once** (not multi-
 | Nothing (e.g. Lahore last month) | Business Unit | Client Type |
 | Business Unit (e.g. Eva Consumer) | Oil Type | Client Type |
 | Business Unit + Oil Type | Packing Category | Client Type |
+| Packing Category | Product | Client Type |
 | Asks “city-wise” | (same row rule) | City |
 
-**Analytical** (“how are / how were sales doing”): city matrix + client matrix + trend  
-(Volume, AMS, Expected if partial month, % vs expected/AMS).
+**Mode from language (not from filters):**
+- “what were / show / breakdown” → **matrix** (one pivot)
+- “how were / how are / evaluate / assess / performance / doing / trend” → **analytical**
+  (city + client + AMS trend) — works for Business Unit, Oil Type, **or Packing** scope
 
 AMS = mean of the three prior full calendar months (same filters).  
 Partial month Expected = `(days_elapsed / days_in_month) × AMS`.  

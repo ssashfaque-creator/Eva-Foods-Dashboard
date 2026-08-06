@@ -223,21 +223,27 @@ Column default = **client_type** (Eva Distributors, …), highest totals first.
   • City filter (e.g. Lahore) goes in `city=`, not as columns unless they ask city-wise.
 
 Examples:
-  "Sales in Lahore last month"
-    → query_sales(period='last month', city='Lahore')  # matrix: BU × client_type
-  "Eva Consumer sales in Lahore last month" / "How were Eva Consumer sales in July?"
-    → query_sales(period='last month', city='Lahore', business_unit='Eva Consumer')
-      # AUTO analytical: MUST show city table + client table + AMS trend (3 tables)
+  "What were the sales in Lahore last month?"
+    → query_sales(..., city='Lahore', mode='matrix')  # BU × client_type
+  "What were Eva Consumer sales in Lahore last month?"
+    → query_sales(..., city='Lahore', business_unit='Eva Consumer', mode='matrix')
+      # Oil Type × client_type — ONE matrix only
+  "What were Eva Canola / Stand up pouch sales last month?"
+    → query_sales(..., oil_type='Eva Canola' or packing_category='Stand up', mode='matrix')
   "City-wise breakdown of Eva Consumer sales last month"
-    → query_sales(period='last month', business_unit='Eva Consumer', columns='city')
-      # still analytical pack (city + client + trend)
-  "How are Eva Consumer sales doing so far in August?"
-    → query_sales(period='August so far', business_unit='Eva Consumer')
+    → query_sales(..., business_unit='Eva Consumer', columns='city', mode='matrix')
+  "How were Eva Consumer sales in July?" / "Evaluate Eva Consumer so far in August"
+    → query_sales(..., business_unit='Eva Consumer', mode='analytical')
+      # MUST show all 3: city + client + AMS trend
+  "How were Stand up pouch sales last month?" / "Evaluate pet bottle performance"
+    → query_sales(..., packing_category='Stand up' or 'Pet bottle', mode='analytical')
+      # same 3-table analytical pack; rows = Product (next layer under packing)
 
-ANALYTICAL mode (default whenever Business Unit is set):
-- ALWAYS render all tables in the tool's `tables` list (required_table_count=3).
-- Never stop after the client-type table — include AMS trend.
-- Partial month → Expected + % vs Expected; full month → % vs AMS only.
+MODE FROM LANGUAGE (critical):
+- “what were / show / give me / breakdown” → mode='matrix' (single pivot)
+- “how were / how are / how is / evaluate / assess / performance / doing /
+  trend / vs AMS / analysis” → mode='analytical' (3 tables, always)
+- Analytical works at Business Unit, Oil Type, OR Packing Category scope.
 
 SKU / product language questions (single product):
 - resolve_product_language then product_sales (or query with packing/oil filters).
@@ -573,11 +579,12 @@ TOOLS: list[dict[str, Any]] = [
                     "mode": {
                         "type": "string",
                         "description": (
-                            "auto (default): analytical when business_unit/oil_type set; "
-                            "analytical: always 3 tables (city+client+AMS trend); "
-                            "matrix: single pivot only (use only when no BU filter)"
+                            "matrix (default for 'what were' / show / breakdown) = "
+                            "single pivot. analytical (for 'how were' / evaluate / "
+                            "assess / performance / doing / trend) = city + client + "
+                            "AMS trend — required at any filter depth including packing."
                         ),
-                        "enum": ["auto", "matrix", "analytical"],
+                        "enum": ["matrix", "analytical"],
                     },
                 },
                 "additionalProperties": False,
@@ -735,15 +742,53 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
+def _looks_analytical(text: str) -> bool:
+    """True when the user asks for evaluation / performance, not a plain 'what were' dump."""
+    t = (text or "").lower()
+    # "how much" is a quantity ask → matrix, not analytical
+    if re.search(r"\bhow much\b", t) and not re.search(
+        r"\b(evaluate|assess|performance|trend|ams)\b", t
+    ):
+        return False
+    patterns = (
+        r"\bhow were\b",
+        r"\bhow are\b",
+        r"\bhow is\b",
+        r"\bhow did\b",
+        r"\bhow do\b",
+        r"\bevaluate\b",
+        r"\bevaluating\b",
+        r"\bevaluation\b",
+        r"\bassess\b",
+        r"\bassessing\b",
+        r"\bassessment\b",
+        r"\bperformance\b",
+        r"\bdoing\b",  # "how are … doing"
+        r"\btrend\b",
+        r"\banalys[ei]",
+        r"\bvs\s*ams\b",
+        r"\bagainst ams\b",
+        r"\bcompared to ams\b",
+        r"\binsight",
+        r"\breview\b",
+    )
+    return any(re.search(p, t) for p in patterns)
+
+
+def _dispatch_tool(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    user_text: str = "",
+) -> Any:
     if name == "query_sales":
-        mode = arguments.get("mode") or "auto"
-        # Model often picks mode=matrix for "Eva Consumer … July" — upgrade when
-        # a Business Unit / Oil Type is in scope so AMS analytical tables are returned.
-        bu = (arguments.get("business_unit") or "").strip()
-        oil = (arguments.get("oil_type") or "").strip()
-        if mode == "matrix" and (bu or oil):
+        # Mode comes from the user's language, not from whether a BU/pack is set.
+        # "what were …" → matrix; "how were / evaluate …" → analytical
+        # (works for Business Unit, Oil Type, or Packing Category scope).
+        if _looks_analytical(user_text):
             mode = "analytical"
+        else:
+            mode = "matrix"
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
@@ -799,7 +844,8 @@ def _looks_sales_matrix(text: str) -> bool:
         "sale", "mt", "lahore", "karachi", "city", "client", "distributor",
         "eva consumer", "eva bulk", "maan", "last month", "this month",
         "so far", "july", "june", "august", "how are", "how were", "doing",
-        "breakdown", "city wise", "city-wise", "ams", "trend",
+        "breakdown", "city wise", "city-wise", "ams", "trend", "evaluate",
+        "assess", "performance", "packing", "pet", "standup", "jerry",
     )
     return any(k in t for k in sales_keys)
 
@@ -814,6 +860,7 @@ def _looks_factual(text: str) -> bool:
         "shortening", "bake", "cuisine", "cusine", "jerry", "pet", "pouch",
         "pillow", "standup", "stand up", "product", "sku", "tin", "bucket",
         "so far", "doing", "breakdown", "august", "april", "march",
+        "evaluate", "assess", "performance",
     )
     return any(k in t for k in keys)
 
@@ -924,7 +971,7 @@ def chat_completion(
             except json.JSONDecodeError:
                 args = {}
             try:
-                result = _dispatch_tool(name, args)
+                result = _dispatch_tool(name, args, user_text=last_user)
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
             working.append(

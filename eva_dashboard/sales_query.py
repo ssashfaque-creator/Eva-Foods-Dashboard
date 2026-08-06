@@ -507,7 +507,7 @@ def query_sales(
     oil_type: str | None = None,
     packing_category: str | None = None,
     columns: str = "client_type",
-    mode: str = "auto",
+    mode: str = "matrix",
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -521,9 +521,9 @@ def query_sales(
     Pass columns='city' for a city-wise breakdown.
 
     mode:
-      auto — analytical when Business Unit (or Oil Type) is set; else matrix
-      analytical — city + client + AMS trend tables (all must be shown)
-      matrix — single pivot only
+      matrix — single pivot (“what were sales…”)
+      analytical — city + client + AMS trend (“how were / evaluate…”)
+        Works at any filter depth (BU, Oil Type, or Packing Category).
     """
     bu = _normalize_business_unit(business_unit)
     oil = (oil_type or "").strip() or None
@@ -557,10 +557,9 @@ def query_sales(
 
     primary = _pivot_mt(frame, row_dim, col)
 
-    mode_norm = (mode or "auto").strip().lower()
-    if mode_norm in {"auto", "", "default"}:
-        # Business Unit / Oil Type scoped questions get full analytical pack
-        mode_norm = "analytical" if (bu or oil) else "matrix"
+    mode_norm = (mode or "matrix").strip().lower()
+    if mode_norm in {"auto", "default"}:
+        mode_norm = "matrix"
 
     result: dict[str, Any] = {
         "ok": True,
@@ -593,7 +592,6 @@ def query_sales(
         result["city_matrix"] = city_matrix
         result["client_matrix"] = client_matrix
         result["trend"] = trend
-        # Ordered list the model must render completely
         trend_cols = "Volume | AMS | " + (
             "Expected | % vs Expected"
             if period_info.get("partial_month")
