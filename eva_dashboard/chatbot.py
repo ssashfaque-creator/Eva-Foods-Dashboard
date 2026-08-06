@@ -224,22 +224,20 @@ Column default = **client_type** (Eva Distributors, …), highest totals first.
 
 Examples:
   "Sales in Lahore last month"
-    → query_sales(period='last month', city='Lahore', columns='client_type', mode='matrix')
-  "Eva Consumer sales in Lahore last month"
-    → query_sales(period='last month', city='Lahore', business_unit='Eva Consumer',
-                  columns='client_type', mode='matrix')
+    → query_sales(period='last month', city='Lahore')  # matrix: BU × client_type
+  "Eva Consumer sales in Lahore last month" / "How were Eva Consumer sales in July?"
+    → query_sales(period='last month', city='Lahore', business_unit='Eva Consumer')
+      # AUTO analytical: MUST show city table + client table + AMS trend (3 tables)
   "City-wise breakdown of Eva Consumer sales last month"
-    → query_sales(period='last month', business_unit='Eva Consumer', columns='city', mode='matrix')
+    → query_sales(period='last month', business_unit='Eva Consumer', columns='city')
+      # still analytical pack (city + client + trend)
   "How are Eva Consumer sales doing so far in August?"
-    → query_sales(period='August so far', business_unit='Eva Consumer', mode='analytical')
-      (returns city_matrix + client_matrix + trend with Volume/AMS/Expected/% )
-  "How were Eva Consumer sales in July?"
-    → query_sales(period='July', business_unit='Eva Consumer', mode='analytical')
-      (trend has Volume/AMS/% vs AMS — NO Expected column for a completed month)
+    → query_sales(period='August so far', business_unit='Eva Consumer')
 
-ANALYTICAL mode:
-- Use mode='analytical' for “how are / how were / performance / doing / vs AMS / trend”.
-- Render THREE tables from the tool payload, then 2–4 short insight bullets.
+ANALYTICAL mode (default whenever Business Unit is set):
+- ALWAYS render all tables in the tool's `tables` list (required_table_count=3).
+- Never stop after the client-type table — include AMS trend.
+- Partial month → Expected + % vs Expected; full month → % vs AMS only.
 
 SKU / product language questions (single product):
 - resolve_product_language then product_sales (or query with packing/oil filters).
@@ -574,8 +572,12 @@ TOOLS: list[dict[str, Any]] = [
                     },
                     "mode": {
                         "type": "string",
-                        "description": "matrix (default) or analytical",
-                        "enum": ["matrix", "analytical"],
+                        "description": (
+                            "auto (default): analytical when business_unit/oil_type set; "
+                            "analytical: always 3 tables (city+client+AMS trend); "
+                            "matrix: single pivot only (use only when no BU filter)"
+                        ),
+                        "enum": ["auto", "matrix", "analytical"],
                     },
                 },
                 "additionalProperties": False,
@@ -735,6 +737,13 @@ TOOLS: list[dict[str, Any]] = [
 
 def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "query_sales":
+        mode = arguments.get("mode") or "auto"
+        # Model often picks mode=matrix for "Eva Consumer … July" — upgrade when
+        # a Business Unit / Oil Type is in scope so AMS analytical tables are returned.
+        bu = (arguments.get("business_unit") or "").strip()
+        oil = (arguments.get("oil_type") or "").strip()
+        if mode == "matrix" and (bu or oil):
+            mode = "analytical"
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
@@ -744,7 +753,7 @@ def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
             oil_type=arguments.get("oil_type"),
             packing_category=arguments.get("packing_category"),
             columns=arguments.get("columns") or "client_type",
-            mode=arguments.get("mode") or "matrix",
+            mode=mode,
         )
     if name == "get_schema":
         return {"schema": _schema_text()}

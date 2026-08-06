@@ -507,7 +507,7 @@ def query_sales(
     oil_type: str | None = None,
     packing_category: str | None = None,
     columns: str = "client_type",
-    mode: str = "matrix",
+    mode: str = "auto",
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -520,8 +520,10 @@ def query_sales(
     Column default: client_type (Eva Distributors, …), highest total first.
     Pass columns='city' for a city-wise breakdown.
 
-    mode='analytical' also returns city matrix, client matrix, and trend
-    (Volume / AMS / Expected / % ) for “how are sales doing” questions.
+    mode:
+      auto — analytical when Business Unit (or Oil Type) is set; else matrix
+      analytical — city + client + AMS trend tables (all must be shown)
+      matrix — single pivot only
     """
     bu = _normalize_business_unit(business_unit)
     oil = (oil_type or "").strip() or None
@@ -554,6 +556,12 @@ def query_sales(
     )
 
     primary = _pivot_mt(frame, row_dim, col)
+
+    mode_norm = (mode or "auto").strip().lower()
+    if mode_norm in {"auto", "", "default"}:
+        # Business Unit / Oil Type scoped questions get full analytical pack
+        mode_norm = "analytical" if (bu or oil) else "matrix"
+
     result: dict[str, Any] = {
         "ok": True,
         "metric": "mt",
@@ -567,16 +575,9 @@ def query_sales(
         "row_dimension": row_dim,
         "column_dimension": col,
         "matrix": primary,
-        "response_instructions": (
-            "Present the matrix as a markdown table. "
-            "State the period label and filters in one short sentence. "
-            "Do not invent numbers."
-        ),
     }
 
-    mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"analytical", "analysis", "how_are", "performance"}:
-        # Always provide city + client pivots + trend for analytical questions
         city_matrix = _pivot_mt(frame, row_dim, "city")
         client_matrix = _pivot_mt(frame, row_dim, "client_type")
         trend = _trend_table(
@@ -592,20 +593,57 @@ def query_sales(
         result["city_matrix"] = city_matrix
         result["client_matrix"] = client_matrix
         result["trend"] = trend
-        result["response_instructions"] = (
-            "Analytical answer — produce THREE markdown tables in order:\n"
-            "1) City-wise breakdown (from city_matrix)\n"
-            "2) Client-type breakdown (from client_matrix)\n"
-            "3) Trend / vs AMS (from trend): Volume, AMS"
-            + (
-                ", Expected sale, % vs Expected"
-                if period_info.get("partial_month")
-                else ", % vs AMS (no Expected column for a completed month)"
-            )
-            + ".\nAdd 2–4 bullets of interpretation (which oil types / cities lead, "
-            "who is ahead/behind expected)."
+        # Ordered list the model must render completely
+        trend_cols = "Volume | AMS | " + (
+            "Expected | % vs Expected"
+            if period_info.get("partial_month")
+            else "% vs AMS (no Expected — full month)"
         )
+        result["tables"] = [
+            {
+                "index": 1,
+                "title": "City-wise breakdown",
+                "source": "city_matrix",
+                "data": city_matrix,
+            },
+            {
+                "index": 2,
+                "title": "Client-type breakdown",
+                "source": "client_matrix",
+                "data": client_matrix,
+            },
+            {
+                "index": 3,
+                "title": f"Trend vs AMS ({trend_cols})",
+                "source": "trend",
+                "data": trend,
+            },
+        ]
+        result["response_instructions"] = (
+            "CRITICAL: You MUST render ALL tables in `tables` (usually 3) as markdown, "
+            "in order, with their titles as headings. Do NOT stop after the first table.\n"
+            "1) City-wise breakdown\n"
+            "2) Client-type breakdown\n"
+            f"3) Trend: {trend_cols}\n"
+            "Then add 2–4 short insight bullets (leaders, behind AMS/expected). "
+            "State the period label once. Do not invent numbers."
+        )
+        result["required_table_count"] = 3
     else:
         result["mode"] = "matrix"
+        result["tables"] = [
+            {
+                "index": 1,
+                "title": f"{row_dim} × {col}",
+                "source": "matrix",
+                "data": primary,
+            }
+        ]
+        result["required_table_count"] = 1
+        result["response_instructions"] = (
+            "Present the single matrix as a markdown table. "
+            "State the period label and filters in one short sentence. "
+            "Do not invent numbers."
+        )
 
     return result

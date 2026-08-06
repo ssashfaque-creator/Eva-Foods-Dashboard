@@ -139,10 +139,65 @@ def test_eva_consumer_rows_are_oil_type() -> None:
                 business_unit="Eva Consumer",
                 columns="client_type",
             )
+            # BU-scoped defaults to analytical with 3 tables
+            assert out["mode"] == "analytical"
             assert out["row_dimension"] == "oil_type"
-            oils = {r["oil_type"] for r in out["matrix"]["rows"]}
+            assert out["required_table_count"] == 3
+            assert len(out["tables"]) == 3
+            oils = {r["oil_type"] for r in out["client_matrix"]["rows"]}
             assert "Eva Canola" in oils
             assert "Eva Cooking" in oils
+            assert "trend" in out
+            assert "volume_mt" in out["trend"]["columns"]
+            assert "ams_mt" in out["trend"]["columns"]
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_bu_matrix_mode_still_available_explicitly() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            out = query_sales(
+                period="July 2026",
+                city="Lahore",
+                business_unit="Eva Consumer",
+                mode="matrix",
+            )
+            assert out["mode"] == "matrix"
+            assert out["required_table_count"] == 1
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_dispatch_upgrades_matrix_to_analytical_when_bu_set() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            out = _dispatch_tool(
+                "query_sales",
+                {
+                    "period": "July 2026",
+                    "city": "Lahore",
+                    "business_unit": "Eva Consumer",
+                    "mode": "matrix",
+                },
+            )
+            assert out["mode"] == "analytical"
+            assert out["required_table_count"] == 3
+            assert "trend" in out
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
