@@ -527,13 +527,14 @@ def page_chat() -> None:
     with st.expander("Example questions"):
         st.markdown(
             """
+**Matrix (one table)** — use *what were / show / breakdown*:
 - What were the sales in Lahore last month?
-- What were Eva Consumer sales in Lahore last month?
-- City-wise breakdown of Eva Consumer sales last month
-- How are Eva Consumer sales doing so far in August?
-- How were Eva Consumer sales in July?
-- How much VTF bulk last month?
-- Give me a full daily sales briefing for the latest date like the PDF summary
+- What were Eva Consumer sales in Karachi so far in August?
+
+**Analytical (city + client + AMS trend)** — use *how were / evaluate / assess*:
+- How are Eva Consumer sales doing in Karachi so far in August?
+- Evaluate Eva Consumer sales in July
+- How were Stand up pouch sales last month?
             """
         )
 

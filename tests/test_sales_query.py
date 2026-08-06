@@ -153,6 +153,37 @@ def test_eva_consumer_rows_are_oil_type() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_analytical_markdown_includes_all_three_tables() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            out = _dispatch_tool(
+                "query_sales",
+                {
+                    "period": "August so far",
+                    "city": "Karachi",
+                    "business_unit": "Eva Consumer",
+                },
+                user_text="How are Eva Consumer sales in Karachi so far in August?",
+            )
+            assert out["mode"] == "analytical"
+            md = out["answer_markdown"]
+            assert "### 1. City-wise breakdown" in md
+            assert "### 2. Client-type breakdown" in md
+            assert "### 3. Trend vs AMS" in md
+            assert "AMS" in md
+            assert "Expected" in md  # partial August
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_language_controls_matrix_vs_analytical() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
@@ -180,6 +211,7 @@ def test_language_controls_matrix_vs_analytical() -> None:
             )
             assert what["mode"] == "matrix"
             assert what["required_table_count"] == 1
+            assert "### 3. Trend vs AMS" not in (what.get("answer_markdown") or "")
 
             how = _dispatch_tool(
                 "query_sales",

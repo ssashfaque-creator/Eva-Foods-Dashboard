@@ -962,6 +962,7 @@ def chat_completion(
                 continue
             return text, working
 
+        sales_markdown: str | None = None
         for tc in tool_calls:
             name = tc.function.name
             if on_status:
@@ -974,6 +975,28 @@ def chat_completion(
                 result = _dispatch_tool(name, args, user_text=last_user)
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
+
+            # Prefer deterministic markdown from query_sales (all tables intact)
+            if (
+                name == "query_sales"
+                and isinstance(result, dict)
+                and result.get("ok")
+                and result.get("answer_markdown")
+            ):
+                sales_markdown = str(result["answer_markdown"])
+                result = {
+                    "ok": True,
+                    "mode": result.get("mode"),
+                    "period": result.get("period"),
+                    "filters": result.get("filters"),
+                    "row_dimension": result.get("row_dimension"),
+                    "required_table_count": result.get("required_table_count"),
+                    "answer_markdown": sales_markdown,
+                    "response_instructions": (
+                        "Use answer_markdown verbatim as the reply."
+                    ),
+                }
+
             working.append(
                 {
                     "role": "tool",
@@ -981,6 +1004,11 @@ def chat_completion(
                     "content": json.dumps(result, default=str)[:120_000],
                 }
             )
+
+        # Do not let the model drop tables — return formatted sales answer directly
+        if sales_markdown and len(tool_calls) == 1:
+            working.append({"role": "assistant", "content": sales_markdown})
+            return sales_markdown, working
 
     return (
         "I hit the tool-call limit before finishing. Please ask a more specific question.",

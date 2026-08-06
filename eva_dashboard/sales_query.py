@@ -644,4 +644,171 @@ def query_sales(
             "Do not invent numbers."
         )
 
+    result["answer_markdown"] = render_sales_markdown(result)
+    result["response_instructions"] = (
+        "REQUIRED: Your entire reply MUST be the `answer_markdown` field verbatim "
+        "(it already has the correct tables). "
+        "For analytical answers you may add at most 2–4 insight bullets AFTER that markdown. "
+        "Do not rebuild or omit tables."
+    )
     return result
+
+
+def _md_escape(value: Any) -> str:
+    text = str(value if value is not None else "")
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
+    columns = list(matrix.get("columns") or [])
+    rows = list(matrix.get("rows") or [])
+    if not columns:
+        return "_No data._\n"
+    header = "| " + " | ".join([row_key] + [_md_escape(c) for c in columns]) + " |"
+    sep = "| " + " | ".join(["---"] * (len(columns) + 1)) + " |"
+    lines = [header, sep]
+    for row in rows:
+        cells = [_md_escape(row.get(row_key, ""))]
+        for c in columns:
+            val = row.get(c, 0)
+            if isinstance(val, float):
+                cells.append(f"{val:.3f}".rstrip("0").rstrip(".") if val != 0 else "0")
+            else:
+                cells.append(_md_escape(val))
+        lines.append("| " + " | ".join(cells) + " |")
+    # Grand total line if present
+    gt = matrix.get("grand_total_mt")
+    if gt is not None and rows:
+        lines.append(f"\n_Grand total: **{gt} MT**_")
+    return "\n".join(lines) + "\n"
+
+
+def _trend_to_markdown(trend: dict[str, Any]) -> str:
+    row_key = str(trend.get("row_dimension") or "row")
+    columns = list(trend.get("columns") or [])
+    rows = list(trend.get("rows") or [])
+    if not columns:
+        return "_No trend data._\n"
+    # Prefer friendly headers
+    label = {
+        row_key: row_key.replace("_", " ").title(),
+        "volume_mt": "Volume (MT)",
+        "ams_mt": "AMS (MT)",
+        "expected_mt": "Expected (MT)",
+        "pct_vs_expected": "% vs Expected",
+        "pct_vs_ams": "% vs AMS",
+    }
+    header_cols = [label.get(c, c) for c in columns]
+    header = "| " + " | ".join(_md_escape(c) for c in header_cols) + " |"
+    sep = "| " + " | ".join(["---"] * len(columns)) + " |"
+    lines = [header, sep]
+    for row in rows:
+        cells = []
+        for c in columns:
+            val = row.get(c)
+            if val is None:
+                cells.append("—")
+            elif isinstance(val, float):
+                if c.startswith("pct_"):
+                    cells.append(f"{val:+.1f}%")
+                else:
+                    cells.append(f"{val:.3f}".rstrip("0").rstrip(".") if val else "0")
+            else:
+                cells.append(_md_escape(val))
+        lines.append("| " + " | ".join(cells) + " |")
+    note = ""
+    if trend.get("partial_month"):
+        note = (
+            f"\n_Partial month: Expected = "
+            f"{trend.get('days_elapsed')}/{trend.get('days_in_month')} × AMS. "
+            f"{trend.get('ams_definition', '')}_"
+        )
+    else:
+        note = f"\n_Full month — AMS is the expected baseline. {trend.get('ams_definition', '')}_"
+    return "\n".join(lines) + note + "\n"
+
+
+def _filter_blurb(filters: dict[str, Any], period: dict[str, Any]) -> str:
+    bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
+    if filters.get("city"):
+        bits.append(f"city **{filters['city']}**")
+    if filters.get("business_unit"):
+        bits.append(f"Business Unit **{filters['business_unit']}**")
+    if filters.get("oil_type"):
+        bits.append(f"Oil Type **{filters['oil_type']}**")
+    if filters.get("packing_category"):
+        bits.append(f"Packing **{filters['packing_category']}**")
+    return " · ".join(bits)
+
+
+def _auto_insights(result: dict[str, Any]) -> list[str]:
+    tips: list[str] = []
+    trend = result.get("trend") or {}
+    rows = list(trend.get("rows") or [])
+    partial = bool(trend.get("partial_month"))
+    pct_key = "pct_vs_expected" if partial else "pct_vs_ams"
+    scored = [
+        (r, r.get(pct_key))
+        for r in rows
+        if isinstance(r.get(pct_key), (int, float))
+    ]
+    if scored:
+        best = max(scored, key=lambda x: float(x[1]))
+        worst = min(scored, key=lambda x: float(x[1]))
+        dim = trend.get("row_dimension", "line")
+        tips.append(
+            f"**{best[0].get(dim)}** is furthest ahead of "
+            f"{'expected' if partial else 'AMS'} ({best[1]:+.1f}%)."
+        )
+        if worst[0].get(dim) != best[0].get(dim):
+            tips.append(
+                f"**{worst[0].get(dim)}** is furthest behind "
+                f"({'expected' if partial else 'AMS'} {worst[1]:+.1f}%)."
+            )
+    client = result.get("client_matrix") or {}
+    crow = (client.get("rows") or [None])[0]
+    if crow:
+        # largest non-total column
+        cols = [c for c in (client.get("columns") or []) if c != "Total"]
+        if cols:
+            top_col = cols[0]
+            tips.append(
+                f"Largest client-type column: **{top_col}** "
+                f"(sorted highest-first)."
+            )
+    return tips[:4]
+
+
+def render_sales_markdown(result: dict[str, Any]) -> str:
+    """Deterministic markdown so the UI always shows every required table."""
+    if not result.get("ok"):
+        return f"Could not build sales answer: {result.get('error')}"
+
+    period = result.get("period") or {}
+    filters = result.get("filters") or {}
+    row_dim = str(result.get("row_dimension") or "row")
+    blurb = _filter_blurb(filters, period)
+    parts = [f"Sales for {blurb} (MT).\n"]
+
+    if result.get("mode") == "analytical":
+        parts.append("### 1. City-wise breakdown\n")
+        parts.append(
+            _matrix_to_markdown(result.get("city_matrix") or {}, row_dim)
+        )
+        parts.append("### 2. Client-type breakdown\n")
+        parts.append(
+            _matrix_to_markdown(result.get("client_matrix") or {}, row_dim)
+        )
+        parts.append("### 3. Trend vs AMS\n")
+        parts.append(_trend_to_markdown(result.get("trend") or {}))
+        insights = _auto_insights(result)
+        if insights:
+            parts.append("### Insights\n")
+            parts.extend(f"- {t}" for t in insights)
+            parts.append("")
+    else:
+        col = str(result.get("column_dimension") or "column")
+        parts.append(f"### {row_dim.replace('_', ' ').title()} × {col.replace('_', ' ').title()}\n")
+        parts.append(_matrix_to_markdown(result.get("matrix") or {}, row_dim))
+
+    return "\n".join(parts).strip() + "\n"
