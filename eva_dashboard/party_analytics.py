@@ -17,6 +17,7 @@ from eva_dashboard.client_language import (
 )
 from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
+from eva_dashboard.fmt import mt_round
 from eva_dashboard.sales_query import (
     _PARTY_JOIN,
     _normalize_business_unit,
@@ -563,8 +564,8 @@ def analyze_parties(
             "period": period_info,
             "filters": filters,
             "city": target_city,
-            "city_mt": round(in_city, 3),
-            "total_mt": round(total, 3),
+            "city_mt": mt_round(in_city),
+            "total_mt": mt_round(total),
             "share_pct": round(share_pct, 1) if share_pct is not None else None,
             "answer_markdown": "\n".join(md) + "\n",
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
@@ -609,7 +610,7 @@ def analyze_parties(
             rows.append(
                 {
                     dim: str(r[dim]),
-                    "volume_mt": round(mt, 3),
+                    "volume_mt": mt_round(mt),
                     "share_pct": round(mt / total * 100.0, 1) if total else None,
                 }
             )
@@ -643,7 +644,7 @@ def analyze_parties(
             "mix_dimension": dim,
             "period": period_info,
             "filters": filters,
-            "total_mt": round(total, 3),
+            "total_mt": mt_round(total),
             "rows": rows,
             "answer_markdown": "\n".join(lines).strip() + "\n",
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
@@ -773,8 +774,8 @@ def analyze_parties(
                     "party": party,
                     **meta,
                     "volume_mt": 0.0,
-                    "ams_mt": round(float(ams_v), 3),
-                    "score": round(float(ams_v), 3),
+                    "ams_mt": mt_round(float(ams_v)),
+                    "score": mt_round(ams_v),
                 }
             )
         rows.sort(key=lambda r: (-(r["ams_mt"] or 0), str(r["party"])))
@@ -850,8 +851,8 @@ def analyze_parties(
                 {
                     "party": party,
                     **meta,
-                    "volume_mt": round(p_mt, 3),
-                    "segment_mt": round(s_mt, 3),
+                    "volume_mt": mt_round(p_mt),
+                    "segment_mt": mt_round(s_mt),
                     "score": round(score, 1) if score is not None else None,
                 }
             )
@@ -1024,14 +1025,14 @@ def analyze_parties(
         entry = {
             **name_field,
             **meta,
-            "volume_mt": round(vol, 3),
-            "ams_mt": round(ams_v, 3),
-            "expected_mt": round(expected, 3) if expected is not None else None,
+            "volume_mt": mt_round(vol),
+            "ams_mt": mt_round(ams_v),
+            "expected_mt": mt_round(expected) if expected is not None else None,
             "pct_vs_ams": round(vs, 1) if vs is not None else None,
-            "prior_mt": round(prior, 3) if metric_n == "yoy" else None,
+            "prior_mt": mt_round(prior) if metric_n == "yoy" else None,
             "yoy_pct": round(yoy, 1) if yoy is not None else None,
             "invoices": inv_n,
-            "avg_invoice_mt": round(avg_inv, 3) if avg_inv is not None else None,
+            "avg_invoice_mt": mt_round(avg_inv) if avg_inv is not None else None,
             "doing_well": bool(vs is not None and vs >= 0),
         }
         rows.append(entry)

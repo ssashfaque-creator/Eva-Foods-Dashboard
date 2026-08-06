@@ -237,6 +237,14 @@ def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
             (inserted, f"skipped={skipped}", file_id),
         )
 
+    seasonality = None
+    try:
+        from eva_dashboard.seasonality import recompute_seasonality
+
+        seasonality = recompute_seasonality()
+    except Exception as exc:  # noqa: BLE001
+        seasonality = {"ok": False, "error": str(exc)}
+
     return {
         "file_type": "sales",
         "original_name": original_name,
@@ -244,6 +252,7 @@ def ingest_sales(path: Path | str, original_name: str | None = None) -> dict:
         "inserted": inserted,
         "skipped": skipped,
         "content_hash": content_hash,
+        "seasonality": seasonality,
     }
 
 

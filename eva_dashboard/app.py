@@ -120,7 +120,7 @@ def page_sales() -> None:
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Sales rows", f"{sales_count():,}")
     files = list_ingested_files("sales")
     c2.metric("Files imported", f"{len(files):,}")
@@ -128,6 +128,13 @@ def page_sales() -> None:
         c3.metric("Last import", str(files.iloc[0]["ingested_at"]))
     else:
         c3.metric("Last import", "—")
+    try:
+        from eva_dashboard.seasonality import seasonality_table
+
+        sea = seasonality_table()
+        c4.metric("Seasonality", sea.get("updated_at") or "Not built")
+    except Exception:
+        c4.metric("Seasonality", "—")
 
     sales_col, cat_col = st.columns(2)
 
@@ -137,7 +144,7 @@ def page_sales() -> None:
             "Sales Excel (.xlsx)",
             type=["xlsx"],
             key="sales_upload",
-            help="Sales sheet header on row 5.",
+            help="Sales sheet header on row 5. After import, week-of-month seasonality is rebuilt.",
         )
         if upload is not None and st.button(
             "Import sales file", type="primary", key="sales_btn"
@@ -146,6 +153,11 @@ def page_sales() -> None:
             try:
                 result = ingest_sales(tmp, original_name=upload.name)
                 st.success(_fmt_result(result))
+                sea = result.get("seasonality") or {}
+                if sea.get("ok"):
+                    st.info(sea.get("message") or "Seasonality updated.")
+                elif sea.get("error"):
+                    st.warning(f"Seasonality rebuild failed: {sea['error']}")
                 st.rerun()
             except DuplicateFileError as exc:
                 st.warning(str(exc))
@@ -153,6 +165,29 @@ def page_sales() -> None:
                 st.error(str(exc))
             finally:
                 tmp.unlink(missing_ok=True)
+
+        with st.expander("Week-of-month seasonality (by packing)", expanded=False):
+            st.caption(
+                "Average % of monthly volume in weeks 1–4 (days 1–7, 8–14, 15–21, 22+). "
+                "Rebuilt automatically after each sales import. Used for expected month close."
+            )
+            if st.button("Rebuild seasonality now", key="sea_rebuild"):
+                from eva_dashboard.seasonality import recompute_seasonality
+
+                out = recompute_seasonality()
+                if out.get("ok"):
+                    st.success(out.get("message"))
+                else:
+                    st.error(out.get("error") or "Failed")
+            from eva_dashboard.seasonality import seasonality_table
+
+            sea = seasonality_table()
+            if sea.get("rows"):
+                import pandas as pd
+
+                st.dataframe(pd.DataFrame(sea["rows"]), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No seasonality yet — import sales to build.")
 
     with cat_col:
         st.markdown("#### Upload categories")

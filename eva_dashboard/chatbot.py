@@ -19,6 +19,7 @@ from eva_dashboard.client_language import (
     normalize_client_type,
 )
 from eva_dashboard.db import connect, init_db
+from eva_dashboard.advanced_routing import infer_advanced_from_text, looks_advanced
 from eva_dashboard.party_analytics import (
     analyze_parties,
     extract_city_from_text,
@@ -32,6 +33,7 @@ from eva_dashboard.product_language import (
     resolve_product_language,
 )
 from eva_dashboard.sales_query import query_price, query_sales
+from eva_dashboard.seasonality import expected_month_close
 
 DEFAULT_MODEL = "gpt-4o"
 MAX_SQL_ROWS = 200
@@ -1006,6 +1008,67 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+
+TOOLS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "advanced_query",
+            "description": (
+                "Advanced analytics: city/client compare (+growth), WoW, packing/oil "
+                "growth, expected month close, silent this week, not ordered packing, "
+                "reactivated, days since invoice, concentration/shares, oil mix, "
+                "packing contribution, top SKUs, party profile, dumping/excessive sales."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": [
+                            "compare_cities",
+                            "compare_client_types",
+                            "week_over_week",
+                            "dimension_growth",
+                            "expected_month",
+                            "silent_week",
+                            "not_ordered",
+                            "reactivated",
+                            "days_since_invoice",
+                            "concentration",
+                            "concentration_growth",
+                            "oil_mix",
+                            "packing_contribution",
+                            "packing_share_of_party",
+                            "top_skus",
+                            "party_profile",
+                            "dumping",
+                        ],
+                    },
+                    "period": {"type": "string"},
+                    "city": {"type": "string"},
+                    "client_type": {"type": "string"},
+                    "business_unit": {"type": "string"},
+                    "oil_type": {"type": "string"},
+                    "packing_category": {"type": "string"},
+                    "left": {"type": "string"},
+                    "right": {"type": "string"},
+                    "party_query": {"type": "string"},
+                    "group_by": {"type": "string"},
+                    "metric": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "exclude_client_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    }
+)
+
+
 def _looks_analytical(text: str) -> bool:
     """True when the user asks for evaluation / performance, not a plain 'what were' dump."""
     t = (text or "").lower()
@@ -1480,6 +1543,131 @@ def _last_price_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+
+def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
+    from eva_dashboard.advanced_analytics import (
+        compare_segments,
+        week_over_week,
+        rank_dimension_growth,
+        mix_or_share,
+        silent_parties,
+        not_ordered,
+        reactivated_parties,
+        days_since_last_invoice,
+        party_profile,
+        detect_dumping,
+        top_skus,
+    )
+    from eva_dashboard.seasonality import expected_month_close
+    from eva_dashboard.advanced_routing import infer_advanced_from_text
+
+    inferred = infer_advanced_from_text(user_text)
+    mode = arguments.get("mode") or inferred.get("mode")
+    city = arguments.get("city") or inferred.get("city")
+    ctype = normalize_client_type(
+        arguments.get("client_type") or inferred.get("client_type")
+    )
+    bu = arguments.get("business_unit") or inferred.get("business_unit")
+    oil = arguments.get("oil_type") or inferred.get("oil_type")
+    pack = arguments.get("packing_category") or inferred.get("packing_category")
+    period = arguments.get("period") or inferred.get("period")
+    exclude = arguments.get("exclude_client_types") or inferred.get("exclude_client_types")
+    limit = int(arguments.get("limit") or inferred.get("limit") or 10)
+    metric = arguments.get("metric") or inferred.get("metric") or "volume"
+    left = arguments.get("left") or inferred.get("left")
+    right = arguments.get("right") or inferred.get("right")
+    group_by = arguments.get("group_by") or inferred.get("group_by")
+    party_query = arguments.get("party_query") or inferred.get("party_query") or user_text
+
+    # Inherit filters from prior sales table when user says dump break-down follow-up
+    if prior_spec and inferred.get("mode") == "dumping" and group_by:
+        pf = prior_spec.get("filters") or {}
+        city = city or pf.get("city")
+        ctype = ctype or pf.get("client_type")
+        bu = bu or pf.get("business_unit")
+        oil = oil or pf.get("oil_type")
+        pack = pack or pf.get("packing_category")
+
+    if mode in {"compare_cities", "compare_client_types"}:
+        return compare_segments(
+            segment="city" if mode == "compare_cities" else "client_type",
+            left=left or "Lahore",
+            right=right or "Karachi",
+            metric=metric,
+            period=period,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype if mode == "compare_cities" else None,
+            city=city if mode != "compare_cities" else None,
+            exclude_client_types=exclude,
+        )
+    if mode == "week_over_week":
+        return week_over_week(
+            city=city, client_type=ctype, business_unit=bu, oil_type=oil,
+            packing_category=pack, exclude_client_types=exclude,
+        )
+    if mode == "dimension_growth":
+        return rank_dimension_growth(
+            dimension=inferred.get("dimension") or "packing_category",
+            period=period, city=city, client_type=ctype, business_unit=bu,
+            oil_type=oil, packing_category=pack, exclude_client_types=exclude,
+            limit=limit, sort=inferred.get("sort") or "desc",
+        )
+    if mode == "expected_month":
+        return expected_month_close(
+            period=period or "this month", city=city, client_type=ctype,
+            business_unit=bu, oil_type=oil, packing_category=pack,
+            exclude_client_types=exclude,
+        )
+    if mode in {"silent_week", "silent_parties"}:
+        return silent_parties(
+            grain="week", period=period or "this week", city=city,
+            client_type=ctype, business_unit=bu, oil_type=oil,
+            packing_category=pack, exclude_client_types=exclude, limit=limit,
+        )
+    if mode == "not_ordered":
+        return not_ordered(
+            period=period or "this month", city=city, client_type=ctype,
+            business_unit=bu, oil_type=oil, packing_category=pack,
+            exclude_client_types=exclude, limit=limit,
+        )
+    if mode == "reactivated":
+        return reactivated_parties(
+            city=city, client_type=ctype, business_unit=bu,
+            exclude_client_types=exclude, limit=limit,
+        )
+    if mode == "days_since_invoice":
+        return days_since_last_invoice(
+            city=city, client_type=ctype, business_unit=bu,
+            packing_category=pack, exclude_client_types=exclude, limit=limit,
+        )
+    if mode in {"concentration", "concentration_growth", "oil_mix",
+                "packing_contribution", "packing_share_of_party"}:
+        return mix_or_share(
+            mode=("concentration" if mode == "concentration_growth" else mode),
+            period=period, city=city, client_type=ctype, business_unit=bu,
+            oil_type=oil, packing_category=pack, exclude_client_types=exclude,
+            metric="growth" if mode == "concentration_growth" else metric,
+            limit=limit,
+        )
+    if mode == "top_skus":
+        return top_skus(
+            period=period, city=city, client_type=ctype, business_unit=bu,
+            oil_type=oil, packing_category=pack, exclude_client_types=exclude,
+            limit=limit, sort=inferred.get("sort") or "desc",
+        )
+    if mode == "party_profile":
+        return party_profile(query=party_query, period=period)
+    if mode == "dumping":
+        return detect_dumping(
+            period=period, city=city, client_type=ctype, business_unit=bu,
+            oil_type=oil, packing_category=pack, exclude_client_types=exclude,
+            group_by=group_by, limit=limit,
+        )
+    return {"ok": False, "error": f"Unknown advanced mode: {mode}"}
+
+
 def _dispatch_tool(
     name: str,
     arguments: dict[str, Any],
@@ -1615,6 +1803,8 @@ def _dispatch_tool(
             date_to=arguments.get("date_to"),
             limit=int(arguments.get("limit") or inferred.get("limit") or 200),
         )
+    if name == "advanced_query":
+        return _dispatch_advanced(arguments, user_text, prior_spec=prior_spec)
     if name == "analyze_parties":
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
@@ -1824,7 +2014,12 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if _looks_client_list(last_user):
+            if looks_advanced(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "advanced_query"},
+                }
+            elif _looks_client_list(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "list_clients"},
@@ -1935,6 +2130,7 @@ def chat_completion(
                     "lookup_party",
                     "list_clients",
                     "analyze_parties",
+                    "advanced_query",
                 }
                 and isinstance(result, dict)
                 and result.get("ok")

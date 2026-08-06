@@ -26,6 +26,7 @@ from eva_dashboard.data import (
     weighted_avg,
 )
 from eva_dashboard.db import connect, init_db
+from eva_dashboard.fmt import mt_round, mt_str
 
 _PARTY_JOIN = """
 LEFT JOIN clients cl
@@ -530,12 +531,12 @@ def _pivot_mt(
     for idx, row in pivot.iterrows():
         entry: dict[str, Any] = {row_dim: str(idx)}
         for c in columns:
-            entry[str(c)] = round(float(row[c]), 3)
+            entry[str(c)] = mt_round(row[c])
         rows.append(entry)
 
     # Column totals footer row
-    col_tot_map = {str(c): round(float(col_totals.get(c, 0.0)), 3) for c in col_totals.index}
-    col_tot_map["Total"] = round(float(pivot["Total"].sum()), 3)
+    col_tot_map = {str(c): mt_round(col_totals.get(c, 0.0)) for c in col_totals.index}
+    col_tot_map["Total"] = mt_round(pivot["Total"].sum())
     total_row: dict[str, Any] = {row_dim: "Total"}
     for c in columns:
         total_row[str(c)] = col_tot_map.get(str(c), 0.0)
@@ -624,14 +625,14 @@ def _pivot_months(
     for idx, row in pivot.iterrows():
         entry: dict[str, Any] = {row_dim: str(idx)}
         for c in columns:
-            entry[str(c)] = round(float(row[c]), 3)
+            entry[str(c)] = mt_round(row[c])
         rows.append(entry)
 
     col_tot_map: dict[str, float] = {}
     for c in month_labels:
-        col_tot_map[c] = round(float(pivot[c].sum()), 3)
+        col_tot_map[c] = mt_round(pivot[c].sum())
     col_tot_map["Average"] = round(sum(col_tot_map[c] for c in month_labels) / n, 3)
-    col_tot_map["Total"] = round(float(pivot["Total"].sum()), 3)
+    col_tot_map["Total"] = mt_round(pivot["Total"].sum())
     total_row: dict[str, Any] = {row_dim: "Total"}
     for c in columns:
         total_row[c] = col_tot_map[c]
@@ -875,8 +876,8 @@ def _yoy_breakdown_table(
             rows.append(
                 {
                     "segment": lab,
-                    "current_mt": round(c, 3),
-                    "prior_mt": round(p, 3),
+                    "current_mt": mt_round(c),
+                    "prior_mt": mt_round(p),
                     "yoy_pct": _yoy_pct(c, p),
                 }
             )
@@ -885,8 +886,8 @@ def _yoy_breakdown_table(
         rows.append(
             {
                 "segment": "Total",
-                "current_mt": round(c_tot, 3),
-                "prior_mt": round(p_tot, 3),
+                "current_mt": mt_round(c_tot),
+                "prior_mt": mt_round(p_tot),
                 "yoy_pct": _yoy_pct(c_tot, p_tot),
             }
         )
@@ -919,8 +920,8 @@ def _yoy_breakdown_table(
         rows.append(
             {
                 "segment": lab,
-                "current_mt": round(c, 3),
-                "prior_mt": round(p, 3),
+                "current_mt": mt_round(c),
+                "prior_mt": mt_round(p),
                 "yoy_pct": _yoy_pct(c, p),
             }
         )
@@ -930,8 +931,8 @@ def _yoy_breakdown_table(
     rows.append(
         {
             "segment": "Total",
-            "current_mt": round(c_tot, 3),
-            "prior_mt": round(p_tot, 3),
+            "current_mt": mt_round(c_tot),
+            "prior_mt": mt_round(p_tot),
             "yoy_pct": _yoy_pct(c_tot, p_tot),
         }
     )
@@ -1223,8 +1224,8 @@ def query_sales(
         result["column_dimension"] = col_cmp
         result["yoy_by_row"] = yoy_by_row
         result["yoy_by_col"] = yoy_by_col
-        result["current_total_mt"] = round(cur_tot, 3)
-        result["prior_total_mt"] = round(pri_tot, 3)
+        result["current_total_mt"] = mt_round(cur_tot)
+        result["prior_total_mt"] = mt_round(pri_tot)
         result["yoy_pct"] = yoy_tot
         result["tables"] = [
             {
@@ -1371,7 +1372,7 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
             else:
                 val = row.get(key, 0)
                 if isinstance(val, float):
-                    text = f"{val:.3f}".rstrip("0").rstrip(".") if val else "0"
+                    text = mt_str(val) if isinstance(val, (int, float)) else str(val)
                 elif val is None:
                     text = "—"
                 else:
@@ -1409,8 +1410,12 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
             elif isinstance(val, float):
                 if c.startswith("pct_"):
                     cells.append(f"{val:+.1f}%")
+                elif c.endswith("_mt") or c in {"volume_mt", "ams_mt", "expected_mt"}:
+                    cells.append(mt_str(val))
                 else:
-                    cells.append(f"{val:.3f}".rstrip("0").rstrip(".") if val else "0")
+                    cells.append(mt_str(val) if abs(val) >= 1 or val == 0 else f"{val:.3f}")
+            elif isinstance(val, int):
+                cells.append(str(val))
             else:
                 cells.append(_md_escape(val))
         lines.append("| " + " | ".join(cells) + " |")
@@ -1460,7 +1465,7 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
             if yoy <= -20:
                 tips.append(
                     f"Overall volume is sharply down YoY ({yoy:+.1f}%) — "
-                    f"{cur:.3f} vs {pri:.3f} MT prior."
+                    f"{mt_round(cur)} vs {mt_round(pri)} MT prior."
                 )
             elif yoy < 0:
                 tips.append(
@@ -1557,7 +1562,7 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
         top_mt = float(top.get("Total") or 0)
         share = 100.0 * top_mt / grand
         tips.append(
-            f"**{top_name}** is {share:.0f}% of this view ({top_mt:.3f} of {grand:.3f} MT) "
+            f"**{top_name}** is {share:.0f}% of this view ({mt_round(top_mt)} of {mt_round(grand)} MT) "
             + ("— concentration risk if it slips." if share >= 50 else "— still the lead line.")
         )
         cols = [c for c in (matrix.get("columns") or []) if c != "Total"]
@@ -1586,7 +1591,7 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
             if top_mt > 0 and gap / top_mt >= 0.4:
                 tips.append(
                     f"Lead over **{second.get(top_key)}** is wide "
-                    f"({gap:.3f} MT) — mix is top-heavy."
+                    f"({mt_round(gap)} MT) — mix is top-heavy."
                 )
 
     # Deduplicate while preserving order
