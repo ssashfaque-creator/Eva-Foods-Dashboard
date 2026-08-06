@@ -179,6 +179,24 @@ MT-weighted Incl/kg; Bulk Oil × 37.3246 → per maund; others per kg.
 4. **Reports** — generate Sales dashboard PDF from DB  
 5. **AI Chat** — OpenAI assistant with read-only SQL tools over `eva.db`
 
+## Chatbot sales matrices (query_sales)
+
+For sales questions the assistant should call **`query_sales` once** (not multi-step SQL):
+
+| User specifies | Rows | Columns (default) |
+|---|---|---|
+| Nothing (e.g. Lahore last month) | Business Unit | Client Type |
+| Business Unit (e.g. Eva Consumer) | Oil Type | Client Type |
+| Business Unit + Oil Type | Packing Category | Client Type |
+| Asks “city-wise” | (same row rule) | City |
+
+**Analytical** (“how are / how were sales doing”): city matrix + client matrix + trend  
+(Volume, AMS, Expected if partial month, % vs expected/AMS).
+
+AMS = mean of the three prior full calendar months (same filters).  
+Partial month Expected = `(days_elapsed / days_in_month) × AMS`.  
+Completed month: no Expected column (AMS is the baseline).
+
 ## Chatbot guidance
 
 When answering:

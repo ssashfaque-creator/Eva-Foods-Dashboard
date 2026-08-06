@@ -105,12 +105,12 @@ def test_system_prompt_includes_product_glossary() -> None:
         try:
             init_db()
             text = system_prompt()
-            assert "PRODUCT LANGUAGE GLOSSARY" in text
-            assert "Business Unit" in text or "TAXONOMY" in text
+            assert "PRODUCT LANGUAGE" in text
+            assert "Business Unit" in text or "TAXONOMY" in text or "query_sales" in text
             assert "VTF bulk" in text or "vtf bulk" in text
-            assert "markdown TABLES" in text or "markdown tables" in text.lower()
+            assert "query_sales" in text
             assert "resolve_product_language" in text
-            assert "Packing Category" in text or "packing_category" in text
+            assert "Packing Category" in text or "packing_category" in text or "Packing" in text
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

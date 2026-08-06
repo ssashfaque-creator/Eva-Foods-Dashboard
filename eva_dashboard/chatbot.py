@@ -18,10 +18,11 @@ from eva_dashboard.product_language import (
     product_sales,
     resolve_product_language,
 )
+from eva_dashboard.sales_query import query_sales
 
 DEFAULT_MODEL = "gpt-4o"
 MAX_SQL_ROWS = 200
-MAX_TOOL_ROUNDS = 10
+MAX_TOOL_ROUNDS = 4  # Prefer one structured query_sales call over many SQL rounds
 
 _FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|"
@@ -199,59 +200,64 @@ def system_prompt() -> str:
     catalog = load_data_catalog()
     live = live_database_briefing()
     glossary = glossary_for_prompt()
-    return f"""You are the Eva Foods in-app data analyst. You answer ONLY from the live SQLite database
-and the catalog below. You are not a general web assistant.
+    return f"""You are the Eva Foods in-app data analyst. Answer ONLY from the live SQLite database.
 
 {live}
 
-CRITICAL ANTI-HALLUCINATION RULES:
-1. NEVER invent numbers, dates, cities, or "I only have data until …" statements.
-2. NEVER use your pretraining knowledge cutoff. This app's sales data is often in 2025–2026.
-3. For ANY factual question (sales, MT, Price Fetch, cities, clients, costs, products), you MUST call tools
-   before answering. Prefer resolve_product_language / product_sales / run_sql /
-   category_mt_totals / sales_by_city_and_category / report_snapshot.
-4. If a month/year is ambiguous (e.g. "July"), use the year from LIVE DATABASE STATE
-   (usually the max sales year), and say which year you used.
-5. If the query returns zero rows, say so and show the SQL date filter you used + available range.
-6. Always state the exact date range used in the answer.
-7. Geography = clients.city_filter (City-Filter), joined via normalized party/client names.
-8. Product taxonomy = category table with three levels joined on exact product name:
-   - Business Unit → category.category_1 (e.g. Eva Consumer, Eva Bulk, Maan Bulk)
-   - Oil Type → category.category_2 (e.g. Eva Canola, Eva VTF, Maan Ghee)
-   - Packing Category → category.packing_category (e.g. Tin, Pet bottle, Stand up)
-9. Read-only only. Never claim you uploaded/changed data.
-10. Be useful: give MT, line counts, top parties, and short interpretation when asked for a report.
+SPEED & TOOL RULES:
+1. For almost all SALES questions, call **query_sales ONCE** with structured filters.
+   Do NOT write multi-step SQL. Do NOT call get_schema / run_sql first for sales pivots.
+2. Interpret the user question → fill query_sales parameters → format the returned matrices
+   as markdown tables. One tool round is the goal.
+3. NEVER invent numbers or cite an OpenAI knowledge cutoff.
+4. Geography = City-Filter (`city` parameter). Always state the period label from the tool.
+5. Read-only only.
 
-PRODUCT LANGUAGE (spoken team phrases → exact SKU names):
-When the user names a product in casual speech ("VTF bulk", "canola standup", "cooking pillow",
-"maan 16 kg", "eva 16 ltr", "sun 5 pet", "shortening", "cusine king", etc.):
-1. Call resolve_product_language FIRST with their phrase.
-2. Use the returned exact `product` string in product_sales or in SQL `WHERE s.product = '…'`.
-3. Always include Business Unit / Oil Type / Packing Category from the resolver or category join.
-4. Never invent product spellings — prefer exact names from tools / category table.
-5. Remember: 16 ltr ≈ oil; 16 kg ≈ ghee/banaspati.
+SALES MATRIX RULES (query_sales handles this — just set filters correctly):
+Row drill-down (automatic in the tool):
+  • No Business Unit → rows = Business Unit
+  • Business Unit set → rows = Oil Type
+  • Oil Type set → rows = Packing Category
+Column default = **client_type** (Eva Distributors, …), highest totals first.
+  • If user asks city-wise / by city → columns='city'
+  • City filter (e.g. Lahore) goes in `city=`, not as columns unless they ask city-wise.
 
-RESPONSE FORMAT (numeric answers):
-- Prefer markdown TABLES for numbers — not bullet lists of metrics.
-- Typical product answer table columns:
-  Product | Business Unit | Oil Type | Packing | MT | Qty | Incl GST/FED | Lines | Parties | Days
-- For Business Unit / Oil Type / Packing breakdowns use tables with clear headers.
-- One short sentence of context (date range + which SKU resolved), then the table.
-- Optional second table for top parties. Avoid long bullet lists of figures.
+Examples:
+  "Sales in Lahore last month"
+    → query_sales(period='last month', city='Lahore', columns='client_type', mode='matrix')
+  "Eva Consumer sales in Lahore last month"
+    → query_sales(period='last month', city='Lahore', business_unit='Eva Consumer',
+                  columns='client_type', mode='matrix')
+  "City-wise breakdown of Eva Consumer sales last month"
+    → query_sales(period='last month', business_unit='Eva Consumer', columns='city', mode='matrix')
+  "How are Eva Consumer sales doing so far in August?"
+    → query_sales(period='August so far', business_unit='Eva Consumer', mode='analytical')
+      (returns city_matrix + client_matrix + trend with Volume/AMS/Expected/% )
+  "How were Eva Consumer sales in July?"
+    → query_sales(period='July', business_unit='Eva Consumer', mode='analytical')
+      (trend has Volume/AMS/% vs AMS — NO Expected column for a completed month)
 
-HOW TO ANSWER COMMON QUESTIONS:
-- "How was VTF bulk in July?" → resolve_product_language("VTF bulk") then product_sales
-- "Canola standup pouch MTD" → resolve then product_sales (flagship = Eva Canola Oil (StandUpPouch))
-- "Eva Consumer sales in Lahore for July 2026"
-  → sales_by_city_and_category with category1/business_unit='Eva Consumer', city='Lahore', …
-- "MT by Oil Type" / "pet bottle sales" → run_sql grouping by category.category_2 or packing_category
-- "Full briefing for 30 Jun 2026" → report_snapshot(report_date='2026-06-30')
-- "What's in the database?" → get_sales_overview
+ANALYTICAL mode:
+- Use mode='analytical' for “how are / how were / performance / doing / vs AMS / trend”.
+- Render THREE tables from the tool payload, then 2–4 short insight bullets.
 
-=== PRODUCT LANGUAGE GLOSSARY ===
+SKU / product language questions (single product):
+- resolve_product_language then product_sales (or query with packing/oil filters).
+
+Other:
+- Full daily briefing → report_snapshot
+- What's loaded? → get_sales_overview
+- Rare custom SQL only if query_sales cannot express it → run_sql
+
+RESPONSE FORMAT:
+- Markdown TABLES only for numbers (never bullet lists of metrics).
+- One sentence of context (period + filters), then table(s).
+- Columns already sorted highest-first by the tool — preserve that order.
+
+=== PRODUCT LANGUAGE (abbrev) ===
 {glossary}
 
-=== DATA CATALOG (business rules & formulas) ===
+=== DATA CATALOG ===
 {catalog}
 """
 
@@ -519,8 +525,68 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "query_sales",
+            "description": (
+                "PRIMARY sales tool. One call returns a ready MT pivot "
+                "(auto rows: Business Unit → Oil Type → Packing; default columns: "
+                "client_type, highest first). Use mode=analytical for "
+                "'how are/were sales doing' (city + client + AMS trend tables). "
+                "Prefer this over run_sql for sales questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": (
+                            "Natural period: 'last month', 'July', 'July 2026', "
+                            "'August so far', 'this month', or YYYY-MM"
+                        ),
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "Optional ISO YYYY-MM-DD (overrides period start)",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "Optional ISO YYYY-MM-DD (overrides period end)",
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "City-Filter filter, e.g. Lahore",
+                    },
+                    "business_unit": {
+                        "type": "string",
+                        "description": "e.g. Eva Consumer, Eva Bulk, Maan Consumer",
+                    },
+                    "oil_type": {
+                        "type": "string",
+                        "description": "e.g. Eva Canola, Eva Cooking, Eva VTF",
+                    },
+                    "packing_category": {
+                        "type": "string",
+                        "description": "e.g. Tin, Pet bottle, Stand up",
+                    },
+                    "columns": {
+                        "type": "string",
+                        "description": "client_type (default) or city",
+                        "enum": ["client_type", "city"],
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "matrix (default) or analytical",
+                        "enum": ["matrix", "analytical"],
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_schema",
-            "description": "Return live SQLite schema and row counts.",
+            "description": "Return live SQLite schema and row counts. Rarely needed.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -530,7 +596,7 @@ TOOLS: list[dict[str, Any]] = [
             "name": "get_sales_overview",
             "description": (
                 "Authoritative live overview: sales date min/max, months present, "
-                "row counts, categories, cities. Call this before claiming any date range."
+                "row counts, categories, cities."
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -539,7 +605,10 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_sql",
-            "description": "Read-only SELECT/WITH against eva.db (max 200 rows).",
+            "description": (
+                "Read-only SELECT/WITH (max 200 rows). Use ONLY when query_sales "
+                "cannot answer."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -557,7 +626,7 @@ TOOLS: list[dict[str, Any]] = [
             "name": "category_mt_totals",
             "description": (
                 "MT by Business Unit (category_1) for an inclusive YYYY-MM-DD range. "
-                "Returns business_unit / category1 columns."
+                "Prefer query_sales for pivots."
             ),
             "parameters": {
                 "type": "object",
@@ -575,26 +644,19 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "sales_by_city_and_category",
             "description": (
-                "MT + amount for one Business Unit (category_1) in one City-Filter "
-                "over a date range, plus top parties. Use for questions like "
-                "'Eva Consumer sales in Lahore for July 2026'."
+                "Legacy helper: MT for one Business Unit in one city. "
+                "Prefer query_sales."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "category1": {
                         "type": "string",
-                        "description": (
-                            "Exact Business Unit, e.g. Eva Consumer, Eva Bulk, "
-                            "Maan Consumer, Maan Bulk"
-                        ),
+                        "description": "Exact Business Unit, e.g. Eva Consumer",
                     },
-                    "city": {
-                        "type": "string",
-                        "description": "City-Filter value, e.g. Lahore",
-                    },
-                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
-                    "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+                    "city": {"type": "string"},
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
                 },
                 "required": ["category1", "city", "date_from", "date_to"],
                 "additionalProperties": False,
@@ -634,18 +696,12 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "resolve_product_language",
             "description": (
-                "Map spoken product language to exact sales.product names and categories. "
-                "ALWAYS call this before querying when the user says shorthand like "
-                "'VTF bulk', 'canola standup', 'cooking pillow', 'maan 16 kg', "
-                "'eva 16 ltr', 'sun 5 pet', 'shortening', 'cusine king', 'jerry can'."
+                "Map spoken product language to exact sales.product names and categories."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Spoken product phrase from the user",
-                    },
+                    "query": {"type": "string"},
                     "limit": {"type": "integer"},
                 },
                 "required": ["query"],
@@ -658,27 +714,16 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "product_sales",
             "description": (
-                "Sales summary for one product over a date range (optional city). "
-                "Pass exact product OR product_query (spoken). Returns summary + top parties "
-                "with a hint to format as a markdown table."
+                "Sales summary for one product over a date range (optional city)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "product": {
-                        "type": "string",
-                        "description": "Exact product name from category/sales",
-                    },
-                    "product_query": {
-                        "type": "string",
-                        "description": "Spoken phrase if exact name unknown",
-                    },
-                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
-                    "date_to": {"type": "string", "description": "YYYY-MM-DD"},
-                    "city": {
-                        "type": "string",
-                        "description": "Optional City-Filter",
-                    },
+                    "product": {"type": "string"},
+                    "product_query": {"type": "string"},
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                    "city": {"type": "string"},
                 },
                 "required": ["date_from", "date_to"],
                 "additionalProperties": False,
@@ -689,6 +734,18 @@ TOOLS: list[dict[str, Any]] = [
 
 
 def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
+    if name == "query_sales":
+        return query_sales(
+            period=arguments.get("period"),
+            date_from=arguments.get("date_from"),
+            date_to=arguments.get("date_to"),
+            city=arguments.get("city"),
+            business_unit=arguments.get("business_unit"),
+            oil_type=arguments.get("oil_type"),
+            packing_category=arguments.get("packing_category"),
+            columns=arguments.get("columns") or "client_type",
+            mode=arguments.get("mode") or "matrix",
+        )
     if name == "get_schema":
         return {"schema": _schema_text()}
     if name == "get_sales_overview":
@@ -727,6 +784,17 @@ def _dispatch_tool(name: str, arguments: dict[str, Any]) -> Any:
     return {"error": f"Unknown tool: {name}"}
 
 
+def _looks_sales_matrix(text: str) -> bool:
+    t = (text or "").lower()
+    sales_keys = (
+        "sale", "mt", "lahore", "karachi", "city", "client", "distributor",
+        "eva consumer", "eva bulk", "maan", "last month", "this month",
+        "so far", "july", "june", "august", "how are", "how were", "doing",
+        "breakdown", "city wise", "city-wise", "ams", "trend",
+    )
+    return any(k in t for k in sales_keys)
+
+
 def _looks_factual(text: str) -> bool:
     t = (text or "").lower()
     keys = (
@@ -736,6 +804,7 @@ def _looks_factual(text: str) -> bool:
         "canola", "cooking", "sunflower", "sun ", "vtf", "banaspati", "ghee",
         "shortening", "bake", "cuisine", "cusine", "jerry", "pet", "pouch",
         "pillow", "standup", "stand up", "product", "sku", "tin", "bucket",
+        "so far", "doing", "breakdown", "august", "april", "march",
     )
     return any(k in t for k in keys)
 
@@ -774,10 +843,16 @@ def chat_completion(
         if on_status:
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
-        # First round on factual questions: require a tool call so the model cannot invent.
+        # First round: require tools; for sales pivots force query_sales.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            tool_choice = "required"
+            if _looks_sales_matrix(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "query_sales"},
+                }
+            else:
+                tool_choice = "required"
 
         response = client.chat.completions.create(
             model=model,

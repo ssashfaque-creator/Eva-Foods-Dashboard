@@ -52,8 +52,9 @@ def test_system_prompt_includes_live_briefing() -> None:
 
             text = system_prompt()
             assert "LIVE DATABASE STATE" in text
-            assert "ANTI-HALLUCINATION" in text
-            assert "knowledge cutoff" in text.lower()
+            assert "query_sales" in text
+            assert "knowledge cutoff" in text.lower() or "OpenAI knowledge cutoff" in text
+            assert "SPEED" in text or "TOOL RULES" in text
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

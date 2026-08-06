@@ -527,12 +527,13 @@ def page_chat() -> None:
     with st.expander("Example questions"):
         st.markdown(
             """
-- What was total MT by Business Unit on the latest sales date?
-- Top 10 cities by Eva Consumer MT this month
-- Price Fetch for Eva Distributors (Oil / Ghee) on 2026-06-30
-- Which products in sales are missing from the category file?
-- Give me a full daily sales briefing for 30 Jun 2026 like the PDF summary
-- Compare Maan vs Eva oil volumes last 7 days
+- What were the sales in Lahore last month?
+- What were Eva Consumer sales in Lahore last month?
+- City-wise breakdown of Eva Consumer sales last month
+- How are Eva Consumer sales doing so far in August?
+- How were Eva Consumer sales in July?
+- How much VTF bulk last month?
+- Give me a full daily sales briefing for the latest date like the PDF summary
             """
         )
 
