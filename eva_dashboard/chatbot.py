@@ -254,6 +254,10 @@ Examples:
     → analytical (city + client + AMS); rows = Packing Category
   "What's the Average sale for Imtiaz store last 6 months"
     → client_type='Imtiaz Store', columns='month', months_back=6
+  "Show by product / product breakdown" (follow-up on a BU table)
+    → row_dimension='packing_category', prior_spec — SAME filters/months
+  "Dissect further / SKU wise / show by SKU" (follow-up)
+    → row_dimension='product', prior_spec — SAME filters/months
   "Canola standup price for Distributors last week"
     → query_price: oil/packing or product_query='canola standup',
       client_type='Eva Distributors', period='last week'
@@ -264,6 +268,8 @@ MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
 - how were / how are / evaluate / assess / performance / doing / trend → analytical
 - add / also include / plus → merge into previous table via prior_spec
+- show by product / product category / packing → rows = Packing Category (keep prior)
+- dissect further / SKU / sku-wise → rows = Product SKU (keep prior)
 
 SKU / product language questions (single product):
 - resolve_product_language then product_sales (or query with packing/oil filters).
@@ -607,6 +613,21 @@ TOOLS: list[dict[str, Any]] = [
                             "Imtiaz Store; Distributor(s) → Eva Distributors"
                         ),
                     },
+                    "row_dimension": {
+                        "type": "string",
+                        "description": (
+                            "Override rows: business_unit | oil_type | "
+                            "packing_category | product. Follow-ups: "
+                            "'show by product' → packing_category; "
+                            "'SKU wise' → product"
+                        ),
+                        "enum": [
+                            "business_unit",
+                            "oil_type",
+                            "packing_category",
+                            "product",
+                        ],
+                    },
                     "columns": {
                         "type": "string",
                         "description": (
@@ -926,7 +947,85 @@ def _looks_table_followup(text: str) -> bool:
             t,
         )
         or re.search(r"\badd\b.+\bto (this|the|that) table\b", t)
+        or _looks_row_drilldown(t)
     )
+
+
+def _looks_row_drilldown(text: str) -> bool:
+    """True when user wants to change row grain of the current table."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"show by product|product break\s*down|product breakdown|"
+            r"by product|product categor|"
+            r"packing categor|by packing|show packing|"
+            r"oil type|by oil|oil break|"
+            r"dissect|drill\s*down|break( it)? down further|"
+            r"sku[- ]?wise|by sku|show by sku|sku break|"
+            r"product[- ]?wise|by sku|show skus?|"
+            r"by business unit|by bu\b|show by bu"
+            r")\b",
+            t,
+        )
+        or re.search(r"\b(further|deeper)\b.+\b(break|split|dissect|detail)", t)
+        or re.search(r"\b(break|split|dissect)\b.+\b(further|deeper|sku|product)", t)
+    )
+
+
+def resolve_row_dimension_request(
+    text: str,
+    *,
+    prior_row_dimension: str | None = None,
+) -> str | None:
+    """Map follow-up language to an explicit query_sales row_dimension."""
+    t = (text or "").lower()
+    if not t:
+        return None
+
+    # SKU / product line items (check before "by product" packing)
+    if re.search(
+        r"\b(sku[- ]?wise|by sku|show by sku|sku break|skus?\b|"
+        r"product[- ]?wise|item[- ]?wise|by items?)\b",
+        t,
+    ):
+        return "product"
+
+    # Oil Type rows
+    if re.search(r"\b(oil types?|by oil|oil break\s*down|oil breakdown)\b", t):
+        return "oil_type"
+
+    # Packing / "product category" / "show by product"
+    if re.search(
+        r"\b("
+        r"show by product|product break\s*down|product breakdown|"
+        r"by product|product categor|"
+        r"packing categor|by packing|show packing|pack(ing)? break"
+        r")\b",
+        t,
+    ):
+        return "packing_category"
+
+    # Business Unit
+    if re.search(r"\b(by business unit|by bu\b|show by bu|business unit break)\b", t):
+        return "business_unit"
+
+    # Generic deepen: one step from prior grain
+    if re.search(
+        r"\b(dissect|drill\s*down|break( it)? down further|"
+        r"split further|go deeper|more detail)\b",
+        t,
+    ) or re.search(r"\b(further|deeper)\b.+\b(break|split|dissect|detail)", t):
+        prior = (prior_row_dimension or "").strip().lower()
+        if prior in {"", "business_unit"}:
+            return "packing_category"
+        if prior in {"oil_type", "packing_category"}:
+            return "product"
+        if prior == "product":
+            return "product"
+        return "packing_category"
+
+    return None
 
 
 def _looks_party_lookup(text: str) -> bool:
@@ -1074,9 +1173,18 @@ def _dispatch_tool(
         units = list(arguments.get("business_units") or [])
         if arguments.get("business_unit"):
             units.append(arguments["business_unit"])
-        # Follow-up: merge mentioned BUs into prior table
-        use_prior = prior_spec if (_looks_table_followup(user_text) and prior_spec) else None
-        if use_prior or _looks_table_followup(user_text):
+
+        prior_row = (prior_spec or {}).get("row_dimension") if prior_spec else None
+        row_dim = arguments.get("row_dimension") or resolve_row_dimension_request(
+            user_text, prior_row_dimension=prior_row
+        )
+        is_drill = bool(row_dim) or _looks_row_drilldown(user_text)
+
+        # Follow-up: merge mentioned BUs / keep prior table / change row grain
+        use_prior = prior_spec if (
+            (_looks_table_followup(user_text) or is_drill) and prior_spec
+        ) else None
+        if use_prior or _looks_table_followup(user_text) or is_drill:
             for u in _extract_business_units_from_text(user_text):
                 if u not in units:
                     units.append(u)
@@ -1102,8 +1210,12 @@ def _dispatch_tool(
         # If user asked about a client type but did not name a BU, do not keep a
         # model-invented Business Unit (e.g. Eva Consumer for "Imtiaz store").
         mentioned_units = _extract_business_units_from_text(user_text)
-        if ctype and not mentioned_units:
-            uniq = []
+        if (ctype and not mentioned_units) or (is_drill and use_prior and not mentioned_units):
+            # Drill-downs keep prior BU filters via prior_spec, not model args
+            if is_drill and use_prior and not mentioned_units:
+                uniq = []
+            elif ctype and not mentioned_units:
+                uniq = []
 
         if len(uniq) == 1:
             bu_param: str | None = uniq[0]
@@ -1128,6 +1240,7 @@ def _dispatch_tool(
             columns=columns,
             months_back=months_back,
             mode=mode,
+            row_dimension=row_dim,
             prior_spec=use_prior or arguments.get("prior_spec"),
         )
     if name == "lookup_party":
@@ -1205,6 +1318,8 @@ def _dispatch_tool(
 def _looks_sales_matrix(text: str) -> bool:
     if _looks_party_lookup(text) or _looks_price_query(text):
         return False
+    if _looks_row_drilldown(text):
+        return True
     t = (text or "").lower()
     sales_keys = (
         "sale", "mt", "lahore", "karachi", "city", "client", "distributor",
@@ -1212,7 +1327,7 @@ def _looks_sales_matrix(text: str) -> bool:
         "this month", "so far", "july", "june", "august", "how are", "how were",
         "doing", "breakdown", "city wise", "city-wise", "ams", "trend",
         "evaluate", "assess", "performance", "packing", "pet", "standup",
-        "jerry", "month", "monthly", "add ",
+        "jerry", "month", "monthly", "add ", "sku", "product", "dissect",
     )
     return any(k in t for k in sales_keys)
 

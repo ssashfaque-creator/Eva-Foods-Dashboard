@@ -317,6 +317,62 @@ def _auto_row_dimension(
     return "business_unit"
 
 
+_VALID_ROW_DIMS = {
+    "business_unit",
+    "oil_type",
+    "packing_category",
+    "product",
+    "city",
+    "client_type",
+}
+
+
+def normalize_row_dimension(value: str | None) -> str | None:
+    """Map spoken / tool row labels to a pivot row dimension."""
+    if not value:
+        return None
+    raw = str(value).strip().lower().replace("-", " ").replace("_", " ")
+    raw = re.sub(r"\s+", " ", raw).strip()
+    aliases = {
+        "business unit": "business_unit",
+        "business units": "business_unit",
+        "bu": "business_unit",
+        "bus": "business_unit",
+        "category 1": "business_unit",
+        "oil type": "oil_type",
+        "oil types": "oil_type",
+        "oil": "oil_type",
+        "category 2": "oil_type",
+        "packing": "packing_category",
+        "packing category": "packing_category",
+        "packing categories": "packing_category",
+        "pack": "packing_category",
+        "pack type": "packing_category",
+        "product category": "packing_category",
+        "product categories": "packing_category",
+        "pack category": "packing_category",
+        "category 3": "packing_category",
+        "product": "product",
+        "products": "product",
+        "sku": "product",
+        "skus": "product",
+        "sku wise": "product",
+        "item": "product",
+        "items": "product",
+        "city": "city",
+        "cities": "city",
+        "client type": "client_type",
+        "client": "client_type",
+        "clients": "client_type",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    compact = raw.replace(" ", "_")
+    if compact in _VALID_ROW_DIMS:
+        return compact
+    return None
+
+
 def _fetch_lines(
     *,
     date_from: str,
@@ -730,22 +786,27 @@ def query_sales(
     columns: str = "client_type",
     months_back: int = 6,
     mode: str = "matrix",
+    row_dimension: str | None = None,
     prior_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
-    Row drill-down:
+    Row drill-down (auto, unless ``row_dimension`` override):
       no BU → Business Unit
       one BU → Packing Category
       multiple BUs → Business Unit (comparison)
       Oil Type set → Packing; Packing set → Product
+
+    Explicit ``row_dimension`` (follow-ups): business_unit | oil_type |
+    packing_category | product — keeps prior filters/columns.
 
     columns: client_type | city | month
       month → last ``months_back`` months as columns + Average
 
     client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
 
-    prior_spec: previous table_spec for follow-ups like "add Eva Bulk".
+    prior_spec: previous table_spec for follow-ups like "add Eva Bulk" /
+    "show by product" / "SKU wise".
     """
     # Merge follow-up additions into prior filters
     units: list[str] = []
@@ -763,6 +824,7 @@ def query_sales(
     ctype = normalize_client_type((client_type or "").strip() or None)
     col = (columns or "client_type").strip().lower().replace(" ", "_")
     mb = int(months_back or 6)
+    row_override = normalize_row_dimension(row_dimension)
 
     if prior_spec:
         # Carry forward dimensions; merge new business units
@@ -791,6 +853,11 @@ def query_sales(
         if not period and not date_from and prior_spec.get("period"):
             date_from = (prior_spec["period"] or {}).get("date_from")
             date_to = (prior_spec["period"] or {}).get("date_to")
+        if not row_override and prior_spec.get("row_dimension"):
+            # Keep prior row dim only when caller did not request a new one —
+            # follow-ups that only add a BU should preserve rows; drill-downs
+            # pass an explicit override.
+            pass
 
     if col in {"client", "clients", "clienttype", "type"}:
         col = "client_type"
@@ -840,9 +907,12 @@ def query_sales(
         labels = []
 
     bu = units[0] if len(units) == 1 else None
-    row_dim = _auto_row_dimension(
-        bu, oil, pack, business_units=units if len(units) > 1 else None
-    )
+    if row_override and row_override in _VALID_ROW_DIMS:
+        row_dim = row_override
+    else:
+        row_dim = _auto_row_dimension(
+            bu, oil, pack, business_units=units if len(units) > 1 else None
+        )
 
     frame = _fetch_lines(
         date_from=d0,

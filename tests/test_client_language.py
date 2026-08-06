@@ -230,3 +230,65 @@ def test_routing_helpers() -> None:
     assert not _looks_sales_matrix("Canola standup price for Distributors last week")
     assert _looks_sales_matrix("Average sale for Imtiaz store last 6 months")
     assert not _looks_price_query("Average sale for Imtiaz store last 6 months")
+
+
+def test_row_drilldown_bu_to_packing_to_sku() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            base = query_sales(
+                client_type="Imtiaz Store",
+                columns="month",
+                months_back=6,
+            )
+            assert base["row_dimension"] == "business_unit"
+            prior = base["table_spec"]
+
+            from eva_dashboard.chatbot import (
+                _dispatch_tool,
+                resolve_row_dimension_request,
+            )
+
+            assert resolve_row_dimension_request("show by product") == "packing_category"
+            assert resolve_row_dimension_request(
+                "dissect further", prior_row_dimension="business_unit"
+            ) == "packing_category"
+            assert resolve_row_dimension_request(
+                "dissect further", prior_row_dimension="packing_category"
+            ) == "product"
+            assert resolve_row_dimension_request("SKU wise breakdown") == "product"
+
+            packing = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Can you show by product",
+                prior_spec=prior,
+            )
+            assert packing["ok"] is True
+            assert packing["row_dimension"] == "packing_category"
+            assert packing["column_dimension"] == "month"
+            assert packing["filters"]["client_type"] == "Imtiaz Store"
+
+            sku = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="dissect further / show SKU wise",
+                prior_spec=packing["table_spec"],
+            )
+            assert sku["ok"] is True
+            assert sku["row_dimension"] == "product"
+            assert sku["column_dimension"] == "month"
+            assert sku["filters"]["client_type"] == "Imtiaz Store"
+            products = [
+                r["product"]
+                for r in sku["matrix"]["rows"]
+                if r.get("product") != "Total"
+            ]
+            assert products  # at least one SKU row
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous

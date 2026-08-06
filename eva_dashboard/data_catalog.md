@@ -199,6 +199,11 @@ All matrices include a **Total** footer row (column totals) and a row **Total** 
 **Client Type aliases:** Imtiaz / store(s) → `Imtiaz Store`; Distributor(s) / Eva distributors → `Eva Distributors`.  
 Do not invent a Business Unit when the user only named a client type.
 
+**Row drill-down follow-ups** (keep same filters / months via `prior_spec`):
+- “show by product” / “product breakdown” / “product category” → rows = **Packing Category**
+- “dissect further” / “SKU wise” / “show by SKU” → rows = **Product** (SKU)
+- “by oil type” → rows = **Oil Type**; “by BU” → **Business Unit**
+
 **Other tools:**
 - `lookup_party` — “Who is Al Bari?” → fuzzy client/party matches (name, type, city, MT)
 - `query_price` — Rate from sales; optional Price Fetch follow-up on the same scope

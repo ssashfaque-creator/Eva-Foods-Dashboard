@@ -531,7 +531,9 @@ def page_chat() -> None:
 - What were Eva Consumer sales in Karachi so far in August? *(rows = Packing)*
 - Month-wise breakdown of Eva Consumer sales *(last 6 months + Average)*
 - Average sale for Imtiaz store last 6 months *(Client Type filter)*
-- Then: Add Eva Bulk to this table *(extends the same month table)*
+- Then: Show by product *(rows → Packing Category, same months)*
+- Then: SKU wise / dissect further *(rows → Product)*
+- Or: Add Eva Bulk to this table *(extends the same month table)*
 
 **Analytical** — *how were / evaluate / assess*:
 - How are Eva Consumer sales doing in Karachi so far in August?
