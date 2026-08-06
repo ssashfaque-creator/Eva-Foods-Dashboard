@@ -6,12 +6,12 @@
 #   bash scripts/update.sh ~/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203
 #
 # One-liner (use commit/raw URL so GitHub CDN cannot serve a stale script):
-#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/b3545f70444e81b8b5e14bd29238b008ac21dc13/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
+#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/05a86b69c8fece716bd8480bd8f1651503572a69/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
-BRANCH="${EVA_UPDATE_BRANCH:-cursor/category-taxonomy-8203}"
+BRANCH="${EVA_UPDATE_BRANCH:-cursor/sales-chat-matrix-8203}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard}}"
 
 if [ ! -d "$TARGET" ]; then
