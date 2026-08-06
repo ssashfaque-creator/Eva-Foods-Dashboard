@@ -632,6 +632,10 @@ def analyze_parties(
                 f"{r['share_pct']}% |"
             )
         lines.append(f"| **Total** | **{round(total, 3)}** | **100%** |")
+        tips = _party_analysis_bullets(
+            rows=rows, metric=metric_n, filters=filters, entity_key="party"
+        )
+        lines = _append_analysis(lines, tips)
         return {
             "ok": True,
             "mode": metric_n,
@@ -641,7 +645,7 @@ def analyze_parties(
             "filters": filters,
             "total_mt": round(total, 3),
             "rows": rows,
-            "answer_markdown": "\n".join(lines) + "\n",
+            "answer_markdown": "\n".join(lines).strip() + "\n",
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
         }
 
@@ -1067,6 +1071,21 @@ def analyze_parties(
                 else f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
                 f"{base if base is not None else '—'} | — |"
             )
+        tips = []
+        if pct_well is not None:
+            tips.append(
+                f"{pct_well:.0f}% of {entity_label.lower()}s are at/above {baseline_name}."
+            )
+        if mt_pct is not None:
+            tips.append(
+                f"Those names already deliver {mt_pct:.0f}% of volume — "
+                + (
+                    "healthy breadth."
+                    if pct_well and pct_well >= 50
+                    else "volume still leans on a minority of names."
+                )
+            )
+        lines = _append_analysis(lines, tips)
         return {
             "ok": True,
             "mode": "doing_well",
@@ -1157,6 +1176,172 @@ def analyze_parties(
 
 
 def _party_meta(frame: pd.DataFrame, party: str) -> dict[str, Any]:
+    part = frame[frame["party"] == party]
+    if part.empty:
+        return {"client_type": None, "city": None}
+    return {
+        "client_type": str(part["client_type"].iloc[0]) if "client_type" in part else None,
+        "city": str(part["city"].iloc[0]) if "city" in part else None,
+    }
+
+
+def _party_analysis_bullets(
+    *,
+    rows: list[dict[str, Any]],
+    metric: str,
+    filters: dict[str, Any],
+    entity_key: str = "party",
+) -> list[str]:
+    """Short interpretation bullets for party/city analytics answers."""
+    tips: list[str] = []
+    if not rows:
+        return tips
+    name = entity_key
+    scope = filters.get("client_type") or filters.get("city") or "this set"
+
+    if metric in {"packing_mix", "product_mix"}:
+        # rows may use packing_category / product keys
+        total = sum(float(r.get("volume_mt") or 0) for r in rows)
+        if total > 0 and rows:
+            top = rows[0]
+            key = next(
+                (k for k in ("packing_category", "product", "segment") if k in top),
+                None,
+            )
+            if key:
+                share = float(top.get("share_pct") or 0)
+                tips.append(
+                    f"**{top.get(key)}** is {share:.0f}% of the mix — "
+                    + (
+                        "highly concentrated; a slip here moves the total."
+                        if share >= 45
+                        else "the lead line in this mix."
+                    )
+                )
+            if len(rows) >= 2:
+                tips.append(
+                    f"Top 2 lines are "
+                    f"{float(rows[0].get('share_pct') or 0) + float(rows[1].get('share_pct') or 0):.0f}% "
+                    f"combined."
+                )
+        return tips[:3]
+
+    if metric == "lost_parties":
+        tips.append(
+            f"{len(rows)} {name}(s) had AMS > 0 but **zero** volume in this period — "
+            "priority follow-ups."
+        )
+        if rows and rows[0].get("ams_mt"):
+            tips.append(
+                f"Largest silent AMS: **{rows[0].get('party') or rows[0].get('city')}** "
+                f"({rows[0]['ams_mt']} MT AMS)."
+            )
+        return tips[:3]
+
+    if metric == "new_parties":
+        tips.append(
+            f"{len(rows)} new {name}(s) with first sale in this window."
+        )
+        if rows and rows[0].get("volume_mt"):
+            tips.append(
+                f"Largest new volume: **{rows[0].get('party')}** "
+                f"({rows[0]['volume_mt']} MT)."
+            )
+        return tips[:3]
+
+    if metric == "yoy":
+        scored = [r for r in rows if isinstance(r.get("yoy_pct"), (int, float))]
+        if scored:
+            best = scored[0] if True else scored[0]
+            # rows already sorted by metric
+            tips.append(
+                f"**{best.get('party') or best.get('city')}** leads YoY "
+                f"({best['yoy_pct']:+.1f}%; {best.get('volume_mt')} vs "
+                f"{best.get('prior_mt')} MT prior)."
+            )
+            neg = [r for r in scored if float(r["yoy_pct"]) < 0]
+            if neg:
+                tips.append(
+                    f"{len(neg)} of {len(scored)} listed are still down YoY."
+                )
+        return tips[:3]
+
+    if metric == "vs_ams":
+        scored = [r for r in rows if isinstance(r.get("pct_vs_ams"), (int, float))]
+        if scored:
+            lead = scored[0]
+            tips.append(
+                f"**{lead.get('party') or lead.get('city')}** is "
+                f"{lead['pct_vs_ams']:+.1f}% vs AMS/Expected "
+                f"({lead.get('volume_mt')} MT)."
+            )
+            behind = [r for r in scored if float(r["pct_vs_ams"]) < 0]
+            if behind:
+                tips.append(
+                    f"{len(behind)} of {len(scored)} shown are below AMS — "
+                    f"focus recovery on {scope}."
+                )
+            elif scored:
+                tips.append("All listed names are at/above AMS in this cut.")
+        return tips[:3]
+
+    if metric in {"ams", "volume"}:
+        top = rows[0]
+        top_name = top.get("party") or top.get("city")
+        tips.append(
+            f"**{top_name}** ranks #1 "
+            f"({top.get('ams_mt') if metric == 'ams' else top.get('volume_mt')} MT "
+            f"{'AMS' if metric == 'ams' else 'volume'})."
+        )
+        if len(rows) >= 3:
+            top3 = sum(
+                float(r.get("ams_mt" if metric == "ams" else "volume_mt") or 0)
+                for r in rows[:3]
+            )
+            allv = sum(
+                float(r.get("ams_mt" if metric == "ams" else "volume_mt") or 0)
+                for r in rows
+            )
+            if allv > 0:
+                tips.append(
+                    f"Top 3 are {100.0 * top3 / allv:.0f}% of this ranked list — "
+                    + ("concentrated." if top3 / allv >= 0.6 else "reasonably spread.")
+                )
+        return tips[:3]
+
+    if metric == "invoices":
+        top = rows[0]
+        tips.append(
+            f"**{top.get('party') or top.get('city')}** has the most invoices "
+            f"({top.get('invoices')})"
+            + (
+                f" at ~{top.get('avg_invoice_mt')} MT each."
+                if top.get("avg_invoice_mt") is not None
+                else "."
+            )
+        )
+        return tips[:3]
+
+    if metric in {"share_of_segment", "segment_mix"}:
+        top = rows[0]
+        tips.append(
+            f"**{top.get('party')}** holds the largest share "
+            f"({top.get('score')}%; segment {top.get('segment_mt')} MT)."
+        )
+        return tips[:3]
+
+    return tips
+
+
+def _append_analysis(lines: list[str], tips: list[str]) -> list[str]:
+    if not tips:
+        return lines
+    out = list(lines)
+    if out and out[-1].strip():
+        out.append("")
+    out.append("### Analysis")
+    out.extend(f"- {t}" for t in tips)
+    return out
     part = frame[frame["party"] == party]
     if part.empty:
         return {"client_type": None, "city": None}
@@ -1263,6 +1448,11 @@ def _party_table_result(
 
     if not rows:
         lines = [f"No results for {blurb}.\n"]
+    else:
+        tips = _party_analysis_bullets(
+            rows=rows, metric=metric, filters=filters, entity_key=entity_key
+        )
+        lines = _append_analysis(lines, tips)
 
     return {
         "ok": True,
@@ -1340,7 +1530,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     if re.search(r"\btop\b.+\bfor eva\b|\bdistributors? for eva\b", t):
         out["brand"] = out.get("brand") or "Eva"
 
-    m_lim = re.search(r"\btop\s+(\d{1,3})\b", t)
+    m_lim = re.search(r"\b(?:top|bottom)\s+(\d{1,3})\b", t)
     if m_lim:
         out["limit"] = int(m_lim.group(1))
     elif re.search(r"\b(highest|who\s+(are|were)\s+the\s+top|top\s+distributors?)\b", t):
@@ -1349,7 +1539,10 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         out["limit"] = 10
 
     # City league
-    if re.search(r"\b(cities|city league|rank(ed)? cities|top\s+\d+\s+cities)\b", t):
+    if re.search(
+        r"\b(cities|city league|rank(ed)? cities|top\s+\d+\s+cities|top cities)\b",
+        t,
+    ):
         out["group_by"] = "city"
 
     # List mode
@@ -1358,7 +1551,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         t,
     ) and not re.search(
         r"\b(top|highest|grow|doing well|poor|behind|share|percent|%|ams|average|"
-        r"new|lost|mix|breakdown|invoice|frequency)\b",
+        r"new|lost|mix|breakdown|invoice|frequency|silent|bottom)\b",
         t,
     ):
         out["mode"] = "list"
@@ -1379,8 +1572,8 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     ):
         out["metric"] = "new_parties"
     elif re.search(
-        r"\b(lost\s+(parties|clients|distributors)|silent|zero sales|"
-        r"no sales this|dropped off|inactive parties)\b",
+        r"\b(lost\s+(parties|clients|distributors)|silent|"
+        r"zero sales|no sales this|dropped off|inactive parties)\b",
         t,
     ):
         out["metric"] = "lost_parties"
@@ -1395,12 +1588,17 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         out["mix_dimension"] = "product"
     elif re.search(
         r"\b(product mix|product break|packing mix|pack(ing)? break|"
-        r"by packing|by product|pack mix|category mix)\b",
+        r"pack mix|category mix|mix for)\b",
         t,
+    ) or (
+        re.search(r"\b(product|packing|pack)\s+break(\s*down|down)?\b", t)
+        and re.search(r"\b(imtiaz|distributors?|clients?)\b", t)
     ):
         out["metric"] = "packing_mix"
         out["mix_dimension"] = "packing_category"
-    elif re.search(r"\b(invoice frequency|most invoices|by invoices?)\b", t):
+    elif re.search(
+        r"\b(invoice frequency|most invoices|by invoices?|invoices?)\b", t
+    ):
         out["metric"] = "invoices"
     elif re.search(r"\b(avg(erage)? invoice|mt per invoice|invoice size)\b", t):
         out["metric"] = "invoice_mt"
@@ -1409,16 +1607,29 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     ) or re.search(r"\b(lahore|karachi|islamabad)\b.+\b(percent|%|share)\b", t):
         out["metric"] = "geo_share"
         out["mode"] = "analyze"
-    elif re.search(r"\bshare of\b|\bhighest share\b", t):
+    elif re.search(
+        r"\bshare of\b|\bhighest share\b|\bhighest\b.{0,25}\bshare\b|"
+        r"\bshare\b.{0,25}\bhighest\b",
+        t,
+    ):
         out["metric"] = "share_of_segment"
     elif re.search(
         r"\b(behind|poorly|poor performance|falling behind|falling in sales|"
         r"not doing well|underperform|below ams|below average|"
-        r"behind on average)\b",
+        r"behind on average|bottom\s+\d+)\b",
         t,
     ):
-        out["metric"] = "vs_ams"
+        out["metric"] = "vs_ams" if not re.search(r"\bby volume\b|\bbottom\b.+\bvolume\b", t) else "volume"
         out["sort"] = "asc"
+        if re.search(r"\bbottom\b.+\bvolume\b|\bby volume\b.+\bbottom\b", t):
+            out["metric"] = "volume"
+            out["sort"] = "asc"
+        elif re.search(r"\bbottom\b", t) and re.search(r"\bvolume\b", t):
+            out["metric"] = "volume"
+            out["sort"] = "asc"
+        elif re.search(r"\bbottom\b", t) and not re.search(r"\b(ams|average)\b", t):
+            out["metric"] = "volume"
+            out["sort"] = "asc"
     elif re.search(r"\b(grow|growth|grew|vs\b.+\blast year|year over year|yoy)\b", t):
         out["metric"] = "yoy"
         if re.search(r"\blast year\b|\byear ago\b", t):

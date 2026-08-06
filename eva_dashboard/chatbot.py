@@ -1260,17 +1260,49 @@ def _looks_context_followup(text: str) -> bool:
     )
 
 
+def _looks_party_mix_query(text: str) -> bool:
+    """True for party/client mix questions (not table row drill-downs)."""
+    t = (text or "").lower()
+    if re.search(
+        r"\b(product mix|packing mix|pack(ing)? mix|category mix|mix for)\b",
+        t,
+    ):
+        return True
+    if re.search(r"\b(sku[- ]?wise|product[- ]?wise)\b", t) and re.search(
+        r"\b(imtiaz|distributors?|clients?)\b",
+        t,
+    ):
+        return True
+    # "product breakdown for distributors/Imtiaz" — not plain BU packing breakdown
+    if re.search(
+        r"\b(product|packing|pack)\s+break(\s*down|down)?\b.+\b"
+        r"(imtiaz|distributors?|clients?)\b",
+        t,
+    ):
+        return True
+    return False
+
+
 def _looks_party_analytics(text: str) -> bool:
     t = (text or "").lower()
     # Sales-table YoY compare is query_sales, not party ranking
     if _looks_sales_yoy_compare(t):
+        return False
+    # Row drill-downs ("show by product" / "SKU wise" alone) stay on query_sales
+    if _looks_row_drilldown(t) and not _looks_party_mix_query(t):
+        return False
+    # Plain packing/product breakdown of a BU/city is a sales matrix
+    if re.search(
+        r"\b(packing|product|oil)\s+break(\s*down|down)\b",
+        t,
+    ) and not _looks_party_mix_query(t):
         return False
     return bool(
         re.search(
             r"\b("
             r"top\s+\d+|highest sale|highest share|which\s+(imtiaz|distributor)|"
             r"who\s+(are|were)\s+the\s+top|"
-            r"top\s+(distributors?|parties|clients|imtiaz|stores?)|"
+            r"top\s+(distributors?|parties|clients|imtiaz|stores?|cities|city)|"
             r"doing well|performing well|performing poorly|poorly|"
             r"falling behind|falling in sales|behind on|not doing well|"
             r"underperform|grew|grow(th|n)?|"
@@ -1278,19 +1310,21 @@ def _looks_party_analytics(text: str) -> bool:
             r"relative to ams|year over year|\byoy\b|"
             r"parties by|by average|by ams|by volume|"
             r"new\s+(parties|clients|distributors|imtiaz)|new in\b|"
-            r"lost\s+(parties|clients|distributors)|silent parties|"
-            r"product mix|packing mix|product break|sku[- ]?wise|"
-            r"mix for|breakdown for|by packing|by product|"
-            r"invoice|frequency|city league|top\s+\d+\s+cities|"
-            r"rank(ed)? cities|top\s+\d+\s+distributors|"
+            r"lost\s+(parties|clients|distributors)|silent\s+"
+            r"(parties|distributors|clients)|"
+            r"product mix|packing mix|pack(ing)? mix|mix for|"
+            r"invoices?|invoice frequency|most invoices|by invoices?|"
+            r"city league|top\s+\d+\s+cities|rank(ed)? cities|"
+            r"top\s+\d+\s+distributors|"
             r"distributors? for|imtiaz stores? selling|"
-            r"behind on average|falling behind|"
+            r"behind on average|falling behind|bottom\s+\d+|"
             # last year only with party/growth intent
             r"(distributors?|parties|imtiaz).{0,40}last year|"
             r"last year.{0,40}(distributors?|parties|imtiaz|growth|grew)"
             r")\b",
             t,
         )
+        or _looks_party_mix_query(t)
         or (
             _looks_context_followup(t)
             and re.search(

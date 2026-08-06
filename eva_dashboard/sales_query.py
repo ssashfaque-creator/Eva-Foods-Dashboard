@@ -1445,7 +1445,77 @@ def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[s
 
 
 def _auto_insights(result: dict[str, Any]) -> list[str]:
+    """Short analytical bullets — interpretation, not a restatement of the table."""
     tips: list[str] = []
+    mode = result.get("mode")
+    row_dim = str(result.get("row_dimension") or "row")
+    col_dim = str(result.get("column_dimension") or "column")
+    filters = result.get("filters") or {}
+
+    if mode == "yoy":
+        yoy = result.get("yoy_pct")
+        cur = float(result.get("current_total_mt") or 0)
+        pri = float(result.get("prior_total_mt") or 0)
+        if isinstance(yoy, (int, float)):
+            if yoy <= -20:
+                tips.append(
+                    f"Overall volume is sharply down YoY ({yoy:+.1f}%) — "
+                    f"{cur:.3f} vs {pri:.3f} MT prior."
+                )
+            elif yoy < 0:
+                tips.append(
+                    f"Overall volume is soft YoY ({yoy:+.1f}%); "
+                    "check whether the drop is concentrated in one packing or client type."
+                )
+            elif yoy >= 20:
+                tips.append(
+                    f"Strong YoY expansion ({yoy:+.1f}%) — "
+                    "confirm it is broad-based, not one client spike."
+                )
+            else:
+                tips.append(f"Overall YoY is roughly flat-to-up ({yoy:+.1f}%).")
+        # Best / worst row movers
+        row_yoy = result.get("yoy_by_row") or {}
+        scored = [
+            r
+            for r in (row_yoy.get("rows") or [])
+            if str(r.get("segment") or "").lower() != "total"
+            and isinstance(r.get("yoy_pct"), (int, float))
+            and (float(r.get("current_mt") or 0) + float(r.get("prior_mt") or 0)) > 0
+        ]
+        if scored:
+            best = max(scored, key=lambda r: float(r["yoy_pct"]))
+            worst = min(scored, key=lambda r: float(r["yoy_pct"]))
+            tips.append(
+                f"**{best['segment']}** leads YoY among {row_dim.replace('_', ' ')}s "
+                f"({best['yoy_pct']:+.1f}%)."
+            )
+            if worst["segment"] != best["segment"]:
+                tips.append(
+                    f"**{worst['segment']}** is the main drag "
+                    f"({worst['yoy_pct']:+.1f}% YoY)."
+                )
+        col_yoy = result.get("yoy_by_col") or {}
+        cscored = [
+            r
+            for r in (col_yoy.get("rows") or [])
+            if str(r.get("segment") or "").lower() != "total"
+            and isinstance(r.get("yoy_pct"), (int, float))
+        ]
+        if cscored:
+            top_c = max(cscored, key=lambda r: float(r["current_mt"] or 0))
+            tips.append(
+                f"**{top_c['segment']}** is still the largest {col_dim.replace('_', ' ')} "
+                f"this period ({top_c['current_mt']} MT"
+                + (
+                    f", {top_c['yoy_pct']:+.1f}% YoY)."
+                    if isinstance(top_c.get("yoy_pct"), (int, float))
+                    else ")."
+                )
+            )
+        return tips[:4]
+
+    # Analytical trend insights
     trend = result.get("trend") or {}
     rows = list(trend.get("rows") or [])
     partial = bool(trend.get("partial_month"))
@@ -1454,32 +1524,79 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
         (r, r.get(pct_key))
         for r in rows
         if isinstance(r.get(pct_key), (int, float))
+        and str(r.get(row_dim) or "").lower() != "total"
     ]
     if scored:
         best = max(scored, key=lambda x: float(x[1]))
         worst = min(scored, key=lambda x: float(x[1]))
-        dim = trend.get("row_dimension", "line")
+        baseline = "expected (MTD×AMS)" if partial else "AMS"
         tips.append(
-            f"**{best[0].get(dim)}** is furthest ahead of "
-            f"{'expected' if partial else 'AMS'} ({best[1]:+.1f}%)."
+            f"**{best[0].get(row_dim)}** is furthest ahead of {baseline} "
+            f"({best[1]:+.1f}%)."
         )
-        if worst[0].get(dim) != best[0].get(dim):
+        if worst[0].get(row_dim) != best[0].get(row_dim):
             tips.append(
-                f"**{worst[0].get(dim)}** is furthest behind "
-                f"({'expected' if partial else 'AMS'} {worst[1]:+.1f}%)."
+                f"**{worst[0].get(row_dim)}** is furthest behind {baseline} "
+                f"({worst[1]:+.1f}%)."
             )
-    client = result.get("client_matrix") or {}
-    crow = (client.get("rows") or [None])[0]
-    if crow:
-        # largest non-total column
-        cols = [c for c in (client.get("columns") or []) if c != "Total"]
-        if cols:
-            top_col = cols[0]
-            tips.append(
-                f"Largest client-type column: **{top_col}** "
-                f"(sorted highest-first)."
+
+    # Matrix / client concentration
+    matrix = result.get("matrix") or result.get("client_matrix") or {}
+    mrows = [
+        r
+        for r in (matrix.get("rows") or [])
+        if str(r.get(matrix.get("row_dimension") or row_dim) or "").lower() != "total"
+    ]
+    grand = float(matrix.get("grand_total_mt") or 0)
+    if not grand and mrows:
+        grand = sum(float(r.get("Total") or 0) for r in mrows)
+    if mrows and grand > 0:
+        top = max(mrows, key=lambda r: float(r.get("Total") or 0))
+        top_key = matrix.get("row_dimension") or row_dim
+        top_name = top.get(top_key)
+        top_mt = float(top.get("Total") or 0)
+        share = 100.0 * top_mt / grand
+        tips.append(
+            f"**{top_name}** is {share:.0f}% of this view ({top_mt:.3f} of {grand:.3f} MT) "
+            + ("— concentration risk if it slips." if share >= 50 else "— still the lead line.")
+        )
+        cols = [c for c in (matrix.get("columns") or []) if c != "Total"]
+        if cols and not filters.get("client_type"):
+            # Column share of grand total from footer
+            footer = next(
+                (
+                    r
+                    for r in (matrix.get("rows") or [])
+                    if str(r.get(top_key) or "").lower() == "total"
+                ),
+                None,
             )
-    return tips[:4]
+            if footer:
+                top_col = max(cols, key=lambda c: float(footer.get(c) or 0))
+                col_mt = float(footer.get(top_col) or 0)
+                if col_mt > 0:
+                    tips.append(
+                        f"**{top_col}** is the dominant {col_dim.replace('_', ' ')} "
+                        f"({100.0 * col_mt / grand:.0f}% of total)."
+                    )
+        # Second row vs first — mix breadth
+        if len(mrows) >= 2:
+            second = sorted(mrows, key=lambda r: float(r.get("Total") or 0), reverse=True)[1]
+            gap = top_mt - float(second.get("Total") or 0)
+            if top_mt > 0 and gap / top_mt >= 0.4:
+                tips.append(
+                    f"Lead over **{second.get(top_key)}** is wide "
+                    f"({gap:.3f} MT) — mix is top-heavy."
+                )
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for tip in tips:
+        if tip not in seen:
+            seen.add(tip)
+            uniq.append(tip)
+    return uniq[:4]
 
 
 def render_sales_markdown(result: dict[str, Any]) -> str:
@@ -1518,6 +1635,11 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
             f"{str(result.get('column_dimension') or '').replace('_', ' ').title()}\n",
             _matrix_to_markdown(result.get("prior_matrix") or {}, row_dim),
         ]
+        insights = _auto_insights(result)
+        if insights:
+            parts.append("### Analysis\n")
+            parts.extend(f"- {t}" for t in insights)
+            parts.append("")
         return "\n".join(parts).strip() + "\n"
 
     if result.get("mode") == "analytical":
@@ -1538,13 +1660,18 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
         parts.append(_trend_to_markdown(result.get("trend") or {}))
         insights = _auto_insights(result)
         if insights:
-            parts.append("### Insights\n")
+            parts.append("### Analysis\n")
             parts.extend(f"- {t}" for t in insights)
             parts.append("")
     else:
         col = str(result.get("column_dimension") or "column")
         parts.append(f"### {row_dim.replace('_', ' ').title()} × {col.replace('_', ' ').title()}\n")
         parts.append(_matrix_to_markdown(result.get("matrix") or {}, row_dim))
+        insights = _auto_insights(result)
+        if insights:
+            parts.append("### Analysis\n")
+            parts.extend(f"- {t}" for t in insights)
+            parts.append("")
 
     return "\n".join(parts).strip() + "\n"
 
