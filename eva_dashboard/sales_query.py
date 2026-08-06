@@ -193,6 +193,34 @@ def resolve_period(
             label=f"This week ({start.isoformat()} → {max_d.isoformat()})",
         )
 
+    # last 3 months / past 3 months (calendar months ending at max_d month)
+    m_n = re.search(r"\b(last|past|previous)\s+(\d{1,2})\s+months?\b", text)
+    if m_n or "last quarter" in text or "previous quarter" in text or "past quarter" in text:
+        from datetime import timedelta
+
+        n_months = 3
+        if m_n:
+            n_months = max(1, min(24, int(m_n.group(2))))
+        elif "quarter" in text:
+            n_months = 3
+        # Inclusive: n full/partial months ending at max_d
+        end = max_d
+        y, mth = max_d.year, max_d.month
+        for _ in range(n_months - 1):
+            mth -= 1
+            if mth == 0:
+                mth = 12
+                y -= 1
+        start = date(y, mth, 1)
+        if min_d and start < min_d:
+            start = min_d
+        label = (
+            f"Last quarter ({start.isoformat()} → {end.isoformat()})"
+            if "quarter" in text
+            else f"Last {n_months} months ({start.isoformat()} → {end.isoformat()})"
+        )
+        return _period_result(start, end, True, max_d, label=label)
+
     # this month / so far / MTD
     so_far = any(
         p in text
@@ -202,6 +230,10 @@ def resolve_period(
 
     # Named month
     year = max_d.year
+    if re.search(r"\b(last|previous)\s+year\b", text) or re.search(
+        r"\b(year\s+ago|prior\s+year)\b", text
+    ):
+        year = max_d.year - 1
     year_m = re.search(r"(20\d{2})", text)
     if year_m:
         year = int(year_m.group(1))

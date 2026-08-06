@@ -539,7 +539,13 @@ def page_chat() -> None:
 - How are Eva Consumer sales doing in Karachi so far in August?
 - Evaluate Stand up pouch sales in July
 
-**Client / price**:
+**Client / parties / price**:
+- Who are my distributors in Lahore?
+- Top 10 parties by AMS in Karachi
+- Which Imtiaz store has the highest share of VTF?
+- What percent of VTF sales are in Lahore?
+- Which distributors are doing well last 3 months?
+- Which distributors grew VTF most vs July last year?
 - Who is Al Bari?
 - Canola standup price for Distributors last week
 - What’s the Price Fetch? *(follow-up)*

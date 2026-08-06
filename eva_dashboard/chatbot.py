@@ -19,6 +19,12 @@ from eva_dashboard.client_language import (
     normalize_client_type,
 )
 from eva_dashboard.db import connect, init_db
+from eva_dashboard.party_analytics import (
+    analyze_parties,
+    extract_city_from_text,
+    infer_party_analytics_from_text,
+    list_clients,
+)
 from eva_dashboard.paths import data_root, db_path
 from eva_dashboard.product_language import (
     glossary_for_prompt,
@@ -220,8 +226,12 @@ SPEED & TOOL RULES:
 3. NEVER invent numbers or cite an OpenAI knowledge cutoff.
 4. Geography = City-Filter (`city` parameter). Always state the period label from the tool.
 5. Read-only only.
-6. Client / party name questions ("who is Al Bari?") → **lookup_party** (not query_sales).
-7. Rate / price / Price Fetch questions → **query_price** (Rate from sales; Price Fetch when asked).
+6. Client **name** questions ("who is Al Bari?") → **lookup_party**.
+7. Client **lists** ("who are my distributors in Lahore?") → **list_clients**
+   (City-Filter + Client Type — NOT fuzzy name search on the city word).
+8. Party rankings / AMS / share / YoY ("top 10 parties…", "which distributors
+   doing well…", "% of VTF in Lahore") → **analyze_parties**.
+9. Rate / price / Price Fetch → **query_price**.
 
 CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit instead):
   • Imtiaz / Imtiaz store(s) / store → client_type='Imtiaz Store'
@@ -231,6 +241,8 @@ CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit in
   Example: "Average sale for Imtiaz store last 6 months"
     → client_type='Imtiaz Store', columns='month', months_back=6
       (NO business_unit unless the user named one)
+  Example: "Who are my distributors in Lahore?"
+    → list_clients city='Lahore', client_type='Eva Distributors'
 
 SALES MATRIX RULES (query_sales — set filters; tool builds the table):
 Row drill-down:
@@ -263,6 +275,18 @@ Examples:
       client_type='Eva Distributors', period='last week'
   "What's the Price Fetch?" (follow-up) → query_price with include_price_fetch=true + prior_spec
   "Who is Al Bari?" → lookup_party query='Al Bari'
+  "Who are my distributors in Lahore?"
+    → list_clients city='Lahore', client_type='Eva Distributors'
+  "Top 10 parties by AMS in Karachi"
+    → analyze_parties city='Karachi', metric='ams', limit=10
+  "Which distributors are doing well last 3 months?"
+    → analyze_parties client_type='Eva Distributors', period='last 3 months',
+      metric='vs_ams'
+  "What percent of VTF sales are in Lahore?"
+    → analyze_parties oil_type='Eva VTF', share_city='Lahore', metric='geo_share'
+  "Which distributors grew VTF most vs July last year?"
+    → analyze_parties client_type='Eva Distributors', oil_type='Eva VTF',
+      period='July', compare_period='July last year', metric='yoy'
 
 MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
@@ -283,7 +307,8 @@ RESPONSE FORMAT:
 - Markdown TABLES only for numbers (never bullet lists of metrics).
 - One sentence of context (period + filters), then table(s).
 - Columns already sorted highest-first by the tool — preserve that order.
-- For query_sales / query_price / lookup_party: paste answer_markdown verbatim.
+- For query_sales / query_price / lookup_party / list_clients / analyze_parties:
+  paste answer_markdown verbatim.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -661,9 +686,8 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_party",
             "description": (
-                "Search clients / sales parties by name (fuzzy). Use for "
-                "'who is Al Bari?', find client, or any party name lookup. "
-                "Returns client name, client type, city, city-filter, MT."
+                "Fuzzy search one client/party by NAME (e.g. 'who is Al Bari?'). "
+                "Do NOT use for 'distributors in Lahore' — use list_clients."
             ),
             "parameters": {
                 "type": "object",
@@ -675,6 +699,70 @@ TOOLS: list[dict[str, Any]] = [
                     "limit": {"type": "integer"},
                 },
                 "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_clients",
+            "description": (
+                "List clients by City-Filter and/or Client Type. "
+                "Use for 'who are my distributors in Lahore?'"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "client_type": {"type": "string"},
+                    "period": {"type": "string"},
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_parties",
+            "description": (
+                "Rank parties for AMS/volume/share/YoY/doing-well. "
+                "Top N, which Imtiaz highest VTF share, % of VTF in Lahore, "
+                "distributors doing well last quarter, growth vs July last year."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string"},
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                    "city": {"type": "string"},
+                    "client_type": {"type": "string"},
+                    "business_unit": {"type": "string"},
+                    "oil_type": {"type": "string"},
+                    "packing_category": {"type": "string"},
+                    "brand": {"type": "string"},
+                    "metric": {
+                        "type": "string",
+                        "enum": [
+                            "volume",
+                            "ams",
+                            "vs_ams",
+                            "yoy",
+                            "share_of_segment",
+                            "segment_mix",
+                            "geo_share",
+                            "doing_well",
+                        ],
+                    },
+                    "compare_period": {"type": "string"},
+                    "share_city": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
                 "additionalProperties": False,
             },
         },
@@ -1029,10 +1117,13 @@ def resolve_row_dimension_request(
 
 
 def _looks_party_lookup(text: str) -> bool:
+    """Fuzzy single-name lookup only (not lists / rankings)."""
     t = (text or "").lower()
+    if _looks_client_list(t) or _looks_party_analytics(t):
+        return False
     return bool(
         re.search(
-            r"\b(who\s+is|who'?s|who\s+are|find\s+(the\s+)?client|"
+            r"\b(who\s+is|who'?s|find\s+(the\s+)?client|"
             r"search\s+(for\s+)?(client|party)|lookup\s+(client|party)|"
             r"tell me about)\b",
             t,
@@ -1040,9 +1131,46 @@ def _looks_party_lookup(text: str) -> bool:
     )
 
 
+def _looks_client_list(text: str) -> bool:
+    t = (text or "").lower()
+    if re.search(
+        r"\b(top\s+\d|highest|grow|growth|doing well|share of|percent|% of|ams)\b",
+        t,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(who are|list|show( me)?)\b.+\b"
+            r"(distributors?|clients?|parties|imtiaz|stores?)\b",
+            t,
+        )
+        or re.search(
+            r"\b(distributors?|clients?)\b.+\b(in|at)\b.+\b"
+            r"(lahore|karachi|islamabad|faisalabad|multan|peshawar)\b",
+            t,
+        )
+    )
+
+
+def _looks_party_analytics(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"top\s+\d+|highest sale|highest share|which\s+(imtiaz|distributor)|"
+            r"doing well|performing well|grew|grow(th|n)?|"
+            r"percent of|% of|share of|vs\s*ams|against ams|"
+            r"relative to ams|year over year|\byoy\b|last year|"
+            r"parties by|by average|by ams|by volume"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _looks_price_query(text: str) -> bool:
     t = (text or "").lower()
-    if _looks_party_lookup(t):
+    if _looks_party_lookup(t) or _looks_client_list(t) or _looks_party_analytics(t):
         return False
     # "average sale" is volume, not rate
     if re.search(r"\baverage\s+sales?\b|\bavg\.?\s+sales?\b", t):
@@ -1244,9 +1372,61 @@ def _dispatch_tool(
             prior_spec=use_prior or arguments.get("prior_spec"),
         )
     if name == "lookup_party":
+        # If language is clearly a city+type list, redirect
+        if _looks_client_list(user_text):
+            inferred = infer_party_analytics_from_text(user_text)
+            return list_clients(
+                city=inferred.get("city") or arguments.get("city"),
+                client_type=inferred.get("client_type")
+                or normalize_client_type(arguments.get("client_type")),
+                limit=int(arguments.get("limit") or inferred.get("limit") or 200),
+            )
         return lookup_party(
             arguments.get("query") or user_text,
             limit=int(arguments.get("limit") or 10),
+        )
+    if name == "list_clients":
+        inferred = infer_party_analytics_from_text(user_text)
+        return list_clients(
+            city=arguments.get("city") or inferred.get("city"),
+            client_type=normalize_client_type(
+                arguments.get("client_type") or inferred.get("client_type")
+            ),
+            period=arguments.get("period") or inferred.get("period"),
+            date_from=arguments.get("date_from"),
+            date_to=arguments.get("date_to"),
+            limit=int(arguments.get("limit") or inferred.get("limit") or 200),
+        )
+    if name == "analyze_parties":
+        inferred = infer_party_analytics_from_text(user_text)
+        return analyze_parties(
+            period=arguments.get("period") or inferred.get("period"),
+            date_from=arguments.get("date_from"),
+            date_to=arguments.get("date_to"),
+            city=arguments.get("city") or inferred.get("city"),
+            client_type=normalize_client_type(
+                arguments.get("client_type") or inferred.get("client_type")
+            ),
+            business_unit=arguments.get("business_unit")
+            or inferred.get("business_unit"),
+            oil_type=arguments.get("oil_type")
+            or inferred.get("oil_type")
+            or extract_oil_type_from_text(user_text),
+            packing_category=arguments.get("packing_category")
+            or inferred.get("packing_category")
+            or extract_packing_from_text(user_text),
+            brand=arguments.get("brand") or inferred.get("brand"),
+            metric=arguments.get("metric") or inferred.get("metric") or "volume",
+            compare_period=arguments.get("compare_period")
+            or inferred.get("compare_period"),
+            share_city=arguments.get("share_city")
+            or (
+                inferred.get("city")
+                if (arguments.get("metric") or inferred.get("metric")) == "geo_share"
+                else None
+            )
+            or extract_city_from_text(user_text),
+            limit=int(arguments.get("limit") or inferred.get("limit") or 10),
         )
     if name == "query_price":
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
@@ -1316,7 +1496,12 @@ def _dispatch_tool(
 
 
 def _looks_sales_matrix(text: str) -> bool:
-    if _looks_party_lookup(text) or _looks_price_query(text):
+    if (
+        _looks_party_lookup(text)
+        or _looks_price_query(text)
+        or _looks_client_list(text)
+        or _looks_party_analytics(text)
+    ):
         return False
     if _looks_row_drilldown(text):
         return True
@@ -1343,7 +1528,8 @@ def _looks_factual(text: str) -> bool:
         "pillow", "standup", "stand up", "product", "sku", "tin", "bucket",
         "so far", "doing", "breakdown", "august", "april", "march",
         "evaluate", "assess", "performance", "imtiaz", "distributor", "store",
-        "who is", "who's", "rate", "al bari", "party",
+        "who is", "who's", "who are", "rate", "al bari", "party", "share",
+        "percent", "grow", "quarter",
     )
     return any(k in t for k in keys)
 
@@ -1385,7 +1571,17 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if _looks_party_lookup(last_user):
+            if _looks_client_list(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "list_clients"},
+                }
+            elif _looks_party_analytics(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "analyze_parties"},
+                }
+            elif _looks_party_lookup(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "lookup_party"},
@@ -1479,7 +1675,14 @@ def chat_completion(
 
             # Prefer deterministic markdown from structured tools
             if (
-                name in {"query_sales", "query_price", "lookup_party"}
+                name
+                in {
+                    "query_sales",
+                    "query_price",
+                    "lookup_party",
+                    "list_clients",
+                    "analyze_parties",
+                }
                 and isinstance(result, dict)
                 and result.get("ok")
                 and result.get("answer_markdown")
@@ -1519,8 +1722,15 @@ def chat_completion(
                 else:
                     result = {
                         "ok": True,
+                        "mode": result.get("mode"),
+                        "metric": result.get("metric"),
+                        "period": result.get("period"),
+                        "filters": result.get("filters"),
                         "query": result.get("query"),
                         "matches": result.get("matches"),
+                        "clients": result.get("clients"),
+                        "parties": result.get("parties"),
+                        "count": result.get("count"),
                         "answer_markdown": sales_markdown,
                         "response_instructions": (
                             "Use answer_markdown verbatim as the reply."
