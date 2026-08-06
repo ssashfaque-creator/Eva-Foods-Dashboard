@@ -186,10 +186,16 @@ For sales questions the assistant should call **`query_sales` once** (not multi-
 | User specifies | Rows | Columns (default) |
 |---|---|---|
 | Nothing (e.g. Lahore last month) | Business Unit | Client Type |
-| Business Unit (e.g. Eva Consumer) | Oil Type | Client Type |
-| Business Unit + Oil Type | Packing Category | Client Type |
+| One Business Unit (e.g. Eva Consumer) | **Packing Category** | Client Type |
+| Multiple Business Units | Business Unit | (same as prior / requested) |
+| Oil Type set | Packing Category | Client Type |
 | Packing Category | Product | Client Type |
 | Asks “city-wise” | (same row rule) | City |
+| Asks “month-wise” / last N months | (same row rule) | Months + **Average** |
+
+All matrices include a **Total** footer row (column totals) and a row **Total** column.
+
+Follow-up “add Eva Bulk to this table” merges into the previous `table_spec` (same months/columns).
 
 **Mode from language (not from filters):**
 - “what were / show / breakdown” → **matrix** (one pivot)

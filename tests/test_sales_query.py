@@ -25,6 +25,7 @@ def _seed() -> None:
                 ("Eva Canola Oil (StandUpPouch)", "Eva Consumer", "Eva Canola", "Stand up"),
                 ("Eva Cooking Oil (StandUpPouch)", "Eva Consumer", "Eva Cooking", "Stand up"),
                 ("Eva VTF Banaspati 1x5 Pouch", "Eva Consumer", "Eva VTF", "Pouch"),
+                ("Eva Cooking Oil (16 Ltr Tin)", "Eva Bulk", "Eva Bulk", "Tin"),
                 ("Maan Banaspati 16 Kgs Tin", "Maan Bulk", "Maan Bulk", "Tin"),
             ],
         )
@@ -43,17 +44,20 @@ def _seed() -> None:
         # May
         rows += [
             ("2026-05-10", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "Eva Distributors"),
+            ("2026-05-11", "Alpha Dist", "Eva Cooking Oil (16 Ltr Tin)", 12.0, "Eva Distributors"),
             ("2026-05-12", "Beta Dist", "Maan Banaspati 16 Kgs Tin", 20.0, "Maan Distributors"),
         ]
         # June
         rows += [
             ("2026-06-10", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "Eva Distributors"),
+            ("2026-06-11", "Alpha Dist", "Eva Cooking Oil (16 Ltr Tin)", 12.0, "Eva Distributors"),
             ("2026-06-12", "Beta Dist", "Maan Banaspati 16 Kgs Tin", 20.0, "Maan Distributors"),
         ]
         # July (full)
         rows += [
             ("2026-07-05", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 40.0, "Eva Distributors"),
             ("2026-07-06", "Alpha Dist", "Eva Cooking Oil (StandUpPouch)", 10.0, "Eva Distributors"),
+            ("2026-07-06", "Alpha Dist", "Eva Cooking Oil (16 Ltr Tin)", 18.0, "Eva Distributors"),
             ("2026-07-07", "Beta Dist", "Eva VTF Banaspati 1x5 Pouch", 5.0, "Maan Distributors"),
             ("2026-07-08", "Beta Dist", "Maan Banaspati 16 Kgs Tin", 25.0, "Maan Distributors"),
             ("2026-07-09", "Gamma Dist", "Eva Canola Oil (StandUpPouch)", 15.0, "Eva Distributors"),
@@ -62,6 +66,7 @@ def _seed() -> None:
         rows += [
             ("2026-08-01", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 8.0, "Eva Distributors"),
             ("2026-08-02", "Alpha Dist", "Eva Cooking Oil (StandUpPouch)", 2.0, "Eva Distributors"),
+            ("2026-08-02", "Alpha Dist", "Eva Cooking Oil (16 Ltr Tin)", 4.0, "Eva Distributors"),
             ("2026-08-03", "Beta Dist", "Eva VTF Banaspati 1x5 Pouch", 1.0, "Maan Distributors"),
             ("2026-08-04", "Gamma Dist", "Eva Canola Oil (StandUpPouch)", 3.0, "Eva Distributors"),
         ]
@@ -127,7 +132,7 @@ def test_matrix_defaults_business_unit_and_client_type() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_eva_consumer_rows_are_oil_type() -> None:
+def test_eva_consumer_rows_are_packing() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
@@ -141,11 +146,52 @@ def test_eva_consumer_rows_are_oil_type() -> None:
                 mode="matrix",
             )
             assert out["mode"] == "matrix"
-            assert out["row_dimension"] == "oil_type"
+            assert out["row_dimension"] == "packing_category"
             assert out["required_table_count"] == 1
-            oils = {r["oil_type"] for r in out["matrix"]["rows"]}
-            assert "Eva Canola" in oils
-            assert "Eva Cooking" in oils
+            packs = {r["packing_category"] for r in out["matrix"]["rows"]}
+            assert "Stand up" in packs or "Pouch" in packs
+            # Column totals footer present
+            assert any(r.get("packing_category") == "Total" for r in out["matrix"]["rows"])
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_month_wise_and_add_followup() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            first = _dispatch_tool(
+                "query_sales",
+                {"business_unit": "Eva Consumer", "columns": "month", "months_back": 6},
+                user_text="Give me a month wise breakdown of Eva Consumer sales",
+            )
+            assert first["ok"] is True
+            assert first["column_dimension"] == "month"
+            assert first["row_dimension"] == "packing_category"
+            assert "Average" in first["matrix"]["columns"]
+            assert first.get("table_spec")
+
+            follow = _dispatch_tool(
+                "query_sales",
+                {"business_unit": "Eva Bulk"},
+                user_text="Add Eva Bulk to this table",
+                prior_spec=first["table_spec"],
+            )
+            assert follow["column_dimension"] == "month"
+            assert set(follow.get("business_units") or []) >= {
+                "Eva Consumer",
+                "Eva Bulk",
+            }
+            assert follow["row_dimension"] == "business_unit"
+            names = {r["business_unit"] for r in follow["matrix"]["rows"]}
+            assert "Eva Consumer" in names and "Eva Bulk" in names
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

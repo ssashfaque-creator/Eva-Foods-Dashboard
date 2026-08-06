@@ -213,37 +213,30 @@ SPEED & TOOL RULES:
 4. Geography = City-Filter (`city` parameter). Always state the period label from the tool.
 5. Read-only only.
 
-SALES MATRIX RULES (query_sales handles this — just set filters correctly):
-Row drill-down (automatic in the tool):
+SALES MATRIX RULES (query_sales — set filters; tool builds the table):
+Row drill-down:
   • No Business Unit → rows = Business Unit
-  • Business Unit set → rows = Oil Type
-  • Oil Type set → rows = Packing Category
-Column default = **client_type** (Eva Distributors, …), highest totals first.
-  • If user asks city-wise / by city → columns='city'
-  • City filter (e.g. Lahore) goes in `city=`, not as columns unless they ask city-wise.
+  • One Business Unit → rows = Packing Category (NOT Oil Type)
+  • Multiple Business Units → rows = Business Unit
+  • Oil Type set → Packing; Packing set → Product
+Columns: client_type (default) | city | month. Every table has row Total + column Totals.
+  • month-wise / last N months → columns='month', months_back=6 (+ Average column)
 
 Examples:
-  "What were the sales in Lahore last month?"
-    → query_sales(..., city='Lahore', mode='matrix')  # BU × client_type
   "What were Eva Consumer sales in Lahore last month?"
-    → query_sales(..., city='Lahore', business_unit='Eva Consumer', mode='matrix')
-      # Oil Type × client_type — ONE matrix only
-  "What were Eva Canola / Stand up pouch sales last month?"
-    → query_sales(..., oil_type='Eva Canola' or packing_category='Stand up', mode='matrix')
-  "City-wise breakdown of Eva Consumer sales last month"
-    → query_sales(..., business_unit='Eva Consumer', columns='city', mode='matrix')
-  "How were Eva Consumer sales in July?" / "Evaluate Eva Consumer so far in August"
-    → query_sales(..., business_unit='Eva Consumer', mode='analytical')
-      # MUST show all 3: city + client + AMS trend
-  "How were Stand up pouch sales last month?" / "Evaluate pet bottle performance"
-    → query_sales(..., packing_category='Stand up' or 'Pet bottle', mode='analytical')
-      # same 3-table analytical pack; rows = Product (next layer under packing)
+    → business_unit='Eva Consumer', city='Lahore'  # Packing × client_type
+  "Month-wise breakdown of Eva Consumer sales"
+    → business_unit='Eva Consumer', columns='month', months_back=6
+  "Add Eva Bulk to this table" (follow-up)
+    → business_units=['Eva Consumer','Eva Bulk'], columns='month', months_back=6,
+      prior_spec from previous answer — SAME table, extra BU row(s)
+  "How were Eva Consumer sales in July?"
+    → analytical (city + client + AMS); rows = Packing Category
 
-MODE FROM LANGUAGE (critical):
-- “what were / show / give me / breakdown” → mode='matrix' (single pivot)
-- “how were / how are / how is / evaluate / assess / performance / doing /
-  trend / vs AMS / analysis” → mode='analytical' (3 tables, always)
-- Analytical works at Business Unit, Oil Type, OR Packing Category scope.
+MODE FROM LANGUAGE:
+- what were / show / give me / breakdown / month-wise → matrix
+- how were / how are / evaluate / assess / performance / doing / trend → analytical
+- add / also include / plus → merge into previous table via prior_spec
 
 SKU / product language questions (single product):
 - resolve_product_language then product_sales (or query with packing/oil filters).
@@ -531,11 +524,11 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "query_sales",
             "description": (
-                "PRIMARY sales tool. One call returns a ready MT pivot "
-                "(auto rows: Business Unit → Oil Type → Packing; default columns: "
-                "client_type, highest first). Use mode=analytical for "
-                "'how are/were sales doing' (city + client + AMS trend tables). "
-                "Prefer this over run_sql for sales questions."
+                "PRIMARY sales tool. Builds MT pivots: rows = Packing when one "
+                "Business Unit is set (not Oil Type); columns = client_type|city|month. "
+                "Month-wise = last N months + Average. Follow-ups: pass prior_spec + "
+                "extra business_units to extend the same table. Analytical = city + "
+                "client + AMS when user says how were/evaluate."
             ),
             "parameters": {
                 "type": "object",
@@ -563,6 +556,13 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "e.g. Eva Consumer, Eva Bulk, Maan Consumer",
                     },
+                    "business_units": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Multiple BUs in one table (e.g. after 'add Eva Bulk')"
+                        ),
+                    },
                     "oil_type": {
                         "type": "string",
                         "description": "e.g. Eva Canola, Eva Cooking, Eva VTF",
@@ -573,17 +573,25 @@ TOOLS: list[dict[str, Any]] = [
                     },
                     "columns": {
                         "type": "string",
-                        "description": "client_type (default) or city",
-                        "enum": ["client_type", "city"],
+                        "description": (
+                            "client_type (default), city, or month "
+                            "(last N months + Average)"
+                        ),
+                        "enum": ["client_type", "city", "month"],
+                    },
+                    "months_back": {
+                        "type": "integer",
+                        "description": "For columns=month (default 6)",
+                    },
+                    "prior_spec": {
+                        "type": "object",
+                        "description": (
+                            "Previous table_spec when user adds to the current table"
+                        ),
                     },
                     "mode": {
                         "type": "string",
-                        "description": (
-                            "matrix (default for 'what were' / show / breakdown) = "
-                            "single pivot. analytical (for 'how were' / evaluate / "
-                            "assess / performance / doing / trend) = city + client + "
-                            "AMS trend — required at any filter depth including packing."
-                        ),
+                        "description": "matrix or analytical (usually set from language)",
                         "enum": ["matrix", "analytical"],
                     },
                 },
@@ -775,30 +783,166 @@ def _looks_analytical(text: str) -> bool:
     return any(re.search(p, t) for p in patterns)
 
 
+_KNOWN_BUSINESS_UNITS = (
+    "Eva Consumer",
+    "Eva Bulk",
+    "Maan Consumer",
+    "Maan Bulk",
+    "Cusine King",
+    "Cuisine King",
+    "Shortening",
+    "Bulk Oil",
+    "Meal",
+    "Byproducts",
+)
+
+
+def _looks_month_wise(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(month[- ]?wise|monthly|by month|per month|last\s+\d+\s+months|"
+            r"past\s+\d+\s+months|months?\s+breakdown|breakdown.*months?)\b",
+            t,
+        )
+    )
+
+
+def _looks_table_followup(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(add|also include|include|plus|with|append)\b.+\b"
+            r"(eva|maan|bulk|consumer|cusine|cuisine|shortening|meal|byproduct)",
+            t,
+        )
+        or re.search(r"\badd\b.+\bto (this|the|that) table\b", t)
+    )
+
+
+def _extract_business_units_from_text(text: str) -> list[str]:
+    t = text or ""
+    found: list[str] = []
+    lower = t.lower()
+    # Longer names first
+    candidates = sorted(_KNOWN_BUSINESS_UNITS, key=len, reverse=True)
+    for name in candidates:
+        if name.lower() in lower:
+            from eva_dashboard.categories import BUSINESS_UNIT_ALIASES
+
+            norm = BUSINESS_UNIT_ALIASES.get(name.lower(), name)
+            if name.lower() == "cuisine king":
+                norm = "Cusine King"
+            if norm not in found:
+                found.append(norm)
+    # Informal "eva bulk" / "maan consumer"
+    informal = [
+        ("eva consumer", "Eva Consumer"),
+        ("eva bulk", "Eva Bulk"),
+        ("maan consumer", "Maan Consumer"),
+        ("maan bulk", "Maan Bulk"),
+        ("cusine king", "Cusine King"),
+        ("cuisine king", "Cusine King"),
+    ]
+    for needle, label in informal:
+        if needle in lower and label not in found:
+            found.append(label)
+    return found
+
+
+def _months_back_from_text(text: str, default: int = 6) -> int:
+    m = re.search(r"\b(?:last|past|previous)\s+(\d{1,2})\s+months?\b", (text or "").lower())
+    if m:
+        return max(1, min(24, int(m.group(1))))
+    return default
+
+
+def _last_table_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Find the most recent query_sales table_spec in tool results."""
+    for m in reversed(messages):
+        if m.get("role") != "tool":
+            continue
+        raw = m.get("content") or ""
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("table_spec"):
+            return payload["table_spec"]
+        # Compact tool payload may only have table_spec nested after shrink —
+        # also accept top-level keys we keep
+        if isinstance(payload, dict) and payload.get("mode") and (
+            payload.get("filters") or payload.get("business_units") is not None
+        ):
+            # Rebuild minimal spec from compact result
+            return {
+                "period": payload.get("period"),
+                "filters": payload.get("filters") or {},
+                "business_units": payload.get("business_units") or [],
+                "column_dimension": payload.get("column_dimension")
+                or (payload.get("table_spec") or {}).get("column_dimension"),
+                "row_dimension": payload.get("row_dimension"),
+                "months_back": (payload.get("table_spec") or {}).get("months_back"),
+            }
+    return None
+
+
 def _dispatch_tool(
     name: str,
     arguments: dict[str, Any],
     *,
     user_text: str = "",
+    prior_spec: dict[str, Any] | None = None,
 ) -> Any:
     if name == "query_sales":
-        # Mode comes from the user's language, not from whether a BU/pack is set.
-        # "what were …" → matrix; "how were / evaluate …" → analytical
-        # (works for Business Unit, Oil Type, or Packing Category scope).
         if _looks_analytical(user_text):
             mode = "analytical"
         else:
             mode = "matrix"
+
+        columns = arguments.get("columns") or "client_type"
+        months_back = int(arguments.get("months_back") or 6)
+        if _looks_month_wise(user_text):
+            columns = "month"
+            months_back = _months_back_from_text(user_text, months_back)
+            mode = "matrix"
+
+        units = list(arguments.get("business_units") or [])
+        if arguments.get("business_unit"):
+            units.append(arguments["business_unit"])
+        # Follow-up: merge mentioned BUs into prior table
+        use_prior = prior_spec if (_looks_table_followup(user_text) and prior_spec) else None
+        if use_prior or _looks_table_followup(user_text):
+            for u in _extract_business_units_from_text(user_text):
+                if u not in units:
+                    units.append(u)
+            if prior_spec and not use_prior:
+                use_prior = prior_spec
+            if use_prior and use_prior.get("column_dimension") == "month":
+                columns = "month"
+                months_back = int(use_prior.get("months_back") or months_back)
+
+        # Dedupe units preserving order
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for u in units:
+            if u and u not in seen:
+                seen.add(u)
+                uniq.append(u)
+
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
             city=arguments.get("city"),
-            business_unit=arguments.get("business_unit"),
+            business_unit=uniq[0] if len(uniq) == 1 else arguments.get("business_unit"),
+            business_units=uniq if len(uniq) > 1 else (uniq or None),
             oil_type=arguments.get("oil_type"),
             packing_category=arguments.get("packing_category"),
-            columns=arguments.get("columns") or "client_type",
+            columns=columns,
+            months_back=months_back,
             mode=mode,
+            prior_spec=use_prior or arguments.get("prior_spec"),
         )
     if name == "get_schema":
         return {"schema": _schema_text()}
@@ -846,6 +990,7 @@ def _looks_sales_matrix(text: str) -> bool:
         "so far", "july", "june", "august", "how are", "how were", "doing",
         "breakdown", "city wise", "city-wise", "ams", "trend", "evaluate",
         "assess", "performance", "packing", "pet", "standup", "jerry",
+        "month", "monthly", "add ",
     )
     return any(k in t for k in sales_keys)
 
@@ -972,7 +1117,10 @@ def chat_completion(
             except json.JSONDecodeError:
                 args = {}
             try:
-                result = _dispatch_tool(name, args, user_text=last_user)
+                prior = _last_table_spec(working)
+                result = _dispatch_tool(
+                    name, args, user_text=last_user, prior_spec=prior
+                )
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
 
@@ -989,7 +1137,10 @@ def chat_completion(
                     "mode": result.get("mode"),
                     "period": result.get("period"),
                     "filters": result.get("filters"),
+                    "business_units": result.get("business_units"),
                     "row_dimension": result.get("row_dimension"),
+                    "column_dimension": result.get("column_dimension"),
+                    "table_spec": result.get("table_spec"),
                     "required_table_count": result.get("required_table_count"),
                     "answer_markdown": sales_markdown,
                     "response_instructions": (

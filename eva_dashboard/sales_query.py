@@ -243,14 +243,28 @@ def _auto_row_dimension(
     business_unit: str | None,
     oil_type: str | None,
     packing_category: str | None,
+    *,
+    business_units: list[str] | None = None,
 ) -> str:
-    """Drill-down: unspecified → BU; BU set → Oil Type; Oil Type set → Packing."""
+    """Drill-down for rows.
+
+    - Multiple business units → business_unit rows (comparison)
+    - Packing set → product
+    - Oil Type set → packing_category
+    - Single Business Unit → packing_category (not oil type)
+    - Else → business_unit
+    """
+    units = [u for u in (business_units or []) if u] or (
+        [business_unit] if business_unit else []
+    )
+    if len(units) > 1:
+        return "business_unit"
     if packing_category:
         return "product"
     if oil_type:
         return "packing_category"
-    if business_unit:
-        return "oil_type"
+    if units:
+        return "packing_category"
     return "business_unit"
 
 
@@ -260,6 +274,7 @@ def _fetch_lines(
     date_to: str,
     city: str | None = None,
     business_unit: str | None = None,
+    business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
 ) -> pd.DataFrame:
@@ -270,9 +285,20 @@ def _fetch_lines(
     if city:
         where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
         params.append(city)
-    if business_unit:
+
+    units = [u for u in (business_units or []) if u]
+    if not units and business_unit:
+        units = [business_unit]
+    if len(units) == 1:
         where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
-        params.append(business_unit)
+        params.append(units[0])
+    elif len(units) > 1:
+        placeholders = ",".join("?" for _ in units)
+        where.append(
+            f"lower(trim(COALESCE(c.category_1, ''))) IN ({placeholders})"
+        )
+        params.extend(u.lower().strip() for u in units)
+
     if oil_type:
         where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
         params.append(oil_type)
@@ -358,18 +384,121 @@ def _pivot_mt(
             entry[str(c)] = round(float(row[c]), 3)
         rows.append(entry)
 
+    # Column totals footer row
+    col_tot_map = {str(c): round(float(col_totals.get(c, 0.0)), 3) for c in col_totals.index}
+    col_tot_map["Total"] = round(float(pivot["Total"].sum()), 3)
+    total_row: dict[str, Any] = {row_dim: "Total"}
+    for c in columns:
+        total_row[str(c)] = col_tot_map.get(str(c), 0.0)
+    rows.append(total_row)
+
     return {
         "row_dimension": row_dim,
         "column_dimension": col_dim,
         "columns": [str(c) for c in columns],
         "rows": rows,
-        "column_totals": {
-            str(c): round(float(col_totals.get(c, 0.0)), 3) for c in col_totals.index
-        },
-        "grand_total_mt": round(float(pivot["Total"].sum()), 3),
+        "column_totals": col_tot_map,
+        "grand_total_mt": col_tot_map["Total"],
         "markdown_hint": (
             f"Markdown table: rows = {row_dim}, columns = {col_dim} "
-            "(highest column totals first), plus Total."
+            "(highest column totals first), row Total + column Total footer."
+        ),
+    }
+
+
+def _month_labels(end: date, months_back: int) -> list[str]:
+    """Oldest → newest YYYY-MM labels ending at end's month."""
+    labels: list[str] = []
+    y, m = end.year, end.month
+    for _ in range(max(1, months_back)):
+        labels.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    labels.reverse()
+    return labels
+
+
+def _pivot_months(
+    frame: pd.DataFrame,
+    row_dim: str,
+    month_labels: list[str],
+) -> dict[str, Any]:
+    """Rows × calendar months + Average column + Total footer."""
+    if frame.empty:
+        cols = list(month_labels) + ["Average", "Total"]
+        return {
+            "row_dimension": row_dim,
+            "column_dimension": "month",
+            "columns": cols,
+            "rows": [],
+            "column_totals": {c: 0.0 for c in cols},
+            "grand_total_mt": 0.0,
+            "month_labels": month_labels,
+        }
+
+    work = frame.copy()
+    work["month"] = work["date"].astype(str).str.slice(0, 7)
+    work = work[work["month"].isin(month_labels)]
+    pivot = (
+        work.groupby([row_dim, "month"], as_index=False)["mt"]
+        .sum()
+        .pivot(index=row_dim, columns="month", values="mt")
+        .fillna(0.0)
+    )
+    for lab in month_labels:
+        if lab not in pivot.columns:
+            pivot[lab] = 0.0
+    pivot = pivot.reindex(columns=month_labels)
+    # Row order by total across months
+    pivot["_sum"] = pivot.sum(axis=1)
+    if row_dim == "business_unit":
+
+        def _row_key(name: str) -> tuple:
+            try:
+                return (0, CATEGORY1_ORDER.index(name), -float(pivot.loc[name, "_sum"]))
+            except ValueError:
+                return (1, 0, -float(pivot.loc[name, "_sum"]))
+
+        pivot = pivot.reindex(sorted(pivot.index, key=_row_key))
+    else:
+        pivot = pivot.sort_values("_sum", ascending=False)
+    pivot = pivot.drop(columns=["_sum"])
+
+    n = max(len(month_labels), 1)
+    pivot["Average"] = pivot[month_labels].sum(axis=1) / n
+    pivot["Total"] = pivot[month_labels].sum(axis=1)
+    columns = list(month_labels) + ["Average", "Total"]
+
+    rows = []
+    for idx, row in pivot.iterrows():
+        entry: dict[str, Any] = {row_dim: str(idx)}
+        for c in columns:
+            entry[str(c)] = round(float(row[c]), 3)
+        rows.append(entry)
+
+    col_tot_map: dict[str, float] = {}
+    for c in month_labels:
+        col_tot_map[c] = round(float(pivot[c].sum()), 3)
+    col_tot_map["Average"] = round(sum(col_tot_map[c] for c in month_labels) / n, 3)
+    col_tot_map["Total"] = round(float(pivot["Total"].sum()), 3)
+    total_row: dict[str, Any] = {row_dim: "Total"}
+    for c in columns:
+        total_row[c] = col_tot_map[c]
+    rows.append(total_row)
+
+    return {
+        "row_dimension": row_dim,
+        "column_dimension": "month",
+        "columns": columns,
+        "rows": rows,
+        "column_totals": col_tot_map,
+        "grand_total_mt": col_tot_map["Total"],
+        "month_labels": month_labels,
+        "markdown_hint": (
+            f"Month-wise MT: rows={row_dim}, columns=months + Average + Total, "
+            "with column totals footer."
         ),
     }
 
@@ -380,6 +509,7 @@ def _ams_by_row(
     as_of: date,
     city: str | None,
     business_unit: str | None,
+    business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
 ) -> dict[str, float]:
@@ -393,6 +523,7 @@ def _ams_by_row(
             date_to=end.isoformat(),
             city=city,
             business_unit=business_unit,
+            business_units=business_units,
             oil_type=oil_type,
             packing_category=packing_category,
         )
@@ -415,15 +546,17 @@ def _trend_table(
     period: dict[str, Any],
     city: str | None,
     business_unit: str | None,
+    business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
 ) -> dict[str, Any]:
     as_of = date.fromisoformat(period["date_to"])
     ams = _ams_by_row(
         row_dim=row_dim,
-        as_of=as_of.replace(day=1),  # prior months relative to this month
+        as_of=as_of.replace(day=1),
         city=city,
         business_unit=business_unit,
+        business_units=business_units,
         oil_type=oil_type,
         packing_category=packing_category,
     )
@@ -462,7 +595,6 @@ def _trend_table(
                 f"Expected = {days_elapsed}/{days_in_month} × AMS"
             )
         else:
-            # Full month: AMS is the expected baseline
             entry["pct_vs_ams"] = (
                 round(pct_change(vol, ams_v), 1) if ams_v else None
             )
@@ -475,6 +607,26 @@ def _trend_table(
     else:
         columns.append("pct_vs_ams")
 
+    # Column totals footer
+    tot: dict[str, Any] = {row_dim: "Total"}
+    tot["volume_mt"] = round(sum(float(r["volume_mt"]) for r in rows), 3)
+    tot["ams_mt"] = round(sum(float(r["ams_mt"]) for r in rows), 3)
+    if partial:
+        exp_vals = [float(r["expected_mt"]) for r in rows if r.get("expected_mt") is not None]
+        tot["expected_mt"] = round(sum(exp_vals), 3) if exp_vals else None
+        tot["pct_vs_expected"] = (
+            round(pct_change(tot["volume_mt"], tot["expected_mt"]), 1)
+            if tot.get("expected_mt")
+            else None
+        )
+    else:
+        tot["pct_vs_ams"] = (
+            round(pct_change(tot["volume_mt"], tot["ams_mt"]), 1)
+            if tot["ams_mt"]
+            else None
+        )
+    rows.append(tot)
+
     return {
         "row_dimension": row_dim,
         "partial_month": partial,
@@ -482,7 +634,8 @@ def _trend_table(
         "days_in_month": days_in_month,
         "ams_definition": (
             "AMS = average of the three full calendar months before this month, "
-            f"same filters (city={city!r}, business_unit={business_unit!r})"
+            f"same filters (city={city!r}, business_unit={business_unit!r}, "
+            f"business_units={business_units!r})"
         ),
         "columns": columns,
         "rows": rows,
@@ -493,6 +646,7 @@ def _trend_table(
                 if partial
                 else "% vs AMS (no Expected column — AMS is expected for a full month)"
             )
+            + "; includes Total footer row."
         ),
     }
 
@@ -504,79 +658,171 @@ def query_sales(
     date_to: str | None = None,
     city: str | None = None,
     business_unit: str | None = None,
+    business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     columns: str = "client_type",
+    months_back: int = 6,
     mode: str = "matrix",
+    prior_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
-    Row drill-down (automatic):
-      no BU → Business Unit rows
-      BU set → Oil Type rows
-      Oil Type set → Packing Category rows
-      Packing set → Product rows
+    Row drill-down:
+      no BU → Business Unit
+      one BU → Packing Category
+      multiple BUs → Business Unit (comparison)
+      Oil Type set → Packing; Packing set → Product
 
-    Column default: client_type (Eva Distributors, …), highest total first.
-    Pass columns='city' for a city-wise breakdown.
+    columns: client_type | city | month
+      month → last ``months_back`` months as columns + Average
 
-    mode:
-      matrix — single pivot (“what were sales…”)
-      analytical — city + client + AMS trend (“how were / evaluate…”)
-        Works at any filter depth (BU, Oil Type, or Packing Category).
+    prior_spec: previous table_spec for follow-ups like "add Eva Bulk".
     """
-    bu = _normalize_business_unit(business_unit)
+    # Merge follow-up additions into prior filters
+    units: list[str] = []
+    for u in business_units or []:
+        nu = _normalize_business_unit(u)
+        if nu and nu not in units:
+            units.append(nu)
+    bu_one = _normalize_business_unit(business_unit)
+    if bu_one and bu_one not in units:
+        units.append(bu_one)
+
     oil = (oil_type or "").strip() or None
     pack = (packing_category or "").strip() or None
     city_f = (city or "").strip() or None
-
-    period_info = resolve_period(period, date_from=date_from, date_to=date_to)
-    if period_info.get("ok") is False or not period_info.get("date_from"):
-        return {"ok": False, "error": period_info.get("error") or "Bad period", "period": period_info}
-
-    d0 = period_info["date_from"]
-    d1 = period_info["date_to"]
-    row_dim = _auto_row_dimension(bu, oil, pack)
-
     col = (columns or "client_type").strip().lower().replace(" ", "_")
+    mb = int(months_back or 6)
+
+    if prior_spec:
+        # Carry forward dimensions; merge new business units
+        prior_filters = prior_spec.get("filters") or {}
+        prior_units = list(prior_spec.get("business_units") or [])
+        if prior_filters.get("business_unit") and prior_filters["business_unit"] not in prior_units:
+            prior_units.append(prior_filters["business_unit"])
+        for u in prior_units:
+            nu = _normalize_business_unit(u)
+            if nu and nu not in units:
+                units.insert(0, nu)
+        if not city_f:
+            city_f = prior_filters.get("city")
+        if not oil:
+            oil = prior_filters.get("oil_type") or None
+        if not pack:
+            pack = prior_filters.get("packing_category") or None
+        if col in {"client_type", "auto", ""} and prior_spec.get("column_dimension"):
+            col = str(prior_spec["column_dimension"])
+        if prior_spec.get("months_back"):
+            mb = int(prior_spec["months_back"])
+        if not period and not date_from and prior_spec.get("period_phrase"):
+            period = prior_spec.get("period_phrase")
+        if not period and not date_from and prior_spec.get("period"):
+            date_from = (prior_spec["period"] or {}).get("date_from")
+            date_to = (prior_spec["period"] or {}).get("date_to")
+
     if col in {"client", "clients", "clienttype", "type"}:
         col = "client_type"
     if col in {"cities"}:
         col = "city"
-    if col not in {"client_type", "city"}:
+    if col in {"months", "monthly", "month_wise", "monthwise"}:
+        col = "month"
+    if col not in {"client_type", "city", "month"}:
         col = "client_type"
+
+    # Month-wise: date range = last N months ending at max sales date
+    if col == "month":
+        _, max_d = _sales_date_bounds()
+        if max_d is None:
+            return {"ok": False, "error": "No sales dates in database"}
+        labels = _month_labels(max_d, mb)
+        start_y, start_m = map(int, labels[0].split("-"))
+        d0 = date(start_y, start_m, 1).isoformat()
+        d1 = max_d.isoformat()
+        period_info = {
+            "ok": True,
+            "date_from": d0,
+            "date_to": d1,
+            "label": f"Last {mb} months through {max_d.strftime('%b %Y')}",
+            "partial_month": max_d.day
+            < calendar.monthrange(max_d.year, max_d.month)[1],
+            "days_elapsed": max_d.day,
+            "days_in_month": calendar.monthrange(max_d.year, max_d.month)[1],
+            "anchor_max_sales_date": max_d.isoformat(),
+            "months_back": mb,
+            "month_labels": labels,
+        }
+    else:
+        period_info = resolve_period(period, date_from=date_from, date_to=date_to)
+        if period_info.get("ok") is False or not period_info.get("date_from"):
+            return {
+                "ok": False,
+                "error": period_info.get("error") or "Bad period",
+                "period": period_info,
+            }
+        d0 = period_info["date_from"]
+        d1 = period_info["date_to"]
+        labels = []
+
+    bu = units[0] if len(units) == 1 else None
+    row_dim = _auto_row_dimension(
+        bu, oil, pack, business_units=units if len(units) > 1 else None
+    )
 
     frame = _fetch_lines(
         date_from=d0,
         date_to=d1,
         city=city_f,
         business_unit=bu,
+        business_units=units if len(units) > 1 else None,
         oil_type=oil,
         packing_category=pack,
     )
 
-    primary = _pivot_mt(frame, row_dim, col)
+    if col == "month":
+        primary = _pivot_months(frame, row_dim, labels)
+    else:
+        primary = _pivot_mt(frame, row_dim, col)
 
     mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"auto", "default"}:
         mode_norm = "matrix"
+    # Month-wise custom tables stay matrix (not the 3-pack analytical)
+    if col == "month":
+        mode_norm = "matrix"
 
-    result: dict[str, Any] = {
-        "ok": True,
-        "metric": "mt",
-        "period": period_info,
+    table_spec = {
+        "period_phrase": period,
+        "period": {
+            "date_from": d0,
+            "date_to": d1,
+            "label": period_info.get("label"),
+        },
         "filters": {
             "city": city_f,
             "business_unit": bu,
             "oil_type": oil,
             "packing_category": pack,
         },
+        "business_units": units,
+        "column_dimension": col,
+        "row_dimension": row_dim,
+        "months_back": mb if col == "month" else None,
+    }
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "metric": "mt",
+        "period": period_info,
+        "filters": table_spec["filters"],
+        "business_units": units,
         "row_dimension": row_dim,
         "column_dimension": col,
         "matrix": primary,
+        "table_spec": table_spec,
     }
 
-    if mode_norm in {"analytical", "analysis", "how_are", "performance"}:
+    if mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
         city_matrix = _pivot_mt(frame, row_dim, "city")
         client_matrix = _pivot_mt(frame, row_dim, "client_type")
         trend = _trend_table(
@@ -585,6 +831,7 @@ def query_sales(
             period=period_info,
             city=city_f,
             business_unit=bu,
+            business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
         )
@@ -617,39 +864,29 @@ def query_sales(
                 "data": trend,
             },
         ]
-        result["response_instructions"] = (
-            "CRITICAL: You MUST render ALL tables in `tables` (usually 3) as markdown, "
-            "in order, with their titles as headings. Do NOT stop after the first table.\n"
-            "1) City-wise breakdown\n"
-            "2) Client-type breakdown\n"
-            f"3) Trend: {trend_cols}\n"
-            "Then add 2–4 short insight bullets (leaders, behind AMS/expected). "
-            "State the period label once. Do not invent numbers."
-        )
         result["required_table_count"] = 3
     else:
         result["mode"] = "matrix"
+        title = (
+            f"{row_dim} × months (last {mb}) + Average"
+            if col == "month"
+            else f"{row_dim} × {col}"
+        )
         result["tables"] = [
             {
                 "index": 1,
-                "title": f"{row_dim} × {col}",
+                "title": title,
                 "source": "matrix",
                 "data": primary,
             }
         ]
         result["required_table_count"] = 1
-        result["response_instructions"] = (
-            "Present the single matrix as a markdown table. "
-            "State the period label and filters in one short sentence. "
-            "Do not invent numbers."
-        )
 
     result["answer_markdown"] = render_sales_markdown(result)
     result["response_instructions"] = (
-        "REQUIRED: Your entire reply MUST be the `answer_markdown` field verbatim "
-        "(it already has the correct tables). "
-        "For analytical answers you may add at most 2–4 insight bullets AFTER that markdown. "
-        "Do not rebuild or omit tables."
+        "REQUIRED: Your entire reply MUST be the `answer_markdown` field verbatim. "
+        "Do not rebuild or omit tables. Keep `table_spec` for follow-ups "
+        "(e.g. user says 'add Eva Bulk to this table')."
     )
     return result
 
@@ -668,18 +905,22 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
     sep = "| " + " | ".join(["---"] * (len(columns) + 1)) + " |"
     lines = [header, sep]
     for row in rows:
-        cells = [_md_escape(row.get(row_key, ""))]
-        for c in columns:
-            val = row.get(c, 0)
-            if isinstance(val, float):
-                cells.append(f"{val:.3f}".rstrip("0").rstrip(".") if val != 0 else "0")
+        is_total = str(row.get(row_key, "")).strip().lower() == "total"
+        cells = []
+        for i, key in enumerate([row_key] + columns):
+            if i == 0:
+                val = row.get(row_key, "")
+                text = _md_escape(val)
             else:
-                cells.append(_md_escape(val))
+                val = row.get(key, 0)
+                if isinstance(val, float):
+                    text = f"{val:.3f}".rstrip("0").rstrip(".") if val else "0"
+                elif val is None:
+                    text = "—"
+                else:
+                    text = _md_escape(val)
+            cells.append(f"**{text}**" if is_total else text)
         lines.append("| " + " | ".join(cells) + " |")
-    # Grand total line if present
-    gt = matrix.get("grand_total_mt")
-    if gt is not None and rows:
-        lines.append(f"\n_Grand total: **{gt} MT**_")
     return "\n".join(lines) + "\n"
 
 
@@ -728,12 +969,15 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
     return "\n".join(lines) + note + "\n"
 
 
-def _filter_blurb(filters: dict[str, Any], period: dict[str, Any]) -> str:
+def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[str] | None = None) -> str:
     bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
-    if filters.get("business_unit"):
-        bits.append(f"Business Unit **{filters['business_unit']}**")
+    show_units = units or ([filters["business_unit"]] if filters.get("business_unit") else [])
+    if len(show_units) > 1:
+        bits.append("Business Units **" + "**, **".join(show_units) + "**")
+    elif show_units:
+        bits.append(f"Business Unit **{show_units[0]}**")
     if filters.get("oil_type"):
         bits.append(f"Oil Type **{filters['oil_type']}**")
     if filters.get("packing_category"):
@@ -787,7 +1031,7 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
     period = result.get("period") or {}
     filters = result.get("filters") or {}
     row_dim = str(result.get("row_dimension") or "row")
-    blurb = _filter_blurb(filters, period)
+    blurb = _filter_blurb(filters, period, result.get("business_units"))
     parts = [f"Sales for {blurb} (MT).\n"]
 
     if result.get("mode") == "analytical":
