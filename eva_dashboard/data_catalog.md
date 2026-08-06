@@ -206,7 +206,8 @@ Do not invent a Business Unit when the user only named a client type.
 
 **Other tools:**
 - `list_clients` — “Who are my distributors in Lahore?” (City-Filter + Client Type)
-- `analyze_parties` — top parties, AMS / vs AMS, share, YoY, doing-well, geo %
+- `analyze_parties` — top parties/cities (default AMS), vs AMS / underperformers,
+  new/lost parties, packing or SKU mix, invoices, share, YoY, doing-well, geo %
 - `lookup_party` — “Who is Al Bari?” → fuzzy client/party matches (name, type, city, MT)
 - `query_price` — Rate from sales; optional Price Fetch follow-up on the same scope
 

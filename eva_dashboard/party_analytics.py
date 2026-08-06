@@ -131,6 +131,8 @@ def _fetch_party_lines(
     SELECT
       s.date,
       s.party,
+      s.inv_no,
+      s.product,
       {_CLIENT_TYPE_EXPR} AS client_type,
       {_CITY_EXPR} AS city,
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
@@ -143,6 +145,49 @@ def _fetch_party_lines(
     """
     with connect() as conn:
         return pd.read_sql_query(sql, conn, params=params)
+
+
+def _first_sale_dates(
+    *,
+    city: str | None = None,
+    client_type: str | None = None,
+    business_unit: str | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    brand_prefix: str | None = None,
+) -> dict[str, str]:
+    """Earliest sale date per party (optional filters)."""
+    init_db()
+    params: list[Any] = []
+    where = ["s.party IS NOT NULL", "trim(s.party) != ''", "s.date IS NOT NULL"]
+    if city:
+        where.append(f"lower(trim({_CITY_EXPR})) = lower(trim(?))")
+        params.append(city)
+    if client_type:
+        where.append(f"lower(trim({_CLIENT_TYPE_EXPR})) = lower(trim(?))")
+        params.append(client_type)
+    if business_unit:
+        where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
+        params.append(business_unit)
+    if brand_prefix:
+        where.append("lower(trim(COALESCE(c.category_1, ''))) LIKE lower(?)")
+        params.append(f"{brand_prefix}%")
+    if oil_type:
+        where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
+        params.append(oil_type)
+    if packing_category:
+        where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
+        params.append(packing_category)
+    sql = f"""
+    SELECT s.party, MIN(s.date) AS first_sale
+    FROM sales s
+    {_PARTY_JOIN}
+    WHERE {' AND '.join(where)}
+    GROUP BY s.party
+    """
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {str(r["party"]): str(r["first_sale"])[:10] for r in rows}
 
 
 def _ams_by_party(
@@ -324,16 +369,25 @@ def analyze_parties(
     oil_type: str | None = None,
     packing_category: str | None = None,
     brand: str | None = None,
-    metric: str = "volume",
+    metric: str = "ams",
     compare_period: str | None = None,
     share_city: str | None = None,
+    group_by: str = "party",
+    mix_dimension: str | None = None,
+    sort: str = "desc",
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Rank / summarize parties for AMS, volume, share, YoY, and 'doing well'.
+    """Rank / summarize parties or cities.
 
     metric:
-      volume | ams | vs_ams | yoy | share_of_segment | segment_mix |
-      geo_share | doing_well
+      volume | ams | vs_ams | underperformers | yoy | share_of_segment |
+      segment_mix | geo_share | doing_well | new_parties | lost_parties |
+      packing_mix | product_mix | invoices | invoice_mt
+
+    group_by: party (default) | city
+    mix_dimension: packing_category | product (for mix metrics)
+    sort: desc (default) | asc  — underperformers force asc on % vs AMS
+    Default ranking metric is AMS unless the user asks for volume/growth.
     """
     city_f = (city or "").strip() or None
     ctype = normalize_client_type((client_type or "").strip() or None)
@@ -347,12 +401,59 @@ def analyze_parties(
     elif brand_n in {"maan"}:
         brand_prefix = "Maan"
 
-    metric_n = (metric or "volume").strip().lower().replace("-", "_").replace(" ", "_")
-    if metric_n in {"avg", "average", "average_sale", "avg_volume", "mt"}:
+    group = (group_by or "party").strip().lower()
+    if group in {"cities", "city_filter"}:
+        group = "city"
+    if group not in {"party", "city"}:
+        group = "party"
+
+    mix_dim = (mix_dimension or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if mix_dim in {"packing", "pack", "product_category", "pack_category", "category"}:
+        mix_dim = "packing_category"
+    if mix_dim in {"sku", "skus", "products", "item", "items"}:
+        mix_dim = "product"
+
+    metric_n = (metric or "ams").strip().lower().replace("-", "_").replace(" ", "_")
+    if metric_n in {"avg", "average", "average_sale", "avg_volume", "mt", "sales", "sale"}:
         metric_n = "volume"
-    if metric_n in {"vsams", "pct_ams", "against_ams", "doing_well_rank"}:
+    if metric_n in {
+        "vsams",
+        "pct_ams",
+        "against_ams",
+        "doing_well_rank",
+        "behind",
+        "poor",
+        "poorly",
+        "falling",
+        "underperform",
+        "underperforming",
+        "underperformers",
+        "not_doing_well",
+        "falling_behind",
+        "falling_in_sales",
+        "below_ams",
+        "behind_ams",
+        "behind_average",
+    }:
+        # "underperformers" sorts ascending; plain vs_ams can be either
+        if metric_n in {
+            "behind",
+            "poor",
+            "poorly",
+            "falling",
+            "underperform",
+            "underperforming",
+            "underperformers",
+            "not_doing_well",
+            "falling_behind",
+            "falling_in_sales",
+            "below_ams",
+            "behind_ams",
+            "behind_average",
+        }:
+            sort = "asc"
         metric_n = "vs_ams"
-    if metric_n in {"year_over_year", "yoy_growth", "growth"}:
+    if metric_n in {"year_over_year", "yoy_growth", "growth", "sales_growth"}:
         metric_n = "yoy"
     if metric_n in {"share", "vtf_share", "segment_share"}:
         metric_n = "share_of_segment"
@@ -362,8 +463,35 @@ def analyze_parties(
         metric_n = "geo_share"
     if metric_n in {"well", "performing"}:
         metric_n = "doing_well"
+    if metric_n in {"new", "new_client", "new_clients", "new_party", "first_sale"}:
+        metric_n = "new_parties"
+    if metric_n in {
+        "lost",
+        "lost_client",
+        "lost_clients",
+        "lost_party",
+        "inactive",
+        "zero_sales",
+        "dropped",
+    }:
+        metric_n = "lost_parties"
+    if metric_n in {"packing_mix", "product_breakdown", "pack_mix", "category_mix"}:
+        metric_n = "packing_mix"
+        if not mix_dim:
+            mix_dim = "packing_category"
+    if metric_n in {"product_mix", "sku_mix", "sku_breakdown", "sku_wise"}:
+        metric_n = "product_mix"
+        mix_dim = "product"
+    if metric_n in {"invoice", "invoices", "invoice_count", "frequency", "invoice_frequency"}:
+        metric_n = "invoices"
+    if metric_n in {"invoice_mt", "avg_invoice", "average_invoice", "mt_per_invoice"}:
+        metric_n = "invoice_mt"
 
-    lim = max(1, min(int(limit or 10), 100))
+    sort_n = (sort or "desc").strip().lower()
+    if sort_n not in {"asc", "desc"}:
+        sort_n = "desc"
+
+    lim = max(1, min(int(limit or 10), 200))
 
     # Default period: current data month (MTD if partial)
     if not period and not date_from:
@@ -385,6 +513,7 @@ def analyze_parties(
         "oil_type": oil,
         "packing_category": pack,
         "brand": brand_prefix,
+        "group_by": group,
     }
 
     # --- Geography share of a segment (e.g. % of VTF in Lahore) ---
@@ -395,7 +524,6 @@ def analyze_parties(
                 "ok": False,
                 "error": "geo_share needs a city (e.g. Lahore).",
             }
-        # Universe: segment filters without city
         universe = _fetch_party_lines(
             date_from=d0,
             date_to=d1,
@@ -417,8 +545,6 @@ def analyze_parties(
             if not universe.empty
             else 0.0
         )
-        pct = pct_change(in_city, total)  # (city-total)/total*100? wait pct_change is (c-b)/b
-        # We want city/total * 100
         share_pct = (in_city / total * 100.0) if total else None
         scope = _scope_blurb(filters, period_info)
         md = [
@@ -443,6 +569,224 @@ def analyze_parties(
             "answer_markdown": "\n".join(md) + "\n",
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
         }
+
+    # --- Packing / product (SKU) mix ---
+    if metric_n in {"packing_mix", "product_mix"}:
+        dim = mix_dim or ("product" if metric_n == "product_mix" else "packing_category")
+        if dim not in {"packing_category", "product", "oil_type", "business_unit"}:
+            dim = "packing_category"
+        frame = _fetch_party_lines(
+            date_from=d0,
+            date_to=d1,
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        if frame.empty:
+            return {
+                "ok": True,
+                "mode": metric_n,
+                "period": period_info,
+                "filters": filters,
+                "rows": [],
+                "answer_markdown": (
+                    f"No sales for mix — {_scope_blurb(filters, period_info)}.\n"
+                ),
+                "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+            }
+        total = float(frame["mt"].sum())
+        grouped = (
+            frame.groupby(dim, as_index=False)["mt"]
+            .sum()
+            .sort_values("mt", ascending=False)
+        )
+        rows = []
+        for _, r in grouped.iterrows():
+            mt = float(r["mt"])
+            rows.append(
+                {
+                    dim: str(r[dim]),
+                    "volume_mt": round(mt, 3),
+                    "share_pct": round(mt / total * 100.0, 1) if total else None,
+                }
+            )
+        rows = rows[:lim]
+        # footer total
+        label = {
+            "packing_category": "Packing Category",
+            "product": "Product (SKU)",
+            "oil_type": "Oil Type",
+            "business_unit": "Business Unit",
+        }.get(dim, dim)
+        lines = [
+            f"{label} mix — {_scope_blurb(filters, period_info)}.\n",
+            f"| {label} | Volume (MT) | Share % |",
+            "| --- | --- | --- |",
+        ]
+        for r in rows:
+            lines.append(
+                f"| {str(r[dim]).replace('|', '/')} | {r['volume_mt']} | "
+                f"{r['share_pct']}% |"
+            )
+        lines.append(f"| **Total** | **{round(total, 3)}** | **100%** |")
+        return {
+            "ok": True,
+            "mode": metric_n,
+            "metric": metric_n,
+            "mix_dimension": dim,
+            "period": period_info,
+            "filters": filters,
+            "total_mt": round(total, 3),
+            "rows": rows,
+            "answer_markdown": "\n".join(lines) + "\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    # --- New parties (first sale in period) ---
+    if metric_n == "new_parties":
+        firsts = _first_sale_dates(
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        frame = _fetch_party_lines(
+            date_from=d0,
+            date_to=d1,
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        vol = (
+            frame.groupby("party")["mt"].sum().to_dict()
+            if not frame.empty
+            else {}
+        )
+        rows = []
+        for party, first in firsts.items():
+            if d0 <= first <= d1:
+                meta = _party_meta(frame, party) if not frame.empty else {
+                    "client_type": ctype,
+                    "city": city_f,
+                }
+                # Prefer client master type/city when no period sales yet
+                if not meta.get("client_type") or not meta.get("city"):
+                    init_db()
+                    with connect() as conn:
+                        crow = conn.execute(
+                            """
+                            SELECT type, city_filter FROM clients
+                            WHERE lower(trim(client)) = lower(trim(?))
+                            """,
+                            (party,),
+                        ).fetchone()
+                    if crow:
+                        meta = {
+                            "client_type": meta.get("client_type")
+                            or (str(crow["type"] or "").strip() or None),
+                            "city": meta.get("city")
+                            or (str(crow["city_filter"] or "").strip() or None),
+                        }
+                rows.append(
+                    {
+                        "party": party,
+                        **meta,
+                        "first_sale": first,
+                        "volume_mt": round(float(vol.get(party, 0.0)), 3),
+                        "score": round(float(vol.get(party, 0.0)), 3),
+                    }
+                )
+        rows.sort(key=lambda r: (-(r["volume_mt"] or 0), r["first_sale"]))
+        rows = rows[:lim]
+        return _party_table_result(
+            rows=rows,
+            period_info=period_info,
+            filters=filters,
+            metric=metric_n,
+            score_label="Volume (MT)",
+            extra_cols=["first_sale", "volume_mt"],
+            blurb=f"New parties (first sale in period) — {_scope_blurb(filters, period_info)}",
+        )
+
+    # --- Lost parties (AMS > 0 but zero volume in period) ---
+    if metric_n == "lost_parties":
+        ams = _ams_by_party(
+            as_of=as_of.replace(day=1),
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        frame = _fetch_party_lines(
+            date_from=d0,
+            date_to=d1,
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        vol = (
+            frame.groupby("party")["mt"].sum().to_dict()
+            if not frame.empty
+            else {}
+        )
+        # Also pull meta from AMS window sales
+        ams_start = _prior_three_month_ranges(as_of.replace(day=1))[0][0]
+        meta_frame = _fetch_party_lines(
+            date_from=ams_start.isoformat(),
+            date_to=d1,
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        rows = []
+        for party, ams_v in ams.items():
+            if ams_v <= 0:
+                continue
+            if float(vol.get(party, 0.0)) > 0:
+                continue
+            meta = _party_meta(meta_frame, party) if not meta_frame.empty else {
+                "client_type": ctype,
+                "city": city_f,
+            }
+            rows.append(
+                {
+                    "party": party,
+                    **meta,
+                    "volume_mt": 0.0,
+                    "ams_mt": round(float(ams_v), 3),
+                    "score": round(float(ams_v), 3),
+                }
+            )
+        rows.sort(key=lambda r: (-(r["ams_mt"] or 0), str(r["party"])))
+        rows = rows[:lim]
+        return _party_table_result(
+            rows=rows,
+            period_info=period_info,
+            filters=filters,
+            metric=metric_n,
+            score_label="AMS (MT)",
+            extra_cols=["volume_mt", "ams_mt"],
+            blurb=(
+                f"Lost / silent parties (AMS > 0, zero volume in period) — "
+                f"{_scope_blurb(filters, period_info)}"
+            ),
+        )
 
     # Segment for share_of_segment / segment_mix (e.g. VTF)
     segment_oil = oil
@@ -529,8 +873,9 @@ def analyze_parties(
             ),
         )
 
-    # Volume / AMS / vs AMS / doing well / YoY
-    if party_frame.empty and metric_n == "volume":
+    # Volume / AMS / vs AMS / doing well / YoY / invoices (party or city)
+    entity_key = "city" if group == "city" else "party"
+    if party_frame.empty and metric_n in {"volume", "invoices", "invoice_mt"}:
         return {
             "ok": True,
             "mode": metric_n,
@@ -538,25 +883,68 @@ def analyze_parties(
             "filters": filters,
             "parties": [],
             "answer_markdown": (
-                f"No party sales for {_scope_blurb(filters, period_info)}.\n"
+                f"No {entity_key} sales for {_scope_blurb(filters, period_info)}.\n"
             ),
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
         }
 
     volume = (
-        party_frame.groupby("party")["mt"].sum().to_dict()
+        party_frame.groupby(entity_key)["mt"].sum().to_dict()
         if not party_frame.empty
         else {}
     )
-    ams = _ams_by_party(
-        as_of=as_of.replace(day=1),
-        city=city_f,
-        client_type=ctype,
-        business_unit=bu,
-        oil_type=oil,
-        packing_category=pack,
-        brand_prefix=brand_prefix,
-    )
+
+    # Invoice stats
+    invoice_counts: dict[str, int] = {}
+    if metric_n in {"invoices", "invoice_mt"} and not party_frame.empty:
+        inv = party_frame.copy()
+        inv["inv_key"] = inv["inv_no"].fillna("").astype(str).str.strip()
+        # Fall back to date+party when inv_no missing
+        missing = inv["inv_key"] == ""
+        inv.loc[missing, "inv_key"] = (
+            inv.loc[missing, "date"].astype(str)
+            + "|"
+            + inv.loc[missing, "party"].astype(str)
+        )
+        invoice_counts = (
+            inv.groupby(entity_key)["inv_key"].nunique().astype(int).to_dict()
+        )
+
+    if group == "city":
+        # AMS by city = mean of prior 3 months' city totals
+        ranges = _prior_three_month_ranges(as_of.replace(day=1))
+        monthly_city: list[dict[str, float]] = []
+        keys: set[str] = set()
+        for start, end in ranges:
+            cf = _fetch_party_lines(
+                date_from=start.isoformat(),
+                date_to=end.isoformat(),
+                city=city_f,
+                client_type=ctype,
+                business_unit=bu,
+                oil_type=oil,
+                packing_category=pack,
+                brand_prefix=brand_prefix,
+            )
+            if cf.empty:
+                monthly_city.append({})
+                continue
+            totals = {
+                str(k): float(v) for k, v in cf.groupby("city")["mt"].sum().items()
+            }
+            keys.update(totals)
+            monthly_city.append(totals)
+        ams = {k: sum(m.get(k, 0.0) for m in monthly_city) / 3.0 for k in keys}
+    else:
+        ams = _ams_by_party(
+            as_of=as_of.replace(day=1),
+            city=city_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
 
     compare_info = None
     compare_vol: dict[str, float] = {}
@@ -564,7 +952,6 @@ def analyze_parties(
         if compare_period:
             compare_info = resolve_period(compare_period)
         else:
-            # Same calendar month one year earlier
             start = date.fromisoformat(d0)
             end = date.fromisoformat(d1)
             try:
@@ -575,7 +962,6 @@ def analyze_parties(
                 c_end = end.replace(year=end.year - 1)
             except ValueError:
                 c_end = end.replace(year=end.year - 1, day=28)
-            # Cap end to month length
             c_end = min(
                 c_end,
                 date(c_end.year, c_end.month, calendar.monthrange(c_end.year, c_end.month)[1]),
@@ -599,37 +985,40 @@ def analyze_parties(
             brand_prefix=brand_prefix,
         )
         compare_vol = (
-            cmp_frame.groupby("party")["mt"].sum().to_dict()
+            cmp_frame.groupby(entity_key)["mt"].sum().to_dict()
             if not cmp_frame.empty
             else {}
         )
-        # Also need current volume with segment filters
-        if not volume:
-            volume = {}
 
     partial = bool(period_info.get("partial_month"))
     days_elapsed = int(period_info.get("days_elapsed") or 0)
     days_in_month = int(period_info.get("days_in_month") or 30)
 
     rows = []
-    parties = set(volume) | set(ams) | set(compare_vol)
-    for party in parties:
-        vol = float(volume.get(party, 0.0))
-        ams_v = float(ams.get(party, 0.0))
+    entities = set(volume) | set(ams) | set(compare_vol) | set(invoice_counts)
+    for ent in entities:
+        vol = float(volume.get(ent, 0.0))
+        ams_v = float(ams.get(ent, 0.0))
         expected = None
         if partial and days_in_month:
             expected = (days_elapsed / days_in_month) * ams_v
         baseline = expected if (partial and expected is not None) else ams_v
         vs = pct_change(vol, baseline) if baseline else None
-        prior = float(compare_vol.get(party, 0.0))
+        prior = float(compare_vol.get(ent, 0.0))
         yoy = pct_change(vol, prior) if metric_n == "yoy" else None
-        meta = _party_meta(party_frame, party) if not party_frame.empty else {
-            "client_type": ctype,
-            "city": city_f,
-        }
-        # For yoy with empty current frame but prior only — still include growers from current
+        inv_n = int(invoice_counts.get(ent, 0))
+        avg_inv = (vol / inv_n) if inv_n else None
+        if group == "city":
+            meta = {"client_type": ctype, "city": ent}
+            name_field = {"party": ent, "city": ent}
+        else:
+            meta = _party_meta(party_frame, ent) if not party_frame.empty else {
+                "client_type": ctype,
+                "city": city_f,
+            }
+            name_field = {"party": ent}
         entry = {
-            "party": party,
+            **name_field,
             **meta,
             "volume_mt": round(vol, 3),
             "ams_mt": round(ams_v, 3),
@@ -637,6 +1026,8 @@ def analyze_parties(
             "pct_vs_ams": round(vs, 1) if vs is not None else None,
             "prior_mt": round(prior, 3) if metric_n == "yoy" else None,
             "yoy_pct": round(yoy, 1) if yoy is not None else None,
+            "invoices": inv_n,
+            "avg_invoice_mt": round(avg_inv, 3) if avg_inv is not None else None,
             "doing_well": bool(vs is not None and vs >= 0),
         }
         rows.append(entry)
@@ -651,26 +1042,29 @@ def analyze_parties(
         all_mt = well_mt + sum(r["volume_mt"] for r in not_well)
         mt_pct = (well_mt / all_mt * 100.0) if all_mt else None
         baseline_name = "Expected (partial × AMS)" if partial else "AMS"
+        entity_label = "City" if group == "city" else "Party"
         lines = [
             f"Doing well vs {baseline_name} — {_scope_blurb(filters, period_info)}.\n",
-            f"**{len(well)}** of **{total_parties}** parties "
+            f"**{len(well)}** of **{total_parties}** "
+            f"{'cities' if group == 'city' else 'parties'} "
             f"({pct_well:.1f}%) are at/above {baseline_name}"
             if pct_well is not None
             else "No parties in scope.",
             f"; they account for **{mt_pct:.1f}%** of volume.\n"
             if mt_pct is not None
             else "\n",
-            f"| Party | City | Volume | {baseline_name} | % vs |",
+            f"| {entity_label} | City | Volume | {baseline_name} | % vs |",
             "| --- | --- | --- | --- | --- |",
         ]
         for r in well[:lim]:
             base = r["expected_mt"] if partial else r["ams_mt"]
+            name = r.get("party") or r.get("city") or "—"
             lines.append(
-                f"| {r['party']} | {r.get('city') or '—'} | {r['volume_mt']} | "
+                f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
                 f"{base if base is not None else '—'} | "
                 f"{r['pct_vs_ams']:+.1f}% |"
                 if r["pct_vs_ams"] is not None
-                else f"| {r['party']} | {r.get('city') or '—'} | {r['volume_mt']} | "
+                else f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
                 f"{base if base is not None else '—'} | — |"
             )
         return {
@@ -688,49 +1082,66 @@ def analyze_parties(
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
         }
 
-    # Sort by metric
+    # Sort by metric (asc for underperformers / behind AMS)
+    def _sort_key_desc(val, secondary=0.0):
+        return (-(val if val is not None else -1e18), -secondary)
+
+    def _sort_key_asc(val, secondary=0.0):
+        return ((val if val is not None else 1e18), -secondary)
+
+    sk = _sort_key_asc if sort_n == "asc" else _sort_key_desc
+
     if metric_n == "ams":
-        rows.sort(key=lambda r: (-(r["ams_mt"] or 0), -(r["volume_mt"] or 0)))
+        rows.sort(key=lambda r: sk(r["ams_mt"], r["volume_mt"] or 0))
         score_key, score_label = "ams_mt", "AMS (MT)"
     elif metric_n == "vs_ams":
         rows = [r for r in rows if (r["volume_mt"] or 0) > 0 or (r["ams_mt"] or 0) > 0]
-        rows.sort(
-            key=lambda r: (
-                -(r["pct_vs_ams"] if r["pct_vs_ams"] is not None else -1e18),
-                -(r["volume_mt"] or 0),
-            )
-        )
+        rows.sort(key=lambda r: sk(r["pct_vs_ams"], r["volume_mt"] or 0))
         score_key, score_label = "pct_vs_ams", "% vs AMS/Expected"
     elif metric_n == "yoy":
         rows = [r for r in rows if (r["volume_mt"] or 0) > 0 or (r["prior_mt"] or 0) > 0]
-        rows.sort(
-            key=lambda r: (
-                -(r["yoy_pct"] if r["yoy_pct"] is not None else -1e18),
-                -(r["volume_mt"] or 0),
-            )
-        )
+        rows.sort(key=lambda r: sk(r["yoy_pct"], r["volume_mt"] or 0))
         score_key, score_label = "yoy_pct", "YoY %"
+    elif metric_n == "invoices":
+        rows = [r for r in rows if (r["invoices"] or 0) > 0]
+        rows.sort(key=lambda r: sk(float(r["invoices"]), r["volume_mt"] or 0))
+        score_key, score_label = "invoices", "Invoices"
+    elif metric_n == "invoice_mt":
+        rows = [r for r in rows if r.get("avg_invoice_mt") is not None]
+        rows.sort(key=lambda r: sk(r["avg_invoice_mt"], r["volume_mt"] or 0))
+        score_key, score_label = "avg_invoice_mt", "Avg MT / invoice"
     else:
-        rows.sort(key=lambda r: (-(r["volume_mt"] or 0), str(r["party"])))
+        rows.sort(key=lambda r: sk(r["volume_mt"], 0))
         score_key, score_label = "volume_mt", "Volume (MT)"
 
     rows = rows[:lim]
-    # Attach score field for table helper
     for r in rows:
         r["score"] = r.get(score_key)
 
     extra = ["volume_mt", "ams_mt"]
     if metric_n == "vs_ams" and partial:
         extra.append("expected_mt")
+    if metric_n == "vs_ams":
+        extra.append("pct_vs_ams")
     if metric_n == "yoy":
-        extra = ["volume_mt", "prior_mt"]
+        extra = ["volume_mt", "prior_mt", "yoy_pct"]
+    if metric_n == "invoices":
+        extra = ["invoices", "volume_mt", "avg_invoice_mt"]
+    if metric_n == "invoice_mt":
+        extra = ["avg_invoice_mt", "invoices", "volume_mt"]
+
     blurb = _scope_blurb(filters, period_info)
+    entity_word = "cities" if group == "city" else "parties"
     if metric_n == "yoy" and compare_info:
         blurb += f" vs {compare_info.get('label')}"
     if metric_n == "vs_ams":
-        blurb += " · ranked vs " + (
-            "Expected (days/month × AMS)" if partial else "AMS (3 prior months)"
+        direction = "furthest behind" if sort_n == "asc" else "furthest ahead of"
+        blurb += (
+            f" · {entity_word} {direction} "
+            + ("Expected (days/month × AMS)" if partial else "AMS (3 prior months)")
         )
+    else:
+        blurb = f"Top {entity_word} by {score_label} — {blurb}"
 
     return _party_table_result(
         rows=rows,
@@ -739,8 +1150,9 @@ def analyze_parties(
         metric=metric_n,
         score_label=score_label,
         extra_cols=extra,
-        blurb=f"Top parties by {score_label} — {blurb}",
+        blurb=blurb if metric_n == "vs_ams" else blurb,
         compare_period=compare_info,
+        entity_key=entity_key,
     )
 
 
@@ -781,6 +1193,7 @@ def _party_table_result(
     extra_cols: list[str],
     blurb: str,
     compare_period: dict[str, Any] | None = None,
+    entity_key: str = "party",
 ) -> dict[str, Any]:
     col_labels = {
         "volume_mt": "Volume (MT)",
@@ -790,12 +1203,20 @@ def _party_table_result(
         "prior_mt": "Prior (MT)",
         "pct_vs_ams": "% vs AMS",
         "yoy_pct": "YoY %",
+        "first_sale": "First sale",
+        "invoices": "Invoices",
+        "avg_invoice_mt": "Avg MT / invoice",
     }
-    headers = ["#", "Party", "Client Type", "City"] + [
+    name_header = "City" if entity_key == "city" else "Party"
+    headers = ["#", name_header, "Client Type", "City"] + [
         col_labels.get(c, c) for c in extra_cols
     ]
+    # Drop duplicate City column when entity is city
+    if entity_key == "city":
+        headers = ["#", "City", "Client Type"] + [
+            col_labels.get(c, c) for c in extra_cols
+        ]
     if score_label and score_label not in headers:
-        # score may duplicate an extra col — only add if distinct
         if not any(col_labels.get(c) == score_label or c == "score" for c in extra_cols):
             headers.append(score_label)
             show_score = True
@@ -807,12 +1228,19 @@ def _party_table_result(
     lines = [f"{blurb}.\n", "| " + " | ".join(headers) + " |"]
     lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
     for i, r in enumerate(rows, 1):
-        cells = [
-            str(i),
-            str(r.get("party") or "").replace("|", "/"),
-            str(r.get("client_type") or "—").replace("|", "/"),
-            str(r.get("city") or "—").replace("|", "/"),
-        ]
+        if entity_key == "city":
+            cells = [
+                str(i),
+                str(r.get("city") or r.get("party") or "").replace("|", "/"),
+                str(r.get("client_type") or "—").replace("|", "/"),
+            ]
+        else:
+            cells = [
+                str(i),
+                str(r.get("party") or "").replace("|", "/"),
+                str(r.get("client_type") or "—").replace("|", "/"),
+                str(r.get("city") or "—").replace("|", "/"),
+            ]
         for c in extra_cols:
             val = r.get(c)
             if val is None:
@@ -834,7 +1262,7 @@ def _party_table_result(
         lines.append("| " + " | ".join(cells) + " |")
 
     if not rows:
-        lines = [f"No parties for {blurb}.\n"]
+        lines = [f"No results for {blurb}.\n"]
 
     return {
         "ok": True,
@@ -859,14 +1287,17 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         "business_unit": None,
         "brand": None,
         "packing_category": None,
-        "metric": "volume",
+        "metric": "ams",  # default ranking metric
         "period": None,
         "compare_period": None,
         "limit": 10,
-        "mode": "analyze",  # list | analyze
+        "mode": "analyze",
+        "group_by": "party",
+        "mix_dimension": None,
+        "sort": "desc",
     }
 
-    # Oil / VTF
+    # Oil / VTF / packing from language
     if re.search(r"\bvtf\b|\bbanaspati\b", t):
         out["oil_type"] = "Eva VTF"
     else:
@@ -880,14 +1311,34 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
                 None,
             )
         )
+    out["packing_category"] = normalize_packing_category(
+        next(
+            (
+                a
+                for a in (
+                    "pillow",
+                    "standup",
+                    "stand up",
+                    "pet bottle",
+                    "jerry can",
+                    "jerry",
+                    "pouch",
+                    "tin",
+                    "bucket",
+                )
+                if a in t
+            ),
+            None,
+        )
+    )
 
-    if re.search(r"\beva sales\b|\beva\b.*\bdistributor", t) and not re.search(
+    if re.search(r"\beva sales\b|\bfor eva\b|\beva vtf\b", t) and not re.search(
         r"\beva distributors?\b", t
     ):
-        out["brand"] = "Eva"
-    if re.search(r"\bmaan\b", t) and "distributor" in t:
-        # keep client type; brand optional
-        pass
+        if not out["oil_type"]:
+            out["brand"] = "Eva"
+    if re.search(r"\btop\b.+\bfor eva\b|\bdistributors? for eva\b", t):
+        out["brand"] = out.get("brand") or "Eva"
 
     m_lim = re.search(r"\btop\s+(\d{1,3})\b", t)
     if m_lim:
@@ -895,57 +1346,115 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     elif re.search(r"\bhighest\b|\bwhich\b", t) and not re.search(r"\btop\s+\d", t):
         out["limit"] = 10
 
-    # List mode: who are (my) distributors/clients in CITY
+    # City league
+    if re.search(r"\b(cities|city league|rank(ed)? cities|top\s+\d+\s+cities)\b", t):
+        out["group_by"] = "city"
+
+    # List mode
     if re.search(
         r"\b(who are|list|show( me)?)\b.+\b(distributors?|clients?|parties|imtiaz)\b",
         t,
     ) and not re.search(
-        r"\b(top|highest|grow|doing well|share|percent|%|ams|average)\b", t
+        r"\b(top|highest|grow|doing well|poor|behind|share|percent|%|ams|average|"
+        r"new|lost|mix|breakdown|invoice|frequency)\b",
+        t,
     ):
         out["mode"] = "list"
         out["limit"] = 200
 
-    # Metrics
-    if re.search(r"\b(percent|%|\bshare\b)\b.+\b(lahore|karachi|islamabad|city)\b", t) or re.search(
-        r"\b(lahore|karachi|islamabad)\b.+\b(percent|%|share)\b", t
+    # Metrics (order matters)
+    if re.search(
+        r"\b(new\s+(parties|clients|distributors|imtiaz)|new in\b|first sale|"
+        r"newly\s+added)\b",
+        t,
     ):
+        out["metric"] = "new_parties"
+    elif re.search(
+        r"\b(lost\s+(parties|clients|distributors)|silent|zero sales|"
+        r"no sales this|dropped off|inactive parties)\b",
+        t,
+    ):
+        out["metric"] = "lost_parties"
+    elif re.search(
+        r"\b(sku[- ]?wise|by sku|show by sku|sku break|product[- ]?wise)\b",
+        t,
+    ) or (
+        re.search(r"\b(mix|breakdown|break\s*down)\b", t)
+        and re.search(r"\bsku\b", t)
+    ):
+        out["metric"] = "product_mix"
+        out["mix_dimension"] = "product"
+    elif re.search(
+        r"\b(product mix|product break|packing mix|pack(ing)? break|"
+        r"by packing|by product|pack mix|category mix)\b",
+        t,
+    ):
+        out["metric"] = "packing_mix"
+        out["mix_dimension"] = "packing_category"
+    elif re.search(r"\b(invoice frequency|most invoices|by invoices?)\b", t):
+        out["metric"] = "invoices"
+    elif re.search(r"\b(avg(erage)? invoice|mt per invoice|invoice size)\b", t):
+        out["metric"] = "invoice_mt"
+    elif re.search(
+        r"\b(percent|%|\bshare\b)\b.+\b(lahore|karachi|islamabad|city)\b", t
+    ) or re.search(r"\b(lahore|karachi|islamabad)\b.+\b(percent|%|share)\b", t):
         out["metric"] = "geo_share"
         out["mode"] = "analyze"
     elif re.search(r"\bshare of\b|\bhighest share\b", t):
         out["metric"] = "share_of_segment"
-    elif re.search(r"\bmix\b|\b% of (their|its) sales\b", t):
-        out["metric"] = "segment_mix"
+    elif re.search(
+        r"\b(behind|poorly|poor performance|falling behind|falling in sales|"
+        r"not doing well|underperform|below ams|below average|"
+        r"behind on average)\b",
+        t,
+    ):
+        out["metric"] = "vs_ams"
+        out["sort"] = "asc"
     elif re.search(r"\b(grow|growth|grew|vs\b.+\blast year|year over year|yoy)\b", t):
         out["metric"] = "yoy"
-        # compare period e.g. July last year
         if re.search(r"\blast year\b|\byear ago\b", t):
-            # Try to pull month name for compare
             from eva_dashboard.sales_query import MONTH_NAMES
 
             for name in MONTH_NAMES:
                 if re.search(rf"\b{name}\b", t):
                     out["compare_period"] = f"{name} last year"
-                    out["period"] = name  # current year same month vs last year
+                    out["period"] = name
                     break
             if not out["compare_period"]:
-                out["compare_period"] = "last year"
+                out["compare_period"] = None  # auto YoY of current period
+        else:
+            # "growth in July" → July vs July last year
+            from eva_dashboard.sales_query import MONTH_NAMES
+
+            for name in MONTH_NAMES:
+                if re.search(rf"\b{name}\b", t):
+                    out["period"] = name
+                    out["compare_period"] = f"{name} last year"
+                    break
     elif re.search(r"\bdoing well\b|\bperforming well\b|\bmanaged well\b", t):
         if re.search(r"\bwhich\b|\btop\b|\blist\b", t):
             out["metric"] = "vs_ams"
+            out["sort"] = "desc"
         else:
             out["metric"] = "doing_well"
     elif re.search(r"\bvs\s*ams\b|\bagainst ams\b|\brelative to ams\b", t):
         out["metric"] = "vs_ams"
+    elif re.search(r"\b(by )?volume\b|\btop sales\b|\bhighest sale\b", t) and not re.search(
+        r"\bgrowth\b", t
+    ):
+        out["metric"] = "volume"
     elif re.search(r"\bams\b|\baverage (monthly )?sale", t):
         out["metric"] = "ams"
     else:
-        out["metric"] = "volume"
+        # Default for rankings: AMS
+        out["metric"] = "ams"
 
     # Period phrases
+    m_n = re.search(r"\b(last|past|previous)\s+(\d{1,2})\s+months?\b", t)
     if re.search(r"\blast quarter\b|\bprevious quarter\b", t):
         out["period"] = "last quarter"
-    elif re.search(r"\blast\s+3\s+months\b|\bpast\s+3\s+months\b", t):
-        out["period"] = "last 3 months"
+    elif m_n:
+        out["period"] = f"last {m_n.group(2)} months"
     elif re.search(r"\blast month\b", t):
         out["period"] = "last month"
     elif re.search(r"\bthis month\b|\bso far\b|\bmtd\b", t):
@@ -953,7 +1462,6 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     elif out["metric"] == "yoy" and out.get("period"):
         pass
     else:
-        # Named month without year → current data year
         from eva_dashboard.sales_query import MONTH_NAMES
 
         for name in MONTH_NAMES:

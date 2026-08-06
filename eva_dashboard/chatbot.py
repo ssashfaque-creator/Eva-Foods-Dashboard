@@ -279,11 +279,15 @@ Examples:
     → list_clients city='Lahore', client_type='Eva Distributors'
   "Top 10 parties by AMS in Karachi"
     → analyze_parties city='Karachi', metric='ams', limit=10
-  "Which distributors are doing well last 3 months?"
-    → analyze_parties client_type='Eva Distributors', period='last 3 months',
-      metric='vs_ams'
-  "What percent of VTF sales are in Lahore?"
-    → analyze_parties oil_type='Eva VTF', share_city='Lahore', metric='geo_share'
+  "Top 5 distributors for Eva VTF" → client_type + oil_type, metric='ams' (default)
+  "Which distributors are performing poorly in Lahore?"
+    → metric='vs_ams', sort='asc', city='Lahore'
+  "New parties last 6 months" / "new distributors last month"
+    → metric='new_parties', period='last 6 months'
+  "Lost / silent parties this month" → metric='lost_parties'
+  "Product mix for Imtiaz" → packing_mix; "SKU wise" → product_mix
+  "City league / top cities" → group_by='city'
+  "Most invoices / invoice frequency" → metric='invoices'
   "Which distributors grew VTF most vs July last year?"
     → analyze_parties client_type='Eva Distributors', oil_type='Eva VTF',
       period='July', compare_period='July last year', metric='yoy'
@@ -730,9 +734,11 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "analyze_parties",
             "description": (
-                "Rank parties for AMS/volume/share/YoY/doing-well. "
-                "Top N, which Imtiaz highest VTF share, % of VTF in Lahore, "
-                "distributors doing well last quarter, growth vs July last year."
+                "Rank parties/cities or answer AMS, underperformers, new/lost, "
+                "packing/SKU mix, invoices, share, YoY. Default rank metric = AMS. "
+                "Examples: top 5 distributors for Eva VTF; poorly in Lahore; "
+                "new parties last 6 months; product mix for Imtiaz; city league; "
+                "growth in July."
             ),
             "parameters": {
                 "type": "object",
@@ -757,10 +763,29 @@ TOOLS: list[dict[str, Any]] = [
                             "segment_mix",
                             "geo_share",
                             "doing_well",
+                            "new_parties",
+                            "lost_parties",
+                            "packing_mix",
+                            "product_mix",
+                            "invoices",
+                            "invoice_mt",
                         ],
                     },
                     "compare_period": {"type": "string"},
                     "share_city": {"type": "string"},
+                    "group_by": {
+                        "type": "string",
+                        "enum": ["party", "city"],
+                    },
+                    "mix_dimension": {
+                        "type": "string",
+                        "enum": ["packing_category", "product"],
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["desc", "asc"],
+                        "description": "asc for poorly / behind AMS",
+                    },
                     "limit": {"type": "integer"},
                 },
                 "additionalProperties": False,
@@ -1134,7 +1159,14 @@ def _looks_party_lookup(text: str) -> bool:
 def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
     if re.search(
-        r"\b(top\s+\d|highest|grow|growth|doing well|share of|percent|% of|ams)\b",
+        r"\b("
+        r"top\s+\d|highest|grow|growth|doing well|share of|percent|% of|ams|"
+        r"poorly|poor performance|falling|behind|underperform|not doing well|"
+        r"new\s+(parties|clients|distributors)|new in\b|"
+        r"lost\s+(parties|clients|distributors)|silent|"
+        r"product mix|packing mix|product break|sku[- ]?wise|breakdown|"
+        r"invoice|frequency|city league|by volume|vs\s*ams"
+        r")\b",
         t,
     ):
         return False
@@ -1158,10 +1190,20 @@ def _looks_party_analytics(text: str) -> bool:
         re.search(
             r"\b("
             r"top\s+\d+|highest sale|highest share|which\s+(imtiaz|distributor)|"
-            r"doing well|performing well|grew|grow(th|n)?|"
+            r"doing well|performing well|performing poorly|poorly|"
+            r"falling behind|falling in sales|behind on|not doing well|"
+            r"underperform|grew|grow(th|n)?|"
             r"percent of|% of|share of|vs\s*ams|against ams|"
             r"relative to ams|year over year|\byoy\b|last year|"
-            r"parties by|by average|by ams|by volume"
+            r"parties by|by average|by ams|by volume|"
+            r"new\s+(parties|clients|distributors|imtiaz)|new in\b|"
+            r"lost\s+(parties|clients|distributors)|silent parties|"
+            r"product mix|packing mix|product break|sku[- ]?wise|"
+            r"mix for|breakdown for|by packing|by product|"
+            r"invoice|frequency|city league|top\s+\d+\s+cities|"
+            r"rank(ed)? cities|top\s+\d+\s+distributors|"
+            r"distributors? for|imtiaz stores? selling|"
+            r"behind on average|falling behind"
             r")\b",
             t,
         )
@@ -1416,7 +1458,7 @@ def _dispatch_tool(
             or inferred.get("packing_category")
             or extract_packing_from_text(user_text),
             brand=arguments.get("brand") or inferred.get("brand"),
-            metric=arguments.get("metric") or inferred.get("metric") or "volume",
+            metric=arguments.get("metric") or inferred.get("metric") or "ams",
             compare_period=arguments.get("compare_period")
             or inferred.get("compare_period"),
             share_city=arguments.get("share_city")
@@ -1426,6 +1468,10 @@ def _dispatch_tool(
                 else None
             )
             or extract_city_from_text(user_text),
+            group_by=arguments.get("group_by") or inferred.get("group_by") or "party",
+            mix_dimension=arguments.get("mix_dimension")
+            or inferred.get("mix_dimension"),
+            sort=arguments.get("sort") or inferred.get("sort") or "desc",
             limit=int(arguments.get("limit") or inferred.get("limit") or 10),
         )
     if name == "query_price":
