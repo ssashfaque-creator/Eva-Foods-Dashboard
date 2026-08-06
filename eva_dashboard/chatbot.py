@@ -270,6 +270,9 @@ Examples:
     → row_dimension='packing_category', prior_spec — SAME filters/months
   "Dissect further / SKU wise / show by SKU" (follow-up)
     → row_dimension='product', prior_spec — SAME filters/months
+  "Analyze these sales and compare with the same period last year" (follow-up)
+    → query_sales compare='yoy', prior_spec — SAME filters/grain vs last year
+      (NOT analyze_parties / NOT invent Eva Distributors)
   "Canola standup price for Distributors last week"
     → query_price: oil/packing or product_query='canola standup',
       client_type='Eva Distributors', period='last week'
@@ -678,6 +681,14 @@ TOOLS: list[dict[str, Any]] = [
                             "Previous table_spec when user adds to the current table"
                         ),
                     },
+                    "compare": {
+                        "type": "string",
+                        "enum": ["yoy"],
+                        "description": (
+                            "yoy = same calendar span last year; use with prior_spec "
+                            "for 'analyze these sales vs last year'"
+                        ),
+                    },
                     "mode": {
                         "type": "string",
                         "description": "matrix or analytical (usually set from language)",
@@ -1003,12 +1014,17 @@ def _looks_analytical(text: str) -> bool:
         r"\b(evaluate|assess|performance|trend|ams)\b", t
     ):
         return False
+    # Sales YoY compare of the prior table is its own mode (not AMS analytical pack)
+    if _looks_sales_yoy_compare(t):
+        return False
     patterns = (
         r"\bhow were\b",
         r"\bhow are\b",
         r"\bhow is\b",
         r"\bhow did\b",
         r"\bhow do\b",
+        r"\bhow have\b",
+        r"\bhow has\b",
         r"\bevaluate\b",
         r"\bevaluating\b",
         r"\bevaluation\b",
@@ -1018,7 +1034,8 @@ def _looks_analytical(text: str) -> bool:
         r"\bperformance\b",
         r"\bdoing\b",  # "how are … doing"
         r"\btrend\b",
-        r"\banalys[ei]",
+        r"\banaly[sz]e\b",
+        r"\banalysis\b",
         r"\bvs\s*ams\b",
         r"\bagainst ams\b",
         r"\bcompared to ams\b",
@@ -1026,6 +1043,44 @@ def _looks_analytical(text: str) -> bool:
         r"\breview\b",
     )
     return any(re.search(p, t) for p in patterns)
+
+
+def _looks_sales_yoy_compare(text: str) -> bool:
+    """Compare prior sales table / scope to the same period last year (not party ranks)."""
+    t = (text or "").lower()
+    # Explicit party growth ranking stays on analyze_parties
+    if re.search(
+        r"\b(top|which)\b.+\b(distributors?|parties|imtiaz|clients?)\b",
+        t,
+    ) or re.search(
+        r"\b(distributors?|parties)\b.+\b(grew|growth|top\s+sales\s+growth)\b",
+        t,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(compare|comparison|versus|vs\.?)\b.+\b"
+            r"(last year|year ago|same period|prior year)\b",
+            t,
+        )
+        or re.search(
+            r"\b(same period last year|vs\.?\s*last year|versus last year|"
+            r"compared? (to|with) last year)\b",
+            t,
+        )
+        or (
+            re.search(r"\b(analy[sz]e|analysis)\b.+\b(sales|these|this|them)\b", t)
+            and re.search(r"\b(last year|year ago|yoy|year over year)\b", t)
+        )
+        or (
+            _looks_context_followup(t)
+            and re.search(r"\b(last year|year ago|same period|yoy)\b", t)
+            and not re.search(
+                r"\b(distributors?|parties|imtiaz stores?|top\s+\d)\b",
+                t,
+            )
+        )
+    )
 
 
 _KNOWN_BUSINESS_UNITS = (
@@ -1207,6 +1262,9 @@ def _looks_context_followup(text: str) -> bool:
 
 def _looks_party_analytics(text: str) -> bool:
     t = (text or "").lower()
+    # Sales-table YoY compare is query_sales, not party ranking
+    if _looks_sales_yoy_compare(t):
+        return False
     return bool(
         re.search(
             r"\b("
@@ -1217,7 +1275,7 @@ def _looks_party_analytics(text: str) -> bool:
             r"falling behind|falling in sales|behind on|not doing well|"
             r"underperform|grew|grow(th|n)?|"
             r"percent of|% of|share of|vs\s*ams|against ams|"
-            r"relative to ams|year over year|\byoy\b|last year|"
+            r"relative to ams|year over year|\byoy\b|"
             r"parties by|by average|by ams|by volume|"
             r"new\s+(parties|clients|distributors|imtiaz)|new in\b|"
             r"lost\s+(parties|clients|distributors)|silent parties|"
@@ -1226,7 +1284,10 @@ def _looks_party_analytics(text: str) -> bool:
             r"invoice|frequency|city league|top\s+\d+\s+cities|"
             r"rank(ed)? cities|top\s+\d+\s+distributors|"
             r"distributors? for|imtiaz stores? selling|"
-            r"behind on average|falling behind"
+            r"behind on average|falling behind|"
+            # last year only with party/growth intent
+            r"(distributors?|parties|imtiaz).{0,40}last year|"
+            r"last year.{0,40}(distributors?|parties|imtiaz|growth|grew)"
             r")\b",
             t,
         )
@@ -1416,11 +1477,12 @@ def _dispatch_tool(
         )
         is_drill = bool(row_dim) or _looks_row_drilldown(user_text)
 
-        # Follow-up: merge mentioned BUs / keep prior table / change row grain
+        # Follow-up: merge mentioned BUs / keep prior table / change row grain / YoY
+        is_yoy = _looks_sales_yoy_compare(user_text)
         use_prior = prior_spec if (
-            (_looks_table_followup(user_text) or is_drill) and prior_spec
+            (_looks_table_followup(user_text) or is_drill or is_yoy) and prior_spec
         ) else None
-        if use_prior or _looks_table_followup(user_text) or is_drill:
+        if use_prior or _looks_table_followup(user_text) or is_drill or is_yoy:
             for u in _extract_business_units_from_text(user_text):
                 if u not in units:
                     units.append(u)
@@ -1443,6 +1505,15 @@ def _dispatch_tool(
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
 
+        # YoY of "these sales": do not invent a client type (e.g. Eva Distributors)
+        if is_yoy and use_prior:
+            ctype = None
+            oil = oil or None
+            pack = pack or None
+            # Prefer prior BUs only — drop model-invented units not in user text
+            if not _extract_business_units_from_text(user_text):
+                uniq = []
+
         # If user asked about a client type but did not name a BU, do not keep a
         # model-invented Business Unit (e.g. Eva Consumer for "Imtiaz store").
         mentioned_units = _extract_business_units_from_text(user_text)
@@ -1463,6 +1534,10 @@ def _dispatch_tool(
             bu_param = None
             bus_param = None
 
+        # Preserve prior column grain on YoY follow-up
+        if is_yoy and use_prior and use_prior.get("column_dimension"):
+            columns = str(use_prior["column_dimension"])
+
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
@@ -1478,6 +1553,7 @@ def _dispatch_tool(
             mode=mode,
             row_dimension=row_dim,
             prior_spec=use_prior or arguments.get("prior_spec"),
+            compare="yoy" if is_yoy else (arguments.get("compare") or None),
         )
     if name == "lookup_party":
         # If language is clearly a city+type list, redirect
@@ -1643,6 +1719,8 @@ def _looks_sales_matrix(text: str) -> bool:
         or _looks_party_analytics(text)
     ):
         return False
+    if _looks_sales_yoy_compare(text):
+        return True
     if _looks_row_drilldown(text):
         return True
     t = (text or "").lower()
@@ -1653,6 +1731,7 @@ def _looks_sales_matrix(text: str) -> bool:
         "doing", "breakdown", "city wise", "city-wise", "ams", "trend",
         "evaluate", "assess", "performance", "packing", "pet", "standup",
         "jerry", "month", "monthly", "add ", "sku", "product", "dissect",
+        "faisalabad", "analyze", "analyse", "compare",
     )
     return any(k in t for k in sales_keys)
 
@@ -1731,7 +1810,7 @@ def chat_completion(
                     "type": "function",
                     "function": {"name": "query_price"},
                 }
-            elif _looks_sales_matrix(last_user):
+            elif _looks_sales_yoy_compare(last_user) or _looks_sales_matrix(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "query_sales"},

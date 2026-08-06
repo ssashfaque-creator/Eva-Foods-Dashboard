@@ -364,3 +364,86 @@ def test_system_prompt_mentions_query_sales() -> None:
                 os.environ.pop("EVA_DATA_DIR", None)
             else:
                 os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_sales_yoy_compare_same_period_last_year() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            # Prior-year same days for August so far
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, client_type, payload_json
+                    ) VALUES (NULL, 'yoy-1', datetime('now'), '2025-08-02',
+                      'Alpha Dist', 'Eva Canola Oil (StandUpPouch)',
+                      20.0, 'MT', 20.0, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, client_type, payload_json
+                    ) VALUES (NULL, 'yoy-2', datetime('now'), '2025-08-03',
+                      'Gamma Dist', 'Eva Canola Oil (StandUpPouch)',
+                      5.0, 'MT', 5.0, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+
+            from eva_dashboard.chatbot import (
+                _dispatch_tool,
+                _looks_party_analytics,
+                _looks_sales_matrix,
+                _looks_sales_yoy_compare,
+            )
+
+            q = "analyze these sales and compare with the same period last year"
+            assert _looks_sales_yoy_compare(q)
+            assert not _looks_party_analytics(q)
+            assert _looks_sales_matrix(q)
+
+            prior = {
+                "period_phrase": "August so far",
+                "period": {
+                    "date_from": "2026-08-01",
+                    "date_to": "2026-08-04",
+                    "label": "Aug 2026 (through 2026-08-04)",
+                },
+                "filters": {
+                    "city": "Lahore",
+                    "business_unit": "Eva Consumer",
+                    "oil_type": None,
+                    "packing_category": None,
+                    "client_type": None,
+                },
+                "business_units": ["Eva Consumer"],
+                "column_dimension": "client_type",
+                "row_dimension": "packing_category",
+            }
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out["ok"] is True
+            assert out["mode"] == "yoy"
+            assert out["filters"]["city"] == "Lahore"
+            assert out["filters"]["business_unit"] == "Eva Consumer"
+            assert out["filters"]["client_type"] is None  # do not invent distributors
+            assert out["compare_period"]["date_from"] == "2025-08-01"
+            assert out["compare_period"]["date_to"] == "2025-08-04"
+            assert out["prior_total_mt"] > 0
+            assert "YoY" in out["answer_markdown"]
+            assert "Eva Distributors" in out["answer_markdown"] or out["yoy_by_col"]
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous

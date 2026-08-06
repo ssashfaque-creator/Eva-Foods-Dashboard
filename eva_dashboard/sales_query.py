@@ -804,6 +804,166 @@ def _trend_table(
     }
 
 
+def _shift_date_year(d: date, years: int = -1) -> date:
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        # Feb 29 → Feb 28
+        return d.replace(year=d.year + years, day=28)
+
+
+def _yoy_period_from(period_info: dict[str, Any]) -> dict[str, Any]:
+    """Same calendar span one year earlier (preserves partial-month day range)."""
+    d0 = date.fromisoformat(str(period_info["date_from"])[:10])
+    d1 = date.fromisoformat(str(period_info["date_to"])[:10])
+    c0, c1 = _shift_date_year(d0, -1), _shift_date_year(d1, -1)
+    return {
+        "ok": True,
+        "date_from": c0.isoformat(),
+        "date_to": c1.isoformat(),
+        "label": f"{c0.strftime('%b %Y')} ({c0.isoformat()} → {c1.isoformat()})",
+        "partial_month": period_info.get("partial_month"),
+        "days_elapsed": period_info.get("days_elapsed"),
+        "days_in_month": calendar.monthrange(c1.year, c1.month)[1],
+    }
+
+
+def _matrix_total_mt(matrix: dict[str, Any]) -> float:
+    if "grand_total_mt" in matrix and matrix["grand_total_mt"] is not None:
+        return float(matrix["grand_total_mt"])
+    row_key = str(matrix.get("row_dimension") or "")
+    for row in matrix.get("rows") or []:
+        if str(row.get(row_key) or "").strip().lower() == "total":
+            return float(row.get("Total") or 0.0)
+    return 0.0
+
+
+def _yoy_pct(current: float, prior: float) -> float | None:
+    raw = pct_change(current, prior)
+    if raw is None:
+        if current and not prior:
+            return None  # new vs zero prior — leave blank
+        return None
+    return round(float(raw), 1)
+
+
+def _yoy_breakdown_table(
+    current: dict[str, Any],
+    prior: dict[str, Any],
+    *,
+    axis: str,
+) -> dict[str, Any]:
+    """Build Current / Prior / YoY % table by row labels or by column labels."""
+    row_key = str(current.get("row_dimension") or prior.get("row_dimension") or "row")
+    if axis == "row":
+        cur_map: dict[str, float] = {}
+        pri_map: dict[str, float] = {}
+        for src, dest in ((current, cur_map), (prior, pri_map)):
+            for row in src.get("rows") or []:
+                label = str(row.get(row_key) or "").strip()
+                if not label or label.lower() == "total":
+                    continue
+                dest[label] = float(row.get("Total") or 0.0)
+        labels = list(dict.fromkeys([*cur_map.keys(), *pri_map.keys()]))
+        labels.sort(
+            key=lambda x: (-(cur_map.get(x, 0.0) + pri_map.get(x, 0.0)), x.lower())
+        )
+        rows = []
+        for lab in labels:
+            c = cur_map.get(lab, 0.0)
+            p = pri_map.get(lab, 0.0)
+            rows.append(
+                {
+                    "segment": lab,
+                    "current_mt": round(c, 3),
+                    "prior_mt": round(p, 3),
+                    "yoy_pct": _yoy_pct(c, p),
+                }
+            )
+        c_tot = sum(cur_map.values())
+        p_tot = sum(pri_map.values())
+        rows.append(
+            {
+                "segment": "Total",
+                "current_mt": round(c_tot, 3),
+                "prior_mt": round(p_tot, 3),
+                "yoy_pct": _yoy_pct(c_tot, p_tot),
+            }
+        )
+        return {
+            "row_dimension": "segment",
+            "columns": ["segment", "current_mt", "prior_mt", "yoy_pct"],
+            "rows": rows,
+        }
+
+    # axis == column
+    cur_cols = [c for c in (current.get("columns") or []) if c != "Total"]
+    pri_cols = [c for c in (prior.get("columns") or []) if c != "Total"]
+    labels = list(dict.fromkeys([*cur_cols, *pri_cols]))
+
+    def _col_total(matrix: dict[str, Any], col: str) -> float:
+        for row in matrix.get("rows") or []:
+            lab = str(row.get(row_key) or "").strip().lower()
+            if lab == "total":
+                return float(row.get(col) or 0.0)
+        return sum(
+            float(r.get(col) or 0.0)
+            for r in (matrix.get("rows") or [])
+            if str(r.get(row_key) or "").strip().lower() != "total"
+        )
+
+    rows = []
+    for lab in labels:
+        c = _col_total(current, lab)
+        p = _col_total(prior, lab)
+        rows.append(
+            {
+                "segment": lab,
+                "current_mt": round(c, 3),
+                "prior_mt": round(p, 3),
+                "yoy_pct": _yoy_pct(c, p),
+            }
+        )
+    rows.sort(key=lambda r: (-(r["current_mt"] + r["prior_mt"]), str(r["segment"]).lower()))
+    c_tot = sum(r["current_mt"] for r in rows)
+    p_tot = sum(r["prior_mt"] for r in rows)
+    rows.append(
+        {
+            "segment": "Total",
+            "current_mt": round(c_tot, 3),
+            "prior_mt": round(p_tot, 3),
+            "yoy_pct": _yoy_pct(c_tot, p_tot),
+        }
+    )
+    return {
+        "row_dimension": "segment",
+        "columns": ["segment", "current_mt", "prior_mt", "yoy_pct"],
+        "rows": rows,
+    }
+
+
+def _yoy_table_to_markdown(table: dict[str, Any], title_segment: str) -> str:
+    lines = [
+        f"| {title_segment} | Current (MT) | Prior (MT) | YoY % |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in table.get("rows") or []:
+        seg = str(row.get("segment") or "").replace("|", "/")
+        yoy = row.get("yoy_pct")
+        yoy_s = f"{yoy:+.1f}%" if isinstance(yoy, (int, float)) else "—"
+        is_tot = seg.strip().lower() == "total"
+        if is_tot:
+            lines.append(
+                f"| **{seg}** | **{row.get('current_mt')}** | "
+                f"**{row.get('prior_mt')}** | **{yoy_s}** |"
+            )
+        else:
+            lines.append(
+                f"| {seg} | {row.get('current_mt')} | {row.get('prior_mt')} | {yoy_s} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
 def query_sales(
     *,
     period: str | None = None,
@@ -820,6 +980,7 @@ def query_sales(
     mode: str = "matrix",
     row_dimension: str | None = None,
     prior_spec: dict[str, Any] | None = None,
+    compare: str | None = None,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -839,6 +1000,9 @@ def query_sales(
 
     prior_spec: previous table_spec for follow-ups like "add Eva Bulk" /
     "show by product" / "SKU wise".
+
+    compare: ``yoy`` / ``same_period_last_year`` — same filters & grain vs
+    the same calendar span one year earlier (partial months keep day range).
     """
     # Merge follow-up additions into prior filters
     units: list[str] = []
@@ -969,6 +1133,22 @@ def query_sales(
     if col == "month":
         mode_norm = "matrix"
 
+    compare_n = (compare or "").strip().lower().replace("-", "_").replace(" ", "_")
+    want_yoy = compare_n in {
+        "yoy",
+        "year_over_year",
+        "same_period_last_year",
+        "last_year",
+        "vs_last_year",
+    }
+    # Month-wise YoY is not supported as a dual month grid — fall back to totals only
+    if want_yoy and col == "month":
+        want_yoy = True  # still do headline + row YoY on month totals if needed later
+        # For now: treat as packing/client style on full fetched frame totals via matrix of months is awkward
+        # Skip dual month matrices; build YoY on row totals from current month pivot Average column isn't ideal.
+        # Simpler: disable month-col YoY and just compare overall period totals via a single-column pivot.
+        pass
+
     table_spec = {
         "period_phrase": period,
         "period": {
@@ -987,6 +1167,7 @@ def query_sales(
         "column_dimension": col,
         "row_dimension": row_dim,
         "months_back": mb if col == "month" else None,
+        "compare": "yoy" if want_yoy else None,
     }
 
     result: dict[str, Any] = {
@@ -1000,6 +1181,84 @@ def query_sales(
         "matrix": primary,
         "table_spec": table_spec,
     }
+
+    if want_yoy:
+        compare_info = _yoy_period_from(period_info)
+        prior_frame = _fetch_lines(
+            date_from=compare_info["date_from"],
+            date_to=compare_info["date_to"],
+            city=city_f,
+            business_unit=bu,
+            business_units=units if len(units) > 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype,
+        )
+        if col == "month":
+            # Collapse to row totals vs prior-year same span (not month columns)
+            prior_primary = _pivot_mt(prior_frame, row_dim, "client_type")
+            # Rebuild current as client_type for apples-to-apples when month was requested
+            current_cmp = _pivot_mt(frame, row_dim, "client_type")
+            col_cmp = "client_type"
+        else:
+            prior_primary = _pivot_mt(prior_frame, row_dim, col)
+            current_cmp = primary
+            col_cmp = col
+
+        # Attach row_dimension for total helpers
+        current_cmp = {**current_cmp, "row_dimension": row_dim}
+        prior_primary = {**prior_primary, "row_dimension": row_dim}
+
+        cur_tot = _matrix_total_mt(current_cmp)
+        pri_tot = _matrix_total_mt(prior_primary)
+        yoy_tot = _yoy_pct(cur_tot, pri_tot)
+
+        yoy_by_row = _yoy_breakdown_table(current_cmp, prior_primary, axis="row")
+        yoy_by_col = _yoy_breakdown_table(current_cmp, prior_primary, axis="column")
+
+        result["mode"] = "yoy"
+        result["compare_period"] = compare_info
+        result["prior_matrix"] = prior_primary
+        result["matrix"] = current_cmp
+        result["column_dimension"] = col_cmp
+        result["yoy_by_row"] = yoy_by_row
+        result["yoy_by_col"] = yoy_by_col
+        result["current_total_mt"] = round(cur_tot, 3)
+        result["prior_total_mt"] = round(pri_tot, 3)
+        result["yoy_pct"] = yoy_tot
+        result["tables"] = [
+            {
+                "index": 1,
+                "title": f"YoY by {row_dim}",
+                "source": "yoy_by_row",
+                "data": yoy_by_row,
+            },
+            {
+                "index": 2,
+                "title": f"YoY by {col_cmp}",
+                "source": "yoy_by_col",
+                "data": yoy_by_col,
+            },
+            {
+                "index": 3,
+                "title": f"Current {row_dim} × {col_cmp}",
+                "source": "matrix",
+                "data": current_cmp,
+            },
+            {
+                "index": 4,
+                "title": f"Prior year {row_dim} × {col_cmp}",
+                "source": "prior_matrix",
+                "data": prior_primary,
+            },
+        ]
+        result["required_table_count"] = 4
+        result["answer_markdown"] = render_sales_markdown(result)
+        result["response_instructions"] = (
+            "REQUIRED: Your entire reply MUST be the `answer_markdown` field verbatim. "
+            "Do not rebuild or omit tables. Keep `table_spec` for follow-ups."
+        )
+        return result
 
     if mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
         city_matrix = _pivot_mt(frame, row_dim, "city")
@@ -1233,6 +1492,33 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
     row_dim = str(result.get("row_dimension") or "row")
     blurb = _filter_blurb(filters, period, result.get("business_units"))
     parts = [f"Sales for {blurb} (MT).\n"]
+
+    if result.get("mode") == "yoy":
+        cmp = result.get("compare_period") or {}
+        yoy = result.get("yoy_pct")
+        yoy_s = f"{yoy:+.1f}%" if isinstance(yoy, (int, float)) else "—"
+        parts = [
+            f"YoY comparison — {blurb} vs **{cmp.get('label') or 'same period last year'}** (MT).\n",
+            f"**Total:** {result.get('current_total_mt')} MT now vs "
+            f"{result.get('prior_total_mt')} MT prior → **{yoy_s}**.\n",
+            f"### 1. YoY by {row_dim.replace('_', ' ').title()}\n",
+            _yoy_table_to_markdown(
+                result.get("yoy_by_row") or {},
+                row_dim.replace("_", " ").title(),
+            ),
+            f"### 2. YoY by {str(result.get('column_dimension') or 'column').replace('_', ' ').title()}\n",
+            _yoy_table_to_markdown(
+                result.get("yoy_by_col") or {},
+                str(result.get("column_dimension") or "column").replace("_", " ").title(),
+            ),
+            f"### 3. Current — {row_dim.replace('_', ' ').title()} × "
+            f"{str(result.get('column_dimension') or '').replace('_', ' ').title()}\n",
+            _matrix_to_markdown(result.get("matrix") or {}, row_dim),
+            f"### 4. Prior year — {row_dim.replace('_', ' ').title()} × "
+            f"{str(result.get('column_dimension') or '').replace('_', ' ').title()}\n",
+            _matrix_to_markdown(result.get("prior_matrix") or {}, row_dim),
+        ]
+        return "\n".join(parts).strip() + "\n"
 
     if result.get("mode") == "analytical":
         parts.append("### 1. City-wise breakdown\n")
