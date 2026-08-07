@@ -295,7 +295,7 @@ def test_row_drilldown_bu_to_packing_to_sku() -> None:
                 "product",
             ]
             assert any(
-                r.get("row_kind") == "subtotal_packing" for r in sku["matrix"]["rows"]
+                r.get("row_kind") == "subtotal_packing_category" for r in sku["matrix"]["rows"]
             )
             assert any(
                 r.get("row_kind") == "subtotal_business_unit"

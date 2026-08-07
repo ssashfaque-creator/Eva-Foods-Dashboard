@@ -715,6 +715,13 @@ def _value_cells(
     return {k: mt_round(v) for k, v in cells.items()}
 
 
+def _level_name_order(level: str, names: list[Any], totals: dict[Any, float]) -> list[str]:
+    str_names = [str(n) for n in names]
+    if level == "business_unit":
+        return sorted(str_names, key=lambda n: _bu_order_key(n, float(totals.get(n, 0))))
+    return sorted(str_names, key=lambda n: (-float(totals.get(n, 0)), n.lower()))
+
+
 def _pivot_hierarchy(
     frame: pd.DataFrame,
     levels: list[str],
@@ -725,15 +732,16 @@ def _pivot_hierarchy(
     """Pivot with parent layers as leading columns + group subtotals.
 
     Markdown cannot rowspan, so parent labels appear once then blank cells
-    (visual merge). Subtotal rows after each packing group and each BU.
+    (visual merge). Subtotal rows after each non-leaf group.
     """
-    leaf = levels[-1]
+    levels = [lv for lv in levels if lv]
+    leaf = levels[-1] if levels else "row"
     month_mode = month_labels is not None
     display_cols: list[str]
     if month_mode:
         display_cols = list(month_labels or []) + ["Average", "Total"]
     else:
-        display_cols = []  # filled after we know columns
+        display_cols = []
 
     empty = {
         "row_dimension": leaf,
@@ -747,7 +755,7 @@ def _pivot_hierarchy(
         "month_labels": month_labels,
         "markdown_hint": (
             f"Hierarchical MT: {' → '.join(levels)} × "
-            f"{'month' if month_mode else col_dim}, with packing/BU subtotals."
+            f"{'month' if month_mode else col_dim}, with group subtotals."
         ),
     }
     if frame.empty or not levels:
@@ -777,104 +785,75 @@ def _pivot_hierarchy(
         .rename(columns={"mt": "_tot"})
     )
 
+    def _ordered_leaves(prefix: list[str], depth: int) -> list[tuple[str, ...]]:
+        if depth >= len(levels):
+            return [tuple(prefix)]
+        level = levels[depth]
+        sub = combo
+        for lv, val in zip(levels[:depth], prefix):
+            sub = sub[sub[lv] == val]
+        if sub.empty:
+            return []
+        totals = sub.groupby(level)["_tot"].sum()
+        out: list[tuple[str, ...]] = []
+        for name in _level_name_order(level, list(totals.index), totals.to_dict()):
+            out.extend(_ordered_leaves(prefix + [name], depth + 1))
+        return out
+
+    leaves = _ordered_leaves([], 0)
     rows_out: list[dict[str, Any]] = []
-    # Business units ordered like CATEGORY1_ORDER then by volume
-    bu_totals = combo.groupby("business_unit")["_tot"].sum()
-    bus = sorted(bu_totals.index, key=lambda b: _bu_order_key(str(b), float(bu_totals[b])))
 
-    for bu in bus:
-        bu_slice = combo[combo["business_unit"] == bu]
-        bu_first = True
-
-        if leaf == "packing_category":
-            packs = bu_slice.sort_values("_tot", ascending=False)
-            for _, crow in packs.iterrows():
-                pack = str(crow["packing_category"])
-                key = (str(bu), pack)
-                cells = _value_cells(
-                    grouped, levels, key, ordered_cols, month_mode=month_mode
-                )
-                entry: dict[str, Any] = {
-                    "business_unit": str(bu) if bu_first else "",
-                    "packing_category": pack,
-                    "row_kind": "leaf",
-                    **cells,
-                }
-                rows_out.append(entry)
-                bu_first = False
-        else:
-            # product leaf: group by packing within BU
-            pack_order = (
-                bu_slice.groupby("packing_category")["_tot"]
-                .sum()
-                .sort_values(ascending=False)
-            )
-            for pack in pack_order.index:
-                pack_s = str(pack)
-                pack_slice = bu_slice[bu_slice["packing_category"] == pack].sort_values(
-                    "_tot", ascending=False
-                )
-                pack_first = True
-                for _, crow in pack_slice.iterrows():
-                    product = str(crow["product"])
-                    key = (str(bu), pack_s, product)
-                    cells = _value_cells(
-                        grouped, levels, key, ordered_cols, month_mode=month_mode
-                    )
-                    entry = {
-                        "business_unit": str(bu) if bu_first else "",
-                        "packing_category": pack_s if pack_first else "",
-                        "product": product,
-                        "row_kind": "leaf",
-                        **cells,
-                    }
-                    rows_out.append(entry)
-                    bu_first = False
-                    pack_first = False
-                # Packing subtotal
-                pack_key_mask = (grouped["business_unit"] == bu) & (
-                    grouped["packing_category"] == pack_s
-                )
-                pack_cells: dict[str, float] = {}
-                for c in ordered_cols:
-                    pack_cells[str(c)] = float(
-                        grouped.loc[pack_key_mask & (grouped["__col"] == c), "mt"].sum()
-                    )
-                pack_tot = sum(pack_cells.values())
-                if month_mode:
-                    pack_cells["Average"] = pack_tot / max(len(ordered_cols), 1)
-                pack_cells["Total"] = pack_tot
-                rows_out.append(
-                    {
-                        "business_unit": "",
-                        "packing_category": f"{pack_s} Total",
-                        "product": "",
-                        "row_kind": "subtotal_packing",
-                        **{k: mt_round(v) for k, v in pack_cells.items()},
-                    }
-                )
-
-        # BU subtotal
-        bu_mask = grouped["business_unit"] == bu
-        bu_cells: dict[str, float] = {}
+    def _prefix_cells(prefix: tuple[str, ...]) -> dict[str, float]:
+        mask = pd.Series(True, index=grouped.index)
+        for lv, val in zip(levels, prefix):
+            mask &= grouped[lv] == val
+        cells: dict[str, float] = {}
         for c in ordered_cols:
-            bu_cells[str(c)] = float(
-                grouped.loc[bu_mask & (grouped["__col"] == c), "mt"].sum()
+            cells[str(c)] = float(
+                grouped.loc[mask & (grouped["__col"] == c), "mt"].sum()
             )
-        bu_tot = sum(bu_cells.values())
+        total = sum(cells.values())
         if month_mode:
-            bu_cells["Average"] = bu_tot / max(len(ordered_cols), 1)
-        bu_cells["Total"] = bu_tot
-        bu_entry: dict[str, Any] = {
-            "business_unit": f"{bu} Total",
-            "row_kind": "subtotal_business_unit",
-            **{k: mt_round(v) for k, v in bu_cells.items()},
-        }
-        for lv in levels[1:]:
-            bu_entry[lv] = ""
-        rows_out.append(bu_entry)
+            cells["Average"] = total / max(len(ordered_cols), 1)
+        cells["Total"] = total
+        return {k: mt_round(v) for k, v in cells.items()}
 
-    # Grand total footer
+    def _emit_subtotal(prev_key: tuple[str, ...], depth: int) -> None:
+        """Subtotal for levels[depth] group (not for the leaf level)."""
+        if depth >= len(levels) - 1:
+            return
+        prefix = prev_key[: depth + 1]
+        cells = _prefix_cells(prefix)
+        entry: dict[str, Any] = {lv: "" for lv in levels}
+        entry[levels[depth]] = f"{prefix[depth]} Total"
+        entry["row_kind"] = f"subtotal_{levels[depth]}"
+        entry.update(cells)
+        rows_out.append(entry)
+
+    for i, key in enumerate(leaves):
+        if i > 0:
+            prev = leaves[i - 1]
+            diff_d = next(
+                (d for d in range(len(levels)) if key[d] != prev[d]),
+                None,
+            )
+            if diff_d is not None:
+                for close_d in range(len(levels) - 2, diff_d - 1, -1):
+                    _emit_subtotal(prev, close_d)
+
+        cells = _value_cells(grouped, levels, key, ordered_cols, month_mode=month_mode)
+        entry = {lv: "" for lv in levels}
+        for d, lv in enumerate(levels):
+            show = i == 0 or key[: d + 1] != leaves[i - 1][: d + 1]
+            entry[lv] = key[d] if show else ""
+        entry["row_kind"] = "leaf"
+        entry.update(cells)
+        rows_out.append(entry)
+
+    if leaves:
+        for close_d in range(len(levels) - 2, -1, -1):
+            _emit_subtotal(leaves[-1], close_d)
+
     grand_cells: dict[str, float] = {}
     for c in ordered_cols:
         grand_cells[str(c)] = float(grouped.loc[grouped["__col"] == c, "mt"].sum())
@@ -904,9 +883,30 @@ def _pivot_hierarchy(
         "month_labels": month_labels,
         "markdown_hint": (
             f"Hierarchical MT: {' → '.join(levels)}; parent cells blank after first "
-            "row of each group; packing + Business Unit subtotals."
+            "row of each group; subtotals per parent group."
         ),
     }
+
+
+def _resolve_row_levels(
+    row_dim: str,
+    *,
+    row_groups: list[str] | None = None,
+) -> list[str]:
+    """Leading group dims + base hierarchy for the leaf row dimension."""
+    levels: list[str] = []
+    for g in row_groups or []:
+        g_n = normalize_row_dimension(g) or str(g).strip()
+        if g_n and g_n not in levels:
+            levels.append(g_n)
+    base = _ROW_HIERARCHY.get(row_dim)
+    if base:
+        for b in base:
+            if b not in levels:
+                levels.append(b)
+    elif row_dim and row_dim not in levels:
+        levels.append(row_dim)
+    return levels
 
 
 def _build_pivot(
@@ -915,16 +915,19 @@ def _build_pivot(
     col_dim: str,
     *,
     month_labels: list[str] | None = None,
+    row_groups: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Flat or hierarchical pivot depending on leaf row dimension."""
-    levels = _row_hierarchy(row_dim)
-    if levels and len(levels) > 1:
+    """Flat or hierarchical pivot depending on leaf row dimension / groups."""
+    levels = _resolve_row_levels(row_dim, row_groups=row_groups)
+    if len(levels) > 1:
         return _pivot_hierarchy(
             frame, levels, col_dim=col_dim, month_labels=month_labels
         )
+    # Single level — use classic flat pivots (city / client_type / BU alone)
+    leaf = levels[0] if levels else row_dim
     if month_labels is not None:
-        return _pivot_months(frame, row_dim, month_labels)
-    return _pivot_mt(frame, row_dim, col_dim)
+        return _pivot_months(frame, leaf, month_labels)
+    return _pivot_mt(frame, leaf, col_dim)
 
 
 def _ams_by_row(
@@ -1113,7 +1116,7 @@ def _is_matrix_leaf_row(row: dict[str, Any], row_key: str) -> bool:
 
 def _is_matrix_bold_row(row: dict[str, Any], row_key: str) -> bool:
     kind = str(row.get("row_kind") or "")
-    if kind in {"subtotal_packing", "subtotal_business_unit", "total"}:
+    if kind == "total" or kind.startswith("subtotal_"):
         return True
     return str(row.get(row_key) or "").strip().lower() == "total"
 
@@ -1281,6 +1284,9 @@ def query_sales(
     months_back: int = 6,
     mode: str = "matrix",
     row_dimension: str | None = None,
+    row_groups: list[str] | None = None,
+    clear_filters: list[str] | None = None,
+    lock_columns: bool = False,
     prior_spec: dict[str, Any] | None = None,
     compare: str | None = None,
 ) -> dict[str, Any]:
@@ -1293,7 +1299,12 @@ def query_sales(
       Oil Type set → Packing; Packing set → Product
 
     Explicit ``row_dimension`` (follow-ups): business_unit | oil_type |
-    packing_category | product — keeps prior filters/columns.
+    packing_category | product | city | client_type — keeps prior filters/columns.
+
+    ``row_groups``: optional leading group dims (e.g. city above packing).
+
+    ``clear_filters``: drop inherited filters when a follow-up promotes that
+    dimension to rows/columns (e.g. group by city clears city=Lahore).
 
     columns: client_type | city | month
       month → last ``months_back`` months as columns + Average
@@ -1301,7 +1312,7 @@ def query_sales(
     client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
 
     prior_spec: previous table_spec for follow-ups like "add Eva Bulk" /
-    "show by product" / "SKU wise".
+    "show by product" / "SKU wise" / "group by city".
 
     compare: ``yoy`` / ``same_period_last_year`` — same filters & grain vs
     the same calendar span one year earlier (partial months keep day range).
@@ -1323,6 +1334,16 @@ def query_sales(
     col = (columns or "client_type").strip().lower().replace(" ", "_")
     mb = int(months_back or 6)
     row_override = normalize_row_dimension(row_dimension)
+    groups: list[str] = []
+    for g in row_groups or []:
+        ng = normalize_row_dimension(g) or str(g).strip()
+        if ng and ng not in groups:
+            groups.append(ng)
+    clear = {
+        (normalize_row_dimension(c) or str(c).strip().lower().replace(" ", "_"))
+        for c in (clear_filters or [])
+        if c
+    }
 
     if prior_spec:
         # Carry forward dimensions; merge new business units
@@ -1330,19 +1351,25 @@ def query_sales(
         prior_units = list(prior_spec.get("business_units") or [])
         if prior_filters.get("business_unit") and prior_filters["business_unit"] not in prior_units:
             prior_units.append(prior_filters["business_unit"])
-        for u in prior_units:
-            nu = _normalize_business_unit(u)
-            if nu and nu not in units:
-                units.insert(0, nu)
-        if not city_f:
+        if "business_unit" not in clear:
+            for u in prior_units:
+                nu = _normalize_business_unit(u)
+                if nu and nu not in units:
+                    units.insert(0, nu)
+        if not city_f and "city" not in clear:
             city_f = prior_filters.get("city")
-        if not oil:
+        if not oil and "oil_type" not in clear:
             oil = prior_filters.get("oil_type") or None
-        if not pack:
+        if not pack and "packing_category" not in clear:
             pack = prior_filters.get("packing_category") or None
-        if not ctype:
+        if not ctype and "client_type" not in clear:
             ctype = prior_filters.get("client_type") or None
-        if col in {"client_type", "auto", ""} and prior_spec.get("column_dimension"):
+        # Explicit columns from regroup / caller win over prior default
+        if (
+            not lock_columns
+            and col in {"client_type", "auto", ""}
+            and prior_spec.get("column_dimension")
+        ):
             col = str(prior_spec["column_dimension"])
         if prior_spec.get("months_back"):
             mb = int(prior_spec["months_back"])
@@ -1351,12 +1378,28 @@ def query_sales(
         if not period and not date_from and prior_spec.get("period"):
             date_from = (prior_spec["period"] or {}).get("date_from")
             date_to = (prior_spec["period"] or {}).get("date_to")
+        if not groups and prior_spec.get("row_groups"):
+            for g in prior_spec.get("row_groups") or []:
+                ng = normalize_row_dimension(g) or str(g).strip()
+                if ng and ng not in groups:
+                    groups.append(ng)
         if not row_override and prior_spec.get("row_dimension"):
             # Keep prior row dim only when caller did not request a new one —
             # follow-ups that only add a BU should preserve rows; drill-downs
             # pass an explicit override.
             pass
 
+    # Apply clears after inherit (regroup promoted a filter to a dimension)
+    if "city" in clear:
+        city_f = None
+    if "client_type" in clear:
+        ctype = None
+    if "oil_type" in clear:
+        oil = None
+    if "packing_category" in clear:
+        pack = None
+    if "business_unit" in clear:
+        units = []
     if col in {"client", "clients", "clienttype", "type"}:
         col = "client_type"
     if col in {"cities"}:
@@ -1424,9 +1467,11 @@ def query_sales(
     )
 
     if col == "month":
-        primary = _build_pivot(frame, row_dim, "month", month_labels=labels)
+        primary = _build_pivot(
+            frame, row_dim, "month", month_labels=labels, row_groups=groups or None
+        )
     else:
-        primary = _build_pivot(frame, row_dim, col)
+        primary = _build_pivot(frame, row_dim, col, row_groups=groups or None)
 
     mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"auto", "default"}:
@@ -1468,6 +1513,7 @@ def query_sales(
         "business_units": units,
         "column_dimension": col,
         "row_dimension": row_dim,
+        "row_groups": groups or None,
         "months_back": mb if col == "month" else None,
         "compare": "yoy" if want_yoy else None,
     }
@@ -1498,12 +1544,18 @@ def query_sales(
         )
         if col == "month":
             # Collapse to row totals vs prior-year same span (not month columns)
-            prior_primary = _build_pivot(prior_frame, row_dim, "client_type")
+            prior_primary = _build_pivot(
+                prior_frame, row_dim, "client_type", row_groups=groups or None
+            )
             # Rebuild current as client_type for apples-to-apples when month was requested
-            current_cmp = _build_pivot(frame, row_dim, "client_type")
+            current_cmp = _build_pivot(
+                frame, row_dim, "client_type", row_groups=groups or None
+            )
             col_cmp = "client_type"
         else:
-            prior_primary = _build_pivot(prior_frame, row_dim, col)
+            prior_primary = _build_pivot(
+                prior_frame, row_dim, col, row_groups=groups or None
+            )
             current_cmp = primary
             col_cmp = col
 

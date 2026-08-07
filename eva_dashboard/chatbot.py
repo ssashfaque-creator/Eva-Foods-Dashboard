@@ -34,6 +34,7 @@ from eva_dashboard.product_language import (
 )
 from eva_dashboard.sales_query import (
     check_segment_inclusion,
+    normalize_row_dimension,
     query_price,
     query_sales,
 )
@@ -277,6 +278,12 @@ Examples:
       table (included slice OR excluded sales). Then user may say:
   "Combine the tables" / "add bulk sales" / "include bulk"
     → merge prior BUs + Eva Bulk into one table (prior_spec)
+  "Can you show city wise?" / "group by city" (follow-up)
+    → promote City to the first row column (Y). If prior was month-wise,
+      keep months as columns (X). Clears a single-city filter so all cities appear.
+      Nest prior packing/SKU/BU under City when those were the prior rows.
+  "Group by client type" / "business unit wise" / "as columns by city"
+    → same idea; 'as columns' puts the dim on X instead of Y
   "How were Eva Consumer sales in July?"
     → analytical (city + client + AMS); rows = Packing Category
   "What's the Average sale for Imtiaz store last 6 months"
@@ -318,6 +325,8 @@ MODE FROM LANGUAGE:
 - how were / how are / evaluate / assess / performance / doing / trend → analytical
 - add / also include / plus / combine tables / include bulk → merge via prior_spec
 - does this include bulk? → inclusion check (Bulk table for same filters)
+- city wise / group by city|client type|BU|product → regroup prior table
+  (default: dim on rows/Y; month stays on columns/X; 'as columns' → dim on X)
 - show by product / product category / packing → rows = Packing Category (keep prior)
 - dissect further / SKU / sku-wise → rows = Product SKU (keep prior)
 - Messages starting with [FOLLOW-UP …] are replies to the previous answer —
@@ -1248,10 +1257,12 @@ def _looks_table_followup(text: str) -> bool:
         return True
     if _looks_combine_tables(t):
         return True
+    if _looks_regroup(t):
+        return True
     if _looks_row_drilldown(t):
         return True
     if _is_explicit_followup(t) and re.search(
-        r"\b(add|include|combine|merge|bulk|consumer)\b", t
+        r"\b(add|include|combine|merge|bulk|consumer|group|city|wise)\b", t
     ):
         return True
     return False
@@ -1353,6 +1364,173 @@ def _looks_row_drilldown(text: str) -> bool:
         or re.search(r"\b(further|deeper)\b.+\b(break|split|dissect|detail)", t)
         or re.search(r"\b(break|split|dissect)\b.+\b(further|deeper|sku|product)", t)
     )
+
+
+def _looks_regroup(text: str) -> bool:
+    """True for 'city wise' / 'group by client type' follow-ups."""
+    return resolve_regroup_request(text, prior_spec={"column_dimension": "_"}) is not None
+
+
+def extract_regroup_dimension(text: str) -> str | None:
+    """Which dimension the user wants to group by (city, client_type, …)."""
+    t = (text or "").lower()
+    patterns: list[tuple[str, str]] = [
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
+            r"organise\s+by|organize\s+by)\s+(cities|city)\b",
+            "city",
+        ),
+        (r"\b(city[- ]?wise|by\s+city|cities\s+wise|show\s+city\s+wise)\b", "city"),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+"
+            r"client\s*types?\b",
+            "client_type",
+        ),
+        (
+            r"\b(client[- ]?type[- ]?wise|by\s+client\s*types?)\b",
+            "client_type",
+        ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+"
+            r"(business\s*units?|bu)\b",
+            "business_unit",
+        ),
+        (
+            r"\b(business\s*unit[- ]?wise|bu[- ]?wise|by\s+business\s*units?|by\s+bu)\b",
+            "business_unit",
+        ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+packings?\b",
+            "packing_category",
+        ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+products?\b",
+            "packing_category",
+        ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+skus?\b",
+            "product",
+        ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+oil\s*types?\b",
+            "oil_type",
+        ),
+        (
+            r"\b(as|into)\s+columns?\s+(by\s+)?(cities|city)\b",
+            "city",
+        ),
+        (
+            r"\b(as|into)\s+columns?\s+(by\s+)?client\s*types?\b",
+            "client_type",
+        ),
+        (
+            r"\b(as|into)\s+columns?\s+(by\s+)?(business\s*units?|bu)\b",
+            "business_unit",
+        ),
+    ]
+    for pat, dim in patterns:
+        if re.search(pat, t):
+            return dim
+    return None
+
+
+def resolve_regroup_request(
+    text: str,
+    *,
+    prior_spec: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Map 'city wise' / 'group by X' to row vs column changes on the prior table.
+
+    Heuristics:
+    - Month columns stay on X (columns) unless the user asks for month-wise columns.
+    - 'group by X' / 'X wise' → X becomes the first row column (Y) by default.
+    - Explicit 'as columns' → X becomes column dimension.
+    - If X was a filter (e.g. city=Lahore), clear that filter so values can vary.
+    - When prior rows were packing/SKU/BU, nest them under the new group.
+    """
+    if not prior_spec:
+        return None
+    dim = extract_regroup_dimension(text)
+    if not dim:
+        return None
+
+    t = (text or "").lower()
+    prior_col = str(prior_spec.get("column_dimension") or "client_type")
+    prior_row = normalize_row_dimension(prior_spec.get("row_dimension")) or prior_spec.get(
+        "row_dimension"
+    )
+    pf = dict(prior_spec.get("filters") or {})
+
+    explicit_col = bool(
+        re.search(
+            r"\b(as columns?|across columns?|columns? by|on (the )?columns?|"
+            r"x[ -]?axis|into columns?)\b",
+            t,
+        )
+    )
+    explicit_row = bool(
+        re.search(
+            r"\b(as rows?|first column|on (the )?rows?|y[ -]?axis|row[- ]?wise)\b",
+            t,
+        )
+    )
+
+    if explicit_col:
+        axis = "column"
+    elif explicit_row:
+        axis = "row"
+    elif prior_col == "month":
+        # Keep the time series on X; put the new group on Y
+        axis = "row"
+    elif dim == prior_col:
+        # Already on columns — move to first row column
+        axis = "row"
+    else:
+        axis = "row"
+
+    clear: list[str] = []
+    if dim == "city" and pf.get("city"):
+        clear.append("city")
+    if dim == "client_type" and pf.get("client_type"):
+        clear.append("client_type")
+    if dim == "oil_type" and pf.get("oil_type"):
+        clear.append("oil_type")
+    if dim == "packing_category" and pf.get("packing_category"):
+        clear.append("packing_category")
+    if dim == "business_unit" and (
+        pf.get("business_unit") or prior_spec.get("business_units")
+    ):
+        clear.append("business_unit")
+
+    out: dict[str, Any] = {
+        "axis": axis,
+        "dimension": dim,
+        "clear_filters": clear,
+    }
+
+    nestable = {"packing_category", "product", "business_unit", "oil_type"}
+    if axis == "row":
+        if (
+            prior_row
+            and prior_row != dim
+            and prior_row in nestable
+            and dim in {"city", "client_type", "business_unit"}
+        ):
+            out["row_dimension"] = prior_row
+            out["row_groups"] = [dim]
+        else:
+            out["row_dimension"] = dim
+            out["row_groups"] = []
+        if prior_col == dim:
+            out["columns"] = "client_type" if dim != "client_type" else "city"
+        else:
+            out["columns"] = prior_col
+    else:
+        out["columns"] = dim
+        out["row_dimension"] = prior_row if prior_row and prior_row != dim else None
+        out["row_groups"] = list(prior_spec.get("row_groups") or [])
+
+    return out
 
 
 def resolve_row_dimension_request(
@@ -1467,12 +1645,14 @@ def _looks_context_followup(text: str) -> bool:
             r"in this|from this|in that|from that|this table|that table|"
             r"above|these sales|those sales|in the above|from the above|"
             r"same (period|filters?|scope|table)|for this|"
-            r"combine the tables|merge the tables|add bulk|include bulk"
+            r"combine the tables|merge the tables|add bulk|include bulk|"
+            r"city[- ]?wise|group by|as columns"
             r")\b",
             t,
         )
         or _looks_include_check(t)
         or _looks_combine_tables(t)
+        or _looks_regroup(t)
     )
 
 
@@ -1857,19 +2037,46 @@ def _dispatch_tool(
             units.append(arguments["business_unit"])
 
         prior_row = (prior_spec or {}).get("row_dimension") if prior_spec else None
-        row_dim = arguments.get("row_dimension") or resolve_row_dimension_request(
-            user_text, prior_row_dimension=prior_row
+        regroup = (
+            resolve_regroup_request(user_text, prior_spec=prior_spec)
+            if prior_spec
+            else None
         )
-        is_drill = bool(row_dim) or _looks_row_drilldown(user_text)
+        # Prefer regroup over packing/SKU drill language when both could match
+        row_dim = arguments.get("row_dimension")
+        row_groups: list[str] | None = None
+        clear_filters: list[str] | None = None
+        lock_columns = False
+        if regroup:
+            row_dim = regroup.get("row_dimension")
+            row_groups = list(regroup.get("row_groups") or []) or None
+            clear_filters = list(regroup.get("clear_filters") or []) or None
+            columns = str(regroup.get("columns") or columns)
+            lock_columns = True
+            mode = "matrix"
+        else:
+            row_dim = row_dim or resolve_row_dimension_request(
+                user_text, prior_row_dimension=prior_row
+            )
+        is_drill = (not regroup) and (
+            bool(row_dim) or _looks_row_drilldown(user_text)
+        )
+        is_regroup = bool(regroup)
 
         # Follow-up: merge mentioned BUs / keep prior table / change row grain / YoY
         is_yoy = _looks_sales_yoy_compare(user_text)
         is_combine = _looks_combine_tables(user_text) or _looks_table_followup(user_text)
         use_prior = prior_spec if (
-            (is_combine or is_drill or is_yoy or _is_explicit_followup(user_text))
+            (
+                is_combine
+                or is_drill
+                or is_yoy
+                or is_regroup
+                or _is_explicit_followup(user_text)
+            )
             and prior_spec
         ) else None
-        if use_prior or is_combine or is_drill or is_yoy:
+        if use_prior or is_combine or is_drill or is_yoy or is_regroup:
             for u in _extract_business_units_from_text(user_text):
                 if u not in units:
                     units.append(u)
@@ -1877,7 +2084,7 @@ def _dispatch_tool(
                 if u not in units:
                     units.append(u)
             # Combine after include_check: restore original prior units + segment
-            if prior_spec and (prior_spec.get("include_check") or is_combine):
+            if prior_spec and (prior_spec.get("include_check") or is_combine) and not is_regroup:
                 ic = prior_spec.get("include_check") or {}
                 base = ic.get("prior_spec") or prior_spec
                 for u in _prior_units_list(base):
@@ -1891,7 +2098,11 @@ def _dispatch_tool(
                     use_prior = ic["prior_spec"]
             if prior_spec and not use_prior:
                 use_prior = prior_spec
-            if use_prior and use_prior.get("column_dimension") == "month":
+            if (
+                use_prior
+                and use_prior.get("column_dimension") == "month"
+                and not lock_columns
+            ):
                 columns = "month"
                 months_back = int(use_prior.get("months_back") or months_back)
 
@@ -1907,6 +2118,7 @@ def _dispatch_tool(
         ctype = normalize_client_type(ctype) if ctype else None
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
+        city_arg = arguments.get("city")
 
         # YoY of "these sales": do not invent a client type (e.g. Eva Distributors)
         if is_yoy and use_prior:
@@ -1927,7 +2139,16 @@ def _dispatch_tool(
             # Drill-downs keep prior BU filters via prior_spec, not model args
             if is_drill and use_prior and not mentioned_units:
                 uniq = []
-            elif ctype and not mentioned_units and not is_combine:
+            elif ctype and not mentioned_units and not is_combine and not is_regroup:
+                uniq = []
+
+        # Regroup: do not invent city/client from this short follow-up text
+        if is_regroup:
+            city_arg = None
+            if not extract_client_type_from_text(user_text):
+                ctype = None
+            if not _extract_business_units_from_text(user_text):
+                # Keep prior BUs via prior_spec unless clearing business_unit
                 uniq = []
 
         if len(uniq) == 1:
@@ -1941,14 +2162,14 @@ def _dispatch_tool(
             bus_param = None
 
         # Preserve prior column grain on YoY follow-up
-        if is_yoy and use_prior and use_prior.get("column_dimension"):
+        if is_yoy and use_prior and use_prior.get("column_dimension") and not lock_columns:
             columns = str(use_prior["column_dimension"])
 
         return query_sales(
             period=arguments.get("period"),
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
-            city=arguments.get("city"),
+            city=city_arg,
             business_unit=bu_param,
             business_units=bus_param,
             oil_type=oil,
@@ -1958,6 +2179,9 @@ def _dispatch_tool(
             months_back=months_back,
             mode=mode,
             row_dimension=row_dim,
+            row_groups=row_groups,
+            clear_filters=clear_filters,
+            lock_columns=lock_columns,
             prior_spec=use_prior or arguments.get("prior_spec"),
             compare="yoy" if is_yoy else (arguments.get("compare") or None),
         )
@@ -2238,7 +2462,7 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if _looks_include_check(last_user) or _looks_combine_tables(last_user):
+            if _looks_include_check(last_user) or _looks_combine_tables(last_user) or _looks_regroup(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "query_sales"},

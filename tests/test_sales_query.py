@@ -661,7 +661,7 @@ def test_hierarchical_packing_and_sku_tables() -> None:
                 "packing_category",
                 "product",
             ]
-            assert any(r.get("row_kind") == "subtotal_packing" for r in sm["rows"])
+            assert any(r.get("row_kind") == "subtotal_packing_category" for r in sm["rows"])
             assert any(
                 r.get("row_kind") == "subtotal_business_unit" for r in sm["rows"]
             )
@@ -672,6 +672,85 @@ def test_hierarchical_packing_and_sku_tables() -> None:
             smd = sku["answer_markdown"]
             assert "| SKU |" in smd or "SKU |" in smd
             assert "Total" in smd
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_regroup_city_wise_and_month_group_by_city() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool, resolve_regroup_request
+
+            first = _dispatch_tool(
+                "query_sales",
+                {
+                    "period": "July",
+                    "city": "Lahore",
+                    "business_unit": "Eva Consumer",
+                },
+                user_text="What were Eva Consumer sales in Lahore in July?",
+            )
+            assert first["ok"] is True
+            assert first["filters"]["city"] == "Lahore"
+            prior = first["table_spec"]
+
+            plan = resolve_regroup_request(
+                "can you show city wise?", prior_spec=prior
+            )
+            assert plan is not None
+            assert plan["dimension"] == "city"
+            assert plan["axis"] == "row"
+            assert "city" in plan["clear_filters"]
+
+            cityish = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="can you show city wise?",
+                prior_spec=prior,
+            )
+            assert cityish["ok"] is True
+            assert cityish["filters"]["city"] is None  # filter lifted
+            assert cityish["filters"]["business_unit"] == "Eva Consumer"
+            headers = cityish["matrix"].get("row_headers") or [
+                cityish["row_dimension"]
+            ]
+            assert headers[0] == "city"
+
+            # Distributor month-wise then group by city (months stay on X)
+            months = _dispatch_tool(
+                "query_sales",
+                {
+                    "client_type": "Eva Distributors",
+                    "columns": "month",
+                    "months_back": 6,
+                },
+                user_text="Show me distributor sales for the last 6 months",
+            )
+            assert months["column_dimension"] == "month"
+            by_city = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="group by city",
+                prior_spec=months["table_spec"],
+            )
+            assert by_city["column_dimension"] == "month"
+            assert by_city["filters"]["client_type"] == "Eva Distributors"
+            hdr = by_city["matrix"].get("row_headers") or [by_city["row_dimension"]]
+            assert hdr[0] == "city"
+
+            # Explicit columns axis
+            as_cols = resolve_regroup_request(
+                "as columns by client type",
+                prior_spec=months["table_spec"],
+            )
+            assert as_cols["axis"] == "column"
+            assert as_cols["columns"] == "client_type"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
