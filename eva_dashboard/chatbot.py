@@ -232,13 +232,13 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.6):
+SPEED & TOOL RULES (v0.4.7):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
 3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
 4. Read-only. Paste tool `answer_markdown` tables verbatim.
-5. Write ### Analysis yourself only for performance / YoY / compare / "analyze" asks;
-   simple "show me" tables may keep the tool's short Analysis.
+5. ### Analysis is written by you from the tool table (quality commercial insight) —
+   never invent numbers; never paste generic canned filler.
 
 DATA MODEL (filters you set; tools build tables):
 - Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
@@ -269,8 +269,8 @@ DEFAULTS (tools also enforce these):
 
 RESPONSE FORMAT:
 - Start with the tool's `answer_markdown` tables verbatim (keep column order).
-- For performance / YoY / compare / analyze asks: add ### Analysis with 2–4 short
-  bullets (leaders/laggards, AMS/trend) using ONLY tool numbers — never invent totals.
+- Then ### Analysis: 3–5 short commercial bullets grounded only in that table
+  (leaders/gaps, MoM vs AMS, concentration, soft spots). Fresh each time.
 - No metric bullet lists outside ### Analysis.
 
 === PRODUCT LANGUAGE (abbrev) ===
@@ -317,57 +317,47 @@ def _extract_analysis_bullets(text: str) -> str:
 
 
 def _compose_tables_plus_analysis(tool_md: str, model_reply: str) -> str:
-    """Deterministic tables + GPT analysis; fall back to tool auto-insights."""
+    """Deterministic tables + GPT analysis; omit canned tool bullets when AI writes."""
     tables = _strip_analysis_section(tool_md).rstrip()
     model_analysis = _extract_analysis_bullets(model_reply)
     if model_analysis:
         return f"{tables}\n\n### Analysis\n{model_analysis}\n"
-    tool_analysis = _extract_analysis_bullets(tool_md)
-    if tool_analysis:
-        return f"{tables}\n\n### Analysis\n{tool_analysis}\n"
+    # Last resort only — prefer no Analysis over repeating weak canned lines
     return tables + "\n"
 
 
 def _wants_gpt_analysis(user_text: str, *, result_mode: str | None = None) -> bool:
-    """Extra model turn only when narrative interpretation is worth the latency.
+    """Use a lean AI analysis turn after structured table tools.
 
-    Simple "show me X sales" keeps the tool's instant Analysis (fast path).
+    Always True for normal data answers — canned tool bullets are not the product.
     """
-    t = (user_text or "").lower()
-    mode = (result_mode or "").lower()
-    if mode in {"analytical", "yoy", "analysis", "how_are", "performance"}:
-        return True
-    if _looks_analytical(t) or _looks_sales_yoy_compare(t):
-        return True
-    if looks_advanced(t):
-        return True
-    if re.search(
-        r"\b("
-        r"analy[sz]e|analysis|insight|insights|explain|why|"
-        r"interpret|commentary|deep dive|deep-dive"
-        r")\b",
-        t,
-    ):
-        return True
-    return False
+    del user_text, result_mode  # signature kept for callers
+    return True
 
 
 _ANALYSIS_RESPONSE_INSTRUCTIONS = (
     "Paste answer_markdown TABLES verbatim at the start of your reply "
-    "(do not rebuild or change numbers). Then add ### Analysis with 2-4 short "
-    "bullets interpreting the figures (leaders/laggards, AMS/trend, what changed). "
-    "Use ONLY numbers present in the tool result — never invent totals."
+    "(do not rebuild or change numbers). Then add ### Analysis with 3-5 short "
+    "bullets of quality insight from THIS table only."
 )
 
 _FAST_RESPONSE_INSTRUCTIONS = (
-    "Use answer_markdown verbatim as the reply (tables + any Analysis already included)."
+    "Use answer_markdown tables verbatim; Analysis will be written in a follow-up turn."
 )
 
 _ANALYSIS_ONLY_SYSTEM = (
-    "You are finishing an Eva Foods data answer. The tool already built the tables. "
-    "Reply with ONLY a ### Analysis section: 2-4 short bullets grounded in those "
-    "numbers (leaders/laggards, AMS/trend, what changed). Do not rebuild tables. "
-    "Never invent totals that are not in the tool result."
+    "You are Eva Foods' commercial analyst. The database tool already built the "
+    "tables — do NOT rebuild or invent numbers.\n"
+    "Reply with ONLY a ### Analysis section: 3-5 sharp bullets grounded in the "
+    "table you are given.\n"
+    "Cover what matters for this view, for example:\n"
+    "- Who/what leads and by how much (share or gap)\n"
+    "- Month-to-month or recent trend vs AMS when those columns exist\n"
+    "- Mix concentration / risk (one line or city dominating)\n"
+    "- Soft spots (zeros, declines, below AMS) worth acting on\n"
+    "Write fresh insight for THIS table — never generic filler like "
+    "'Tin is the lead line' unless that is the real story with figures.\n"
+    "Use only numbers visible in the tool tables."
 )
 
 
@@ -1583,7 +1573,38 @@ def _extract_remove_phrase(text: str) -> str | None:
         phrase,
         flags=re.IGNORECASE,
     ).strip()
+    # Strip trailing filler like "items" / "rows" after the value list
+    phrase = re.sub(
+        r"\s+(items?|rows?|lines?|entries)\s*$",
+        "",
+        phrase,
+        flags=re.IGNORECASE,
+    ).strip()
     return phrase or None
+
+
+def _split_remove_value_phrases(phrase: str) -> list[str]:
+    """Split 'A and B and C' / 'A, B, and C' into separate exclude phrases."""
+    raw = (phrase or "").strip()
+    if not raw:
+        return []
+    # Prefer known multi-word business units before naive splitting
+    found_units = _extract_business_units_from_text(raw)
+    if len(found_units) >= 2:
+        return found_units
+    parts = re.split(r"\s*,\s*|\s+and\s+|\s*&\s*", raw, flags=re.IGNORECASE)
+    out: list[str] = []
+    for p in parts:
+        cleaned = re.sub(r"\s+", " ", p).strip(" .,!?")
+        cleaned = re.sub(
+            r"\s+(items?|rows?|lines?|entries)\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        if cleaned:
+            out.append(cleaned)
+    return out or ([raw] if raw else [])
 
 
 def _phrase_as_struct_dim(phrase: str) -> str | None:
@@ -1722,21 +1743,41 @@ def resolve_remove_request(
                 out["columns"] = "client_type"
         return out
 
-    # --- Value exclusion (filter out row/column values) ---
-    resolved = _resolve_exclude_value(phrase)
-    if not resolved:
+    # --- Value exclusion (filter out row/column values; support multi-value) ---
+    excludes: dict[str, list[str]] = {}
+    for part in _split_remove_value_phrases(phrase):
+        resolved = _resolve_exclude_value(part)
+        if not resolved:
+            continue
+        ex_dim, ex_val = resolved
+        bucket = excludes.setdefault(ex_dim, [])
+        if ex_val not in bucket:
+            bucket.append(ex_val)
+    if not excludes:
         return None
-    ex_dim, ex_val = resolved
+    # Also drop excluded BUs from an active multi-BU filter list
+    clear: list[str] = []
+    prior_units = [
+        str(u)
+        for u in (prior_spec.get("business_units") or [])
+        if u
+    ]
+    pf_bu = (prior_spec.get("filters") or {}).get("business_unit")
+    if pf_bu and pf_bu not in prior_units:
+        prior_units.append(str(pf_bu))
+    drop_bus = set(excludes.get("business_unit") or [])
+    keep_units = [u for u in prior_units if u not in drop_bus]
     out = {
         "mode": "exclude_value",
-        "dimension": ex_dim,
-        "value": ex_val,
+        "dimension": next(iter(excludes)),
+        "value": (excludes[next(iter(excludes))] or [None])[0],
         "columns": struct["column_dimension"],
         "row_dimension": struct["row_dimension"],
         "row_groups": list(struct["row_groups"]),
-        "clear_filters": [],
-        "excludes": {ex_dim: [ex_val]},
+        "clear_filters": clear,
+        "excludes": excludes,
         "lock_columns": True,
+        "business_units": keep_units,
     }
     return out
 
@@ -2970,12 +3011,26 @@ def _dispatch_tool(
             and prior_spec
         ) else None
         if use_prior or is_combine or is_drill or is_yoy or is_regroup or is_remove:
-            for u in _extract_business_units_from_text(user_text):
-                if u not in units:
-                    units.append(u)
-            for u in _companion_business_units(user_text, prior_spec):
-                if u not in units:
-                    units.append(u)
+            # IMPORTANT: on remove/exclude, do NOT add named/companion BUs —
+            # that inverted "remove Maan Bulk" into filtering TO those units.
+            if not is_remove:
+                for u in _extract_business_units_from_text(user_text):
+                    if u not in units:
+                        units.append(u)
+                for u in _companion_business_units(user_text, prior_spec):
+                    if u not in units:
+                        units.append(u)
+            else:
+                # Keep prior BUs minus the excluded ones (from resolve_remove_request).
+                # Empty keep + excludes = show remaining BUs via exclude filter only.
+                if remove is not None and "business_units" in remove:
+                    units = list(remove.get("business_units") or [])
+                elif prior_spec:
+                    units = [
+                        u
+                        for u in _prior_units_list(prior_spec)
+                        if u not in set((excludes or {}).get("business_unit") or [])
+                    ]
             # Combine after include_check: restore original prior units + segment
             if (
                 prior_spec
@@ -3059,7 +3114,10 @@ def _dispatch_tool(
             city_arg = None
             if not extract_client_type_from_text(user_text):
                 ctype = None
-            if not _extract_business_units_from_text(user_text):
+            if is_remove:
+                # Units already set from remove keep-list / excludes above
+                pass
+            elif not _extract_business_units_from_text(user_text):
                 # Keep prior BUs via prior_spec unless clearing business_unit
                 uniq = []
 
@@ -4073,8 +4131,8 @@ def chat_completion(
                 analysis_resp = client.chat.completions.create(
                     model=model,
                     messages=analysis_messages,
-                    temperature=0.2,
-                    max_tokens=350,
+                    temperature=0.35,
+                    max_tokens=500,
                 )
                 model_reply = (
                     analysis_resp.choices[0].message.content or ""

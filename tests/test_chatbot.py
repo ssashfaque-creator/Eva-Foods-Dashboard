@@ -42,15 +42,13 @@ def test_looks_factual_detects_data_questions() -> None:
     assert not _looks_factual("Thanks!")
 
 
-def test_wants_gpt_analysis_skips_simple_show_me() -> None:
+def test_wants_gpt_analysis_for_table_answers() -> None:
     from eva_dashboard.chatbot import _wants_gpt_analysis
 
-    assert not _wants_gpt_analysis("Show me Lahore sales")
-    assert not _wants_gpt_analysis("Show me Imtiaz sales")
-    assert not _wants_gpt_analysis("Who are the distributors in Lahore?")
+    assert _wants_gpt_analysis("Show me Lahore sales")
+    assert _wants_gpt_analysis("Show me Imtiaz sales")
     assert _wants_gpt_analysis("How are Eva Consumer sales doing in Lahore?")
     assert _wants_gpt_analysis("Analyze these sales vs last year")
-    assert _wants_gpt_analysis("Show me Lahore sales", result_mode="analytical")
     assert _wants_gpt_analysis("Compare Lahore vs Karachi last month")
 
 
@@ -81,8 +79,10 @@ def test_compose_tables_plus_gpt_analysis() -> None:
     assert "Lahore is led by distributors" in composed
     assert "Canned insight" not in composed
 
+    # No AI analysis → keep tables only (do not resurface canned bullets)
     fallback = _compose_tables_plus_analysis(tool_md, "Thanks!")
-    assert "Canned insight from the tool." in fallback
+    assert "Canned insight from the tool." not in fallback
+    assert "eva-mtx" in fallback
 
 
 def test_system_prompt_includes_live_briefing() -> None:

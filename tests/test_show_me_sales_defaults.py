@@ -290,6 +290,50 @@ def test_wrong_tool_redirects_scoped_sales_to_month_ams() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_remove_multiple_business_units_not_inverted() -> None:
+    """'remove Maan… and Cusine King' must exclude them — not filter TO them."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import resolve_remove_request
+
+            first = _dispatch_tool(
+                "query_sales", {}, user_text="Show me distributor sales"
+            )
+            prior = first["table_spec"]
+            q = "remove maan consumer and maan bulk items and cuisine king"
+            plan = resolve_remove_request(q, prior_spec=prior)
+            assert plan is not None
+            assert set(plan["excludes"]["business_unit"]) == {
+                "Maan Consumer",
+                "Maan Bulk",
+                "Cusine King",
+            }
+
+            out = _dispatch_tool(
+                "query_sales", {}, user_text=q, prior_spec=prior
+            )
+            assert out.get("ok") is True
+            bus = set(out.get("business_units") or [])
+            # Must not be filtered TO the removed brands
+            assert "Maan Bulk" not in bus
+            assert "Maan Consumer" not in bus
+            assert "Cusine King" not in bus
+            excl = (out.get("excludes") or {}).get("business_unit") or []
+            assert "Maan Bulk" in excl and "Cusine King" in excl
+            # Remaining rows should not include removed BUs as leaf parents
+            md = out.get("answer_markdown") or ""
+            assert "Maan Bulk Total" not in md
+            assert "Cusine King Total" not in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_group_by_city_keeps_month_and_ams() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
