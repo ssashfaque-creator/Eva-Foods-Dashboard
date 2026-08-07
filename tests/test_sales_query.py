@@ -627,6 +627,85 @@ def test_include_bulk_short_phrase_combine() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_sku_hierarchy_rowspan_survives_packing_subtotals() -> None:
+    """BU rowspan must include packing subtotals or later packing groups shift left."""
+    from eva_dashboard.sales_query import _matrix_to_markdown, _rowspan_map
+    import re
+
+    headers = ["business_unit", "packing_category", "product"]
+    rows = [
+        {
+            "business_unit": "Eva Consumer",
+            "packing_category": "Stand up",
+            "product": "SKU A",
+            "row_kind": "leaf",
+            "Total": 10,
+        },
+        {
+            "business_unit": "",
+            "packing_category": "",
+            "product": "SKU B",
+            "row_kind": "leaf",
+            "Total": 5,
+        },
+        {
+            "business_unit": "",
+            "packing_category": "Stand up Total",
+            "product": "",
+            "row_kind": "subtotal_packing_category",
+            "Total": 15,
+        },
+        {
+            "business_unit": "",
+            "packing_category": "Pet bottle",
+            "product": "SKU C",
+            "row_kind": "leaf",
+            "Total": 3,
+        },
+        {
+            "business_unit": "",
+            "packing_category": "Pet bottle Total",
+            "product": "",
+            "row_kind": "subtotal_packing_category",
+            "Total": 3,
+        },
+        {
+            "business_unit": "Eva Consumer Total",
+            "packing_category": "",
+            "product": "",
+            "row_kind": "subtotal_business_unit",
+            "Total": 18,
+        },
+        {
+            "business_unit": "Total",
+            "packing_category": "",
+            "product": "",
+            "row_kind": "total",
+            "Total": 18,
+        },
+    ]
+    spans = _rowspan_map(rows, headers)
+    assert [s["business_unit"] for s in spans] == [5, 0, 0, 0, 0, 1, 1]
+    md = _matrix_to_markdown(
+        {
+            "hierarchical": True,
+            "row_headers": headers,
+            "columns": ["Total"],
+            "rows": rows,
+        },
+        "product",
+    )
+    body_rows = re.findall(r"<tbody>.*?</tbody>", md, flags=re.S)[0]
+    trs = re.findall(r"<tr[^>]*>(.*?)</tr>", body_rows, flags=re.S)
+    td_counts = [len(re.findall(r"<td", tr)) for tr in trs]
+    # Every body row must contribute the same logical width (4 cols):
+    # omitted cells are covered by rowspan from earlier rows.
+    assert td_counts[0] == 4  # BU+Pack+SKU+Total (BU/Pack start rowspan)
+    assert td_counts[3] == 3  # Pack+SKU+Total (BU covered by rowspan)
+    assert "Pet bottle" in trs[3]
+    assert "SKU C" in trs[3]
+
+
 def test_hierarchical_packing_and_sku_tables() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:

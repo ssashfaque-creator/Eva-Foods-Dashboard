@@ -252,6 +252,10 @@ def test_row_drilldown_bu_to_packing_to_sku() -> None:
             )
 
             assert resolve_row_dimension_request("show by product") == "packing_category"
+            assert resolve_row_dimension_request("can you show product wise") == (
+                "packing_category"
+            )
+            assert resolve_row_dimension_request("product-wise") == "packing_category"
             assert resolve_row_dimension_request(
                 "dissect further", prior_row_dimension="business_unit"
             ) == "packing_category"
@@ -259,6 +263,9 @@ def test_row_drilldown_bu_to_packing_to_sku() -> None:
                 "dissect further", prior_row_dimension="packing_category"
             ) == "product"
             assert resolve_row_dimension_request("SKU wise breakdown") == "product"
+            assert resolve_row_dimension_request("break it down further") == (
+                "packing_category"
+            )
 
             packing = _dispatch_tool(
                 "query_sales",
@@ -268,6 +275,15 @@ def test_row_drilldown_bu_to_packing_to_sku() -> None:
             )
             assert packing["ok"] is True
             assert packing["row_dimension"] == "packing_category"
+            # Model wrongly asking for SKU on "product wise" must stay packing
+            packing_wise = _dispatch_tool(
+                "query_sales",
+                {"row_dimension": "product"},
+                user_text="can you show product wise",
+                prior_spec=prior,
+            )
+            assert packing_wise["ok"] is True
+            assert packing_wise["row_dimension"] == "packing_category"
             assert packing["column_dimension"] == "month"
             assert packing["filters"]["client_type"] == "Imtiaz Store"
 

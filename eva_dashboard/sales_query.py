@@ -2434,29 +2434,42 @@ def _rowspan_map(
 ) -> list[dict[str, int]]:
     """rowspan per header cell; 0 means covered by a prior rowspan (omit <td>).
 
-    Subtotal/total rows break a span so parent merges never swallow summary rows.
+    Parent merges continue through *child* subtotals (e.g. Packing Total under
+    a Business Unit). Only a same-level / parent subtotal or grand total breaks
+    the span — otherwise later packing groups shift left in the HTML table.
     """
     n = len(rows)
     spans: list[dict[str, int]] = [{h: 1 for h in headers} for _ in range(n)]
+    header_depth = {h: d for d, h in enumerate(headers)}
 
-    def _summary(row: dict[str, Any]) -> bool:
+    def _summary_depth(row: dict[str, Any]) -> int | None:
+        """Depth of summary row in ``headers``, or -1 for grand total."""
         kind = str(row.get("row_kind") or "")
-        if kind == "total" or kind.startswith("subtotal_"):
-            return True
-        return False
+        if kind == "total":
+            return -1
+        if kind.startswith("subtotal_"):
+            lv = kind.replace("subtotal_", "", 1)
+            return header_depth.get(lv, 0)
+        return None
+
+    def _is_summary(row: dict[str, Any]) -> bool:
+        return _summary_depth(row) is not None
 
     for h in headers:
+        depth = header_depth[h]
         i = 0
         while i < n:
             cell = str(rows[i].get(h) or "").strip()
             if not cell:
                 # Empty summary cells stay as blank <td>; leaf empties are covered
-                spans[i][h] = 1 if _summary(rows[i]) else 0
+                spans[i][h] = 1 if _is_summary(rows[i]) else 0
                 i += 1
                 continue
             j = i + 1
             while j < n and not str(rows[j].get(h) or "").strip():
-                if _summary(rows[j]):
+                sd = _summary_depth(rows[j])
+                # Child subtotals (deeper than this header) stay inside the merge
+                if sd is not None and sd <= depth:
                     break
                 j += 1
             spans[i][h] = j - i

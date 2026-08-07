@@ -276,7 +276,9 @@ DEFAULTS (tools also enforce these):
   inheriting prior city / client type / period when this is a follow-up.
 - Matrix mode: what/show/breakdown/average → matrix; how/performance/doing/trend → analytical.
 - Row grain (query_sales): no BU → Business Unit; one BU → Packing Category (+ BU subtotal);
-  oil set → Packing; packing set → Product; "by product" → Packing; "by SKU" → Product.
+  oil set → Packing; packing set → Product SKU.
+  Spoken "product" / "product wise" / "by product" → Packing Category (never SKU).
+  Only "SKU" / "SKU wise" / "break it down further" (from packing) → individual SKU.
 - Columns: client_type | city | month. Tables include row + column totals.
 - [FOLLOW-UP …] / Reply: reuse that answer's filters via prior_spec (same grain unless asked
   to regroup, drill, remove, include/combine, list individuals, sold-to, or YoY-compare).
@@ -716,9 +718,9 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "Override rows: business_unit | oil_type | "
-                            "packing_category | product. Follow-ups: "
-                            "'show by product' → packing_category; "
-                            "'SKU wise' → product"
+                            "packing_category | product. Spoken product / "
+                            "product-wise / by product → packing_category. "
+                            "Only SKU wise / break down further → product."
                         ),
                         "enum": [
                             "business_unit",
@@ -1565,8 +1567,8 @@ def _looks_row_drilldown(text: str) -> bool:
             r"packing categor|by packing|show packing|"
             r"oil type|by oil|oil break|"
             r"dissect|drill\s*down|break( it)? down further|"
-            r"sku[- ]?wise|by sku|show by sku|sku break|"
-            r"product[- ]?wise|by sku|show skus?|"
+            r"sku[- ]?wise|by sku|show by sku|sku break|show skus?|"
+            r"product[- ]?wise|"
             r"by business unit|by bu\b|show by bu"
             r")\b",
             t,
@@ -2050,10 +2052,10 @@ def resolve_row_dimension_request(
     if not t:
         return None
 
-    # SKU / product line items (check before "by product" packing)
+    # SKU / individual line items only when user says SKU (or item-wise)
     if re.search(
         r"\b(sku[- ]?wise|by sku|show by sku|sku break|skus?\b|"
-        r"product[- ]?wise|item[- ]?wise|by items?)\b",
+        r"item[- ]?wise|by items?|show skus?)\b",
         t,
     ):
         return "product"
@@ -2062,11 +2064,11 @@ def resolve_row_dimension_request(
     if re.search(r"\b(oil types?|by oil|oil break\s*down|oil breakdown)\b", t):
         return "oil_type"
 
-    # Packing / "product category" / "show by product"
+    # Packing = spoken "product" (product wise / by product / product breakdown)
     if re.search(
         r"\b("
         r"show by product|product break\s*down|product breakdown|"
-        r"by product|product categor|"
+        r"product[- ]?wise|by product|product categor|"
         r"packing categor|by packing|show packing|pack(ing)? break"
         r")\b",
         t,
@@ -3417,9 +3419,15 @@ def _dispatch_tool(
             lock_columns = True
             mode = "matrix"
         else:
-            row_dim = row_dim or resolve_row_dimension_request(
+            asked_dim = resolve_row_dimension_request(
                 user_text, prior_row_dimension=prior_row
             )
+            # Spoken product/SKU/drill language wins over model-supplied grain
+            # ("product wise" must stay packing_category, not SKU).
+            if asked_dim:
+                row_dim = asked_dim
+            else:
+                row_dim = row_dim or None
         is_drill = (not remove and not regroup) and (
             bool(row_dim) or _looks_row_drilldown(user_text)
         )
