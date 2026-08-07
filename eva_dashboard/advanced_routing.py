@@ -251,10 +251,12 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
             r"(?:have |has )?(?:declined|dropped|fallen|decreased|grown|increased|grew)\b|"
             r"\b(?:sales|volume)\s+have\s+(?:declined|dropped|fallen|decreased|"
             r"grown|increased)\b|"
-            r"\b(?:customers?|distributors?|parties|clients?|products?|skus?|"
-            r"packing|oils?)\b.{0,40}"
+            r"\b(?:customers?|distributors?|parties|clients?|channels?|"
+            r"client\s*types?|products?|skus?|packing|oils?)\b.{0,40}"
             r"(?:that |which )?(?:have |has )?"
             r"(?:declined|dropped|fallen|decreased|grown|increased|grew)\b|"
+            r"\b(?:which\s+)?channels?\b.{0,40}"
+            r"(?:grew|grown|declined|dropped|increased|decreased)\b|"
             r"\bcustomers that have grown\b|"
             r"\bwhere sales have declined\b",
             t,
@@ -283,6 +285,9 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
             out["entity"] = "oil_type"
         elif re.search(r"\b(business units?|bus)\b", t):
             out["entity"] = "business_unit"
+        elif re.search(r"\b(channels?|client\s*types?)\b", t):
+            # Channel = Client Type (trade channel)
+            out["entity"] = "client_type"
         elif re.search(r"\bcities\b", t) and not out["city"]:
             out["entity"] = "city"
         else:

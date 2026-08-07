@@ -243,6 +243,8 @@ SPEED & TOOL RULES (v0.4.7):
 DATA MODEL (filters you set; tools build tables):
 - Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
 - Client hierarchy: Client Type → Party (named client). City = City-Filter on clients.
+- Channel = Client Type (trade channel). "Which channels grew/declined" → client_type
+  rows with Volume + AMS + % vs AMS (not packing, not party list).
 - Client-type aliases (set `client_type`, never invent a Business Unit for these):
   Imtiaz/store → Imtiaz Store; distributors → Eva Distributors; else exact live type
   (Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, LMT, …).
@@ -1843,11 +1845,12 @@ def extract_regroup_dimension(text: str) -> str | None:
         (r"\b(city[- ]?wise|by\s+city|cities\s+wise|show\s+city\s+wise)\b", "city"),
         (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+"
-            r"client\s*types?\b",
+            r"(client\s*types?|channels?)\b",
             "client_type",
         ),
         (
-            r"\b(client[- ]?type[- ]?wise|by\s+client\s*types?)\b",
+            r"\b(client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
+            r"by\s+channels?)\b",
             "client_type",
         ),
         (
@@ -1880,7 +1883,7 @@ def extract_regroup_dimension(text: str) -> str | None:
             "city",
         ),
         (
-            r"\b(as|into)\s+columns?\s+(by\s+)?client\s*types?\b",
+            r"\b(as|into)\s+columns?\s+(by\s+)?(client\s*types?|channels?)\b",
             "client_type",
         ),
         (
@@ -1892,6 +1895,31 @@ def extract_regroup_dimension(text: str) -> str | None:
         if re.search(pat, t):
             return dim
     return None
+
+
+def _looks_channel_language(text: str) -> bool:
+    """True when the user means trade channels (= client types)."""
+    t = (text or "").lower()
+    return bool(
+        re.search(r"\bchannels?\b|\btrade\s*channels?\b|\bclient\s*types?\b", t)
+    )
+
+
+def _looks_channel_growth_ask(text: str) -> bool:
+    """'Which channels grew / declined' → client_type Volume + AMS + %."""
+    if not _looks_channel_language(text):
+        return False
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"grew|grown|grow|growth|declined?|dropped|fallen|fell|"
+            r"increased?|decreased?|up|down|vs\s*ams|against ams|"
+            r"performance|doing"
+            r")\b",
+            t,
+        )
+    )
 
 
 def resolve_regroup_request(
@@ -2029,6 +2057,14 @@ def resolve_row_dimension_request(
     # Business Unit
     if re.search(r"\b(by business unit|by bu\b|show by bu|business unit break)\b", t):
         return "business_unit"
+
+    # Channels / client types as rows
+    if re.search(
+        r"\b(by\s+channels?|channel[- ]?wise|by\s+client\s*types?|"
+        r"client[- ]?type[- ]?wise|show\s+channels?)\b",
+        t,
+    ):
+        return "client_type"
 
     # Generic deepen: one step from prior grain
     if re.search(
@@ -2927,6 +2963,71 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
     return {"ok": False, "error": f"Unknown advanced mode: {mode}"}
 
 
+def _dispatch_channel_growth(
+    user_text: str,
+    *,
+    prior_spec: dict[str, Any] | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Client-type Volume + AMS + % for channel grew/declined asks."""
+    args = arguments or {}
+    pf = (prior_spec or {}).get("filters") or {}
+    mentioned = _extract_business_units_from_text(user_text)
+    prior_units = _prior_units_list(prior_spec) if prior_spec else []
+    units = mentioned or prior_units
+    period = (
+        args.get("period")
+        or _extract_period_phrase(user_text)
+        or (prior_spec or {}).get("period_phrase")
+    )
+    date_from = args.get("date_from")
+    date_to = args.get("date_to")
+    if not period and not date_from and prior_spec:
+        p = prior_spec.get("period") or {}
+        date_from = p.get("date_from")
+        date_to = p.get("date_to")
+    if not period and not date_from:
+        period = "this month"
+    city = (
+        args.get("city")
+        or extract_city_from_text(user_text)
+        or pf.get("city")
+    )
+    oil = (
+        args.get("oil_type")
+        or extract_oil_type_from_text(user_text)
+        or pf.get("oil_type")
+    )
+    pack = (
+        args.get("packing_category")
+        or extract_packing_from_text(user_text)
+        or pf.get("packing_category")
+    )
+    if len(units) == 1:
+        bu_param, bus_param = units[0], None
+    elif len(units) > 1:
+        bu_param, bus_param = None, units
+    else:
+        bu_param = pf.get("business_unit")
+        bus_param = None
+    return query_sales(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        city=city,
+        business_unit=bu_param,
+        business_units=bus_param,
+        oil_type=oil,
+        packing_category=pack,
+        client_type=None,
+        columns="city",
+        mode="trend",
+        row_dimension="client_type",
+        clear_filters=["client_type"],
+        prior_spec=None,
+    )
+
+
 def _dispatch_tool(
     name: str,
     arguments: dict[str, Any],
@@ -2936,6 +3037,12 @@ def _dispatch_tool(
     prior_price_spec: dict[str, Any] | None = None,
     prior_party_spec: dict[str, Any] | None = None,
 ) -> Any:
+    # Channels (= client types) grew / declined → lean Volume + AMS + %
+    if _looks_channel_growth_ask(user_text):
+        return _dispatch_channel_growth(
+            user_text, prior_spec=prior_spec, arguments=arguments
+        )
+
     # Named client/party sales (do NOT inherit prior city/client_type)
     if _looks_named_party_sales(user_text):
         pq = _extract_named_party_query(user_text) or user_text
@@ -3879,6 +3986,8 @@ def suggest_preferred_tool(
     if prior_party_spec and _looks_period_only_followup(text):
         kind = prior_party_spec.get("kind") or "list_clients"
         return "analyze_parties" if kind == "analyze_parties" else "list_clients"
+    if _looks_channel_growth_ask(text):
+        return "query_sales"
     if looks_advanced(text):
         return "advanced_query"
     if _looks_party_breakdown(text):
@@ -3932,6 +4041,10 @@ def resolve_forced_tool(
         kind = (prior_party_spec or {}).get("kind") or "list_clients"
         return "analyze_parties" if kind == "analyze_parties" else "list_clients"
 
+    # 2b) Channels grew/declined → client_type Volume + AMS + % (even on Reply)
+    if _looks_channel_growth_ask(text):
+        return "query_sales"
+
     # 3) Reply / pinned-table follow-ups that must stay on the sales table
     table_ops = (
         _looks_include_check(text)
@@ -3958,8 +4071,12 @@ def resolve_forced_tool(
 
     # 5) Explicit Reply follow-up with a pinned sales table, otherwise stay flexible
     if is_followup and has_table_prior and not has_party_prior:
-        # Mix / ranking follow-ups on a prior table → let model pick, but require tool
-        if _looks_party_mix_query(text) or _looks_party_analytics(text):
+        # Advanced / mix / ranking follow-ups → do not pin to query_sales
+        if (
+            looks_advanced(text)
+            or _looks_party_mix_query(text)
+            or _looks_party_analytics(text)
+        ):
             return "required"
         return "query_sales"
 

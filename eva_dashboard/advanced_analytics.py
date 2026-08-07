@@ -1555,6 +1555,12 @@ _ENTITY_DIMS = {
     "bu": "business_unit",
     "city": "city",
     "cities": "city",
+    "channel": "client_type",
+    "channels": "client_type",
+    "client_type": "client_type",
+    "client_types": "client_type",
+    "trade_channel": "client_type",
+    "trade_channels": "client_type",
     "client_type": "client_type",
 }
 
