@@ -248,6 +248,11 @@ DATA MODEL (filters you set; tools build tables):
 - Client-type aliases (set `client_type`, never invent a Business Unit for these):
   Imtiaz/store → Imtiaz Store; distributors → Eva Distributors; else exact live type
   (Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, LMT, …).
+- which/what/who + distributors|Imtiaz|stores → individual parties in that client type
+  (list_clients or analyze_parties). Inherit prior city/type/period.
+  Examples: "which distributor is selling Maan" → parties with BU Maan Consumer;
+  "what Imtiaz store sells the most VTF" → rank Imtiaz stores by VTF volume;
+  "what distributors are active in Lahore" → list_clients Lahore + Eva Distributors.
 - Named party / "who is X?" → lookup_party (not a client-type filter).
 - "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
 
@@ -2477,6 +2482,10 @@ def _party_filters_from_prior(
         or _looks_party_breakdown(user_text)
         or _looks_period_only_followup(user_text)
         or _looks_party_mix_query(user_text)
+        or _looks_which_parties_ask(user_text)
+        or _looks_sold_to_parties(user_text)
+        or _looks_party_analytics(user_text)
+        or _looks_client_list(user_text)
     ):
         return {}
     pf = prior_spec.get("filters") or {}
@@ -2519,9 +2528,91 @@ def _looks_sold_to_parties(text: str) -> bool:
             r"which\s+(distributors?|parties|clients?|customers?)\s+"
             r"(was|were|did|bought|purchased|take|took)|"
             r"(was|were)\s+(the\s+)?.{0,40}\s+sold\s+to|"
+            r"(is|are)\s+selling\b|"
+            r"\bselling\b.+\b(maan|eva|cusine|cuisine|consumer|bulk)\b|"
             r"buyers?\s+(of|for)|"
             r"who\s+(are|were)\s+the\s+(buyers?|distributors?|parties)\s+"
             r"(of|for|that\s+bought)"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_which_parties_ask(text: str) -> bool:
+    """which/what + distributors|Imtiaz|stores → identify individual parties.
+
+    Covers selling-BU / sells-most / active-in asks. Defers AMS rankings,
+    growth filters, and other advanced party analytics.
+    """
+    t = (text or "").lower()
+    if _looks_channel_growth_ask(t) or looks_advanced(text):
+        return False
+    # Plain "distributor sales" matrix (not "is selling …")
+    if re.search(r"\b(distributors?|imtiaz)\s+sales\b", t) and not re.search(
+        r"\b(selling|sells)\b", t
+    ):
+        return False
+    if re.search(r"\bchannels?\b", t) and not re.search(
+        r"\b(distributors?|imtiaz|stores?|parties)\b", t
+    ):
+        return False
+    # Leave AMS / growth / share rankings to analyze_parties heuristics
+    if re.search(
+        r"\b("
+        r"ams|vs\s*ams|against ams|falling behind|behind on|underperform|"
+        r"grew|growth|yoy|year over year|share of|percent|% of|"
+        r"new\s+(parties|clients|distributors)|lost\s+(parties|clients)|"
+        r"silent|not ordered|days since|invoice frequency"
+        r")\b",
+        t,
+    ):
+        return False
+
+    has_type = bool(
+        re.search(
+            r"\b(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?|"
+            r"customers?)\b",
+            t,
+        )
+    )
+    if not has_type:
+        return False
+
+    identify = bool(
+        re.search(
+            r"\b("
+            r"selling|sells|sold|active|bought|buyers?|"
+            r"sells?\s+the\s+most|who\s+sells|"
+            r"who\s+are|who\s+were"
+            r")\b",
+            t,
+        )
+    )
+    which_type = bool(
+        re.search(
+            r"\b(which|what|who)\s+(are\s+|were\s+|is\s+|the\s+)*"
+            r"(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?|"
+            r"customers?)\b",
+            t,
+        )
+        or re.search(
+            r"\b(which|what|who)\b.{0,48}\b"
+            r"(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?)\b",
+            t,
+        )
+    )
+    return bool(identify and (which_type or re.search(r"\b(selling|sells|active)\b", t)))
+
+
+def _looks_party_rank_ask(text: str) -> bool:
+    """Rank individuals (sells the most / top / highest)."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"most|top\s+\d*|highest|best|rank|largest|biggest|"
+            r"sells?\s+the\s+most|highest\s+(sale|volume|mt|vtf)"
             r")\b",
             t,
         )
@@ -2732,6 +2823,14 @@ def _extract_business_units_from_text(text: str) -> list[str]:
     for needle, label in informal:
         if needle in lower and label not in found:
             found.append(label)
+    # Bare brand shorthand: "selling maan" → Maan Consumer
+    if re.search(r"\bmaan\b", lower) and "Maan Consumer" not in found and (
+        "Maan Bulk" not in found
+    ):
+        if re.search(r"\bmaan\s+bulk\b", lower):
+            found.append("Maan Bulk")
+        else:
+            found.append("Maan Consumer")
     return found
 
 
@@ -3028,6 +3127,98 @@ def _dispatch_channel_growth(
     )
 
 
+def _dispatch_which_parties(
+    user_text: str,
+    *,
+    prior_spec: dict[str, Any] | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Identify individual parties in a client type for which/what asks."""
+    args = arguments or {}
+    inferred = infer_party_analytics_from_text(user_text)
+    prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+    t = (user_text or "").lower()
+
+    ctype = normalize_client_type(
+        args.get("client_type")
+        or inferred.get("client_type")
+        or prior_ctx.get("client_type")
+        or (
+            "Eva Distributors"
+            if re.search(r"\bdistributors?\b", t)
+            else None
+        )
+        or (
+            "Imtiaz Store"
+            if re.search(r"\bimtiaz\b", t)
+            else None
+        )
+    )
+    city = (
+        args.get("city")
+        or inferred.get("city")
+        or extract_city_from_text(user_text)
+        or prior_ctx.get("city")
+    )
+    units = _extract_business_units_from_text(user_text)
+    bu = (
+        units[0]
+        if len(units) == 1
+        else (
+            args.get("business_unit")
+            or inferred.get("business_unit")
+            or prior_ctx.get("business_unit")
+        )
+    )
+    oil = (
+        args.get("oil_type")
+        or inferred.get("oil_type")
+        or extract_oil_type_from_text(user_text)
+        or prior_ctx.get("oil_type")
+    )
+    pack = (
+        args.get("packing_category")
+        or inferred.get("packing_category")
+        or extract_packing_from_text(user_text)
+        or prior_ctx.get("packing_category")
+    )
+    period = (
+        args.get("period")
+        or _extract_period_phrase(user_text)
+        or inferred.get("period")
+        or prior_ctx.get("period")
+    )
+    date_from = args.get("date_from") or prior_ctx.get("date_from")
+    date_to = args.get("date_to") or prior_ctx.get("date_to")
+
+    # Rank / oil / packing filters need analyze_parties (list_clients is BU/city/type only)
+    if _looks_party_rank_ask(user_text) or oil or pack:
+        return analyze_parties(
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            city=city,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            metric="volume",
+            sort="desc",
+            limit=int(args.get("limit") or inferred.get("limit") or 10),
+            group_by="party",
+        )
+
+    return list_clients(
+        city=city,
+        client_type=ctype,
+        business_unit=bu,
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        limit=int(args.get("limit") or inferred.get("limit") or 200),
+    )
+
+
 def _dispatch_tool(
     name: str,
     arguments: dict[str, Any],
@@ -3040,6 +3231,19 @@ def _dispatch_tool(
     # Channels (= client types) grew / declined → lean Volume + AMS + %
     if _looks_channel_growth_ask(user_text):
         return _dispatch_channel_growth(
+            user_text, prior_spec=prior_spec, arguments=arguments
+        )
+
+    # which/what + distributors|Imtiaz → individual parties (selling BU / most VTF / active)
+    if _looks_which_parties_ask(user_text) or (
+        _looks_sold_to_parties(user_text)
+        and (
+            _extract_business_units_from_text(user_text)
+            or prior_spec
+            or extract_client_type_from_text(user_text)
+        )
+    ):
+        return _dispatch_which_parties(
             user_text, prior_spec=prior_spec, arguments=arguments
         )
 
@@ -3990,6 +4194,16 @@ def suggest_preferred_tool(
         return "query_sales"
     if looks_advanced(text):
         return "advanced_query"
+    if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
+        return (
+            "analyze_parties"
+            if (
+                _looks_party_rank_ask(text)
+                or extract_oil_type_from_text(text)
+                or extract_packing_from_text(text)
+            )
+            else "list_clients"
+        )
     if _looks_party_breakdown(text):
         return "list_clients"
     if _looks_party_mix_query(text) or _looks_party_analytics(text):
@@ -4045,6 +4259,20 @@ def resolve_forced_tool(
     if _looks_channel_growth_ask(text):
         return "query_sales"
 
+    # 2c) Advanced analytics win over which-party shortcuts
+    if looks_advanced(text):
+        return "required"
+
+    # 2d) which/what distributors|Imtiaz … (selling BU / most VTF / active)
+    if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
+        if (
+            _looks_party_rank_ask(text)
+            or extract_oil_type_from_text(text)
+            or extract_packing_from_text(text)
+        ):
+            return "analyze_parties"
+        return "list_clients"
+
     # 3) Reply / pinned-table follow-ups that must stay on the sales table
     table_ops = (
         _looks_include_check(text)
@@ -4060,25 +4288,28 @@ def resolve_forced_tool(
     # 4) "By individual distributors" after a sales table → list those parties
     if (has_table_prior or is_followup) and _looks_party_breakdown(text):
         return "list_clients"
-    # Sold-to / buyers-of-BU even without a pinned prior table
-    if _looks_sold_to_parties(text) and (
-        _extract_business_units_from_text(text)
-        or extract_city_from_text(text)
-        or extract_client_type_from_text(text)
-        or has_table_prior
-    ):
-        return "list_clients"
 
-    # 5) Explicit Reply follow-up with a pinned sales table, otherwise stay flexible
+    # 5) Reply follow-up: only force sales when it still looks like a matrix ask.
+    # Ad-hoc party / advanced questions must not be pinned to query_sales.
     if is_followup and has_table_prior and not has_party_prior:
-        # Advanced / mix / ranking follow-ups → do not pin to query_sales
         if (
             looks_advanced(text)
             or _looks_party_mix_query(text)
             or _looks_party_analytics(text)
+            or _looks_client_list(text)
+            or _looks_which_parties_ask(text)
+            or _looks_sold_to_parties(text)
+            or _looks_channel_growth_ask(text)
         ):
             return "required"
-        return "query_sales"
+        if (
+            _looks_sales_matrix(text)
+            or _looks_analytical(text)
+            or _wants_scoped_month_ams(text)
+            or _wants_named_month_trend(text)
+        ):
+            return "query_sales"
+        return "required"
 
     # Default factual ask: require a tool; model chooses which one
     return "required"

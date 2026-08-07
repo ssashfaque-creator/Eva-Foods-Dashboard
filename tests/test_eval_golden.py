@@ -61,9 +61,10 @@ def test_v040_forces_only_high_confidence() -> None:
     assert resolve_forced_tool("Show me Lahore sales") == "required"
     assert resolve_forced_tool("Top 10 distributors by AMS last month") == "required"
     assert resolve_forced_tool("Compare Lahore vs Karachi last month") == "required"
-    assert resolve_forced_tool("Who are the distributors in Lahore?") == "required"
     assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == "required"
-    # Still forced
+    # High-confidence party / named-party asks stay forced
+    assert resolve_forced_tool("Who are the distributors in Lahore?") == "list_clients"
+    assert resolve_forced_tool("which distributor is selling maan") == "list_clients"
     assert resolve_forced_tool("Show me Alpha Dist sales") == "lookup_party"
     assert resolve_forced_tool("Who is Al Bari?") == "lookup_party"
     assert (

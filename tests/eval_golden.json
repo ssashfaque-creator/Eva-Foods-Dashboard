@@ -47,8 +47,20 @@
     {
       "id": "list-distributors-lahore",
       "q": "Who are the distributors in Lahore?",
-      "expected_forced": "required",
+      "expected_forced": "list_clients",
       "preferred_tool": "list_clients"
+    },
+    {
+      "id": "which-distributor-selling-maan",
+      "q": "which distributor is selling maan",
+      "expected_forced": "list_clients",
+      "preferred_tool": "list_clients"
+    },
+    {
+      "id": "imtiaz-sells-most-vtf",
+      "q": "what Imtiaz store sells the most VTF",
+      "expected_forced": "analyze_parties",
+      "preferred_tool": "analyze_parties"
     },
     {
       "id": "list-imtiaz-karachi",

@@ -1857,6 +1857,10 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         if needle in t:
             out["business_unit"] = label
             break
+    if not out["business_unit"] and re.search(r"\bmaan\b", t):
+        out["business_unit"] = (
+            "Maan Bulk" if re.search(r"\bmaan\s+bulk\b", t) else "Maan Consumer"
+        )
 
     # Oil / VTF / packing from language
     if re.search(r"\bvtf\b|\bbanaspati\b", t):
@@ -2058,6 +2062,18 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         r"\bgrowth\b", t
     ):
         out["metric"] = "volume"
+    elif re.search(
+        r"\b(selling|sells\s+the\s+most|sells\s+most|is selling|are selling|"
+        r"active in|who\s+sells)\b",
+        t,
+    ):
+        # Individual-party volume asks (not AMS rankings)
+        out["metric"] = "volume"
+        if re.search(r"\b(active|list|who are|which)\b", t) and not re.search(
+            r"\b(most|top|highest|rank)\b", t
+        ):
+            out["mode"] = "list"
+            out["limit"] = max(int(out.get("limit") or 10), 100)
     elif re.search(r"\bams\b|\baverage (monthly )?sale", t):
         out["metric"] = "ams"
     else:

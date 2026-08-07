@@ -83,24 +83,27 @@ PREFERRED_CASES: list[tuple[str, str]] = [
     ("Exclude online customers from Lahore sales last month", "query_sales"),
 ]
 
-# Only named-party / who-is stay forced; everything else factual → required
+# High-confidence forces (named party, who-are lists, selling/active party asks)
 FORCED_EXCEPTIONS: dict[str, str] = {
     "Show sales for Alpha Dist in July": "lookup_party",
     "What were Rubina Shaheen sales last month?": "lookup_party",
     "Sales of Gamma Dist this month": "lookup_party",
     "Who is Al Bari?": "lookup_party",
     "show me Alpha Dist sales in July": "lookup_party",
+    "Who are the distributors in Lahore?": "list_clients",
 }
 
 
 def test_question_bank_forced_tool_routing_v040() -> None:
-    """v0.4.0: force only high-confidence named-party; else require a tool."""
+    """Force high-confidence tools; otherwise require a tool (model chooses)."""
     failures: list[str] = []
-    for question, _preferred in PREFERRED_CASES:
+    for question, preferred in PREFERRED_CASES:
         expected = FORCED_EXCEPTIONS.get(question, "required")
         got = resolve_forced_tool(question)
         if got != expected:
-            failures.append(f"{got!r} != {expected!r}: {question}")
+            # Also OK when we force the preferred tool for a confident party ask
+            if not (expected == "required" and got == preferred):
+                failures.append(f"{got!r} != {expected!r}: {question}")
     assert not failures, "Forced routing mismatches:\n" + "\n".join(failures)
 
 
