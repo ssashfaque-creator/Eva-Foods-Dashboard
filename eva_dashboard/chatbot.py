@@ -3154,12 +3154,19 @@ def _dispatch_which_parties(
             else None
         )
     )
-    city = (
+    city_from_text = (
         args.get("city")
         or inferred.get("city")
         or extract_city_from_text(user_text)
-        or prior_ctx.get("city")
     )
+    prior_ctype = normalize_client_type(prior_ctx.get("client_type"))
+    # Switching client type (Distributors → Imtiaz) must not keep prior city
+    if city_from_text:
+        city = city_from_text
+    elif ctype and prior_ctype and ctype != prior_ctype:
+        city = None
+    else:
+        city = prior_ctx.get("city")
     units = _extract_business_units_from_text(user_text)
     bu = (
         units[0]

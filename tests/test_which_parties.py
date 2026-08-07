@@ -129,12 +129,21 @@ def test_imtiaz_sells_most_vtf_ranks_stores() -> None:
             _seed()
             q = "what Imtiaz store sells the most VTF"
             assert suggest_preferred_tool(q) == "analyze_parties"
-            out = _dispatch_tool("list_clients", {}, user_text=q)
+            # Even with a Karachi distributor prior, Imtiaz rank must not keep that city
+            prior = {
+                "filters": {
+                    "city": "Karachi",
+                    "client_type": "Eva Distributors",
+                },
+                "column_dimension": "month",
+            }
+            out = _dispatch_tool(
+                "list_clients", {}, user_text=q, prior_spec=prior
+            )
             assert out.get("ok") is True
             assert out.get("filters", {}).get("client_type") == "Imtiaz Store"
             assert out.get("filters", {}).get("oil_type") == "Eva VTF"
-            rows = out.get("rows") or out.get("parties") or out.get("clients") or []
-            # analyze_parties payload shape
+            assert out.get("filters", {}).get("city") is None
             md = out.get("answer_markdown") or ""
             assert "Beta Store" in md
             assert "VTF" in md or "Eva VTF" in md
