@@ -647,8 +647,9 @@ TOOLS: list[dict[str, Any]] = [
                 "ALWAYS pass client_type when user names Imtiaz/Distributors/etc. "
                 "Do NOT invent a Business Unit for city- or client-type-only questions. "
                 "Dispatch fills city/client_type/columns from the user text when omitted. "
-                "'Show me X sales' (city/client type/party) defaults to columns=month, "
-                "months_back=6 with AMS (3 months) + AMS (6 months). "
+                "'Show me X sales' (city/client type/party) with no named month "
+                "defaults to columns=month, months_back=6 + AMS 3/6. "
+                "Named month (for July / this month) → Volume + AMS + % vs AMS only. "
                 "Analytical = city + client + AMS when user says how were/evaluate."
             ),
             "parameters": {
