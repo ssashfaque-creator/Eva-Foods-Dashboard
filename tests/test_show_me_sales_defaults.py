@@ -117,6 +117,66 @@ def test_show_me_party_client_type_city_default_months_ams() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_show_me_ignores_stale_prior_and_thin_args() -> None:
+    """v0.4.2: fresh show-me sales keeps months+AMS despite prior / thin GPT args."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            stale_prior = {
+                "filters": {"client_type": "Imtiaz Store"},
+                "column_dimension": "client_type",
+                "period_phrase": "July",
+                "months_back": 1,
+            }
+            lahore = _dispatch_tool(
+                "query_sales",
+                {
+                    "columns": "client_type",
+                    "business_unit": "Eva Consumer",
+                    "months_back": 1,
+                },
+                user_text="Show me Lahore sales",
+                prior_spec=stale_prior,
+            )
+            assert lahore.get("filters", {}).get("city") == "Lahore"
+            assert not lahore.get("filters", {}).get("business_unit")
+            assert lahore.get("months_back") == 6 or (
+                (lahore.get("table_spec") or {}).get("months_back") == 6
+            )
+            _assert_month_ams(lahore)
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_wrong_tool_redirects_scoped_sales_to_month_ams() -> None:
+    """Under required tool_choice, wrong tool names still get the sales matrix."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            for tool in ("list_clients", "analyze_parties", "advanced_query"):
+                out = _dispatch_tool(tool, {}, user_text="Show me distributor sales")
+                assert out.get("filters", {}).get("client_type") == "Eva Distributors", tool
+                _assert_month_ams(out)
+
+            imtiaz = _dispatch_tool(
+                "lookup_party", {}, user_text="Show me Imtiaz sales"
+            )
+            assert imtiaz.get("filters", {}).get("client_type") == "Imtiaz Store"
+            _assert_month_ams(imtiaz)
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_group_by_city_keeps_month_and_ams() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:

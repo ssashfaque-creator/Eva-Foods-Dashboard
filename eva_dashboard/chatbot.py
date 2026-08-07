@@ -228,7 +228,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.1):
+SPEED & TOOL RULES (v0.4.2):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
 3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
@@ -541,9 +541,11 @@ TOOLS: list[dict[str, Any]] = [
                 "PRIMARY sales volume (MT) tool. Builds pivots: rows = Packing when one "
                 "Business Unit is set; columns = client_type|city|month. "
                 "ALWAYS pass client_type when user names Imtiaz/Distributors/etc. "
-                "Do NOT invent a Business Unit for client-type-only questions. "
-                "Month-wise = last N months + Average. Analytical = city + client + AMS "
-                "when user says how were/evaluate."
+                "Do NOT invent a Business Unit for city- or client-type-only questions. "
+                "Dispatch fills city/client_type/columns from the user text when omitted. "
+                "'Show me X sales' (city/client type/party) defaults to columns=month, "
+                "months_back=6 with AMS (3 months) + AMS (6 months). "
+                "Analytical = city + client + AMS when user says how were/evaluate."
             ),
             "parameters": {
                 "type": "object",
@@ -612,7 +614,7 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "client_type (default), city, or month "
-                            "(last N months + Average)"
+                            "(last N months + AMS 3/6)"
                         ),
                         "enum": ["client_type", "city", "month"],
                     },
@@ -1164,6 +1166,70 @@ def _looks_scoped_entity_sales(text: str) -> bool:
     if extract_city_from_text(text):
         return True
     return False
+
+
+def _looks_table_op_followup(text: str) -> bool:
+    """True when this turn mutates / inspects a prior sales table."""
+    return bool(
+        _is_explicit_followup(text)
+        or _looks_include_check(text)
+        or _looks_combine_tables(text)
+        or _looks_table_followup(text)
+        or _looks_regroup(text)
+        or _looks_remove(text)
+        or _looks_row_drilldown(text)
+        or _looks_sales_yoy_compare(text)
+        or _looks_party_breakdown(text)
+        or _looks_period_only_followup(text)
+    )
+
+
+def _wants_scoped_month_ams(text: str) -> bool:
+    """Fresh city/client-type sales ask → month grid + AMS (unless July-only)."""
+    if not (text or "").strip():
+        return False
+    if _looks_table_op_followup(text) or _looks_single_month_only(text):
+        return False
+    if _looks_analytical(text):
+        return False
+    if _looks_month_wise(text) or _looks_scoped_entity_sales(text):
+        return True
+    t = text.lower()
+    if _looks_party_analytics(t) or _looks_client_list(t):
+        return False
+    return bool(
+        (
+            extract_client_type_from_text(text)
+            or extract_city_from_text(text)
+        )
+        and re.search(r"\b(sales?|volume|mt|show|give)\b", t)
+    )
+
+
+def _should_redirect_scoped_sales(name: str, user_text: str) -> bool:
+    """Under tool_choice=required, GPT may pick the wrong tool for show-me sales."""
+    if name not in {
+        "list_clients",
+        "analyze_parties",
+        "advanced_query",
+        "lookup_party",
+        "query_price",
+    }:
+        return False
+    if _looks_named_party_sales(user_text) or _looks_table_op_followup(user_text):
+        return False
+    if _looks_scoped_entity_sales(user_text):
+        return True
+    t = (user_text or "").lower()
+    if _looks_analytical(t) or _looks_party_analytics(t) or _looks_client_list(t):
+        return False
+    return bool(
+        (
+            extract_client_type_from_text(user_text)
+            or extract_city_from_text(user_text)
+        )
+        and re.search(r"\b(sales?|volume|mt)\b", t)
+    )
 
 
 FOLLOWUP_MARKER = "[FOLLOW-UP on the answer you just gave]"
@@ -2663,6 +2729,10 @@ def _dispatch_tool(
             limit=int(arguments.get("limit") or 200),
         )
 
+    # v0.4.2: wrong tool under required → still honor show-me X sales defaults
+    if _should_redirect_scoped_sales(name, user_text):
+        name = "query_sales"
+
     if name == "query_sales":
         # "Does this include bulk?" — show Bulk-only for prior scope
         if _looks_include_check(user_text) and prior_spec:
@@ -2683,29 +2753,15 @@ def _dispatch_tool(
 
         columns = arguments.get("columns") or "client_type"
         months_back = int(arguments.get("months_back") or 6)
-        # Default "show me X sales" (city / client type / party-like) → months + AMS
-        if (
-            not prior_spec
-            and mode != "analytical"
-            and not _looks_single_month_only(user_text)
-            and (
-                _looks_month_wise(user_text)
-                or _looks_scoped_entity_sales(user_text)
-                or (
-                    (
-                        extract_client_type_from_text(user_text)
-                        or extract_city_from_text(user_text)
-                    )
-                    and re.search(r"\b(sales?|volume|mt|show|give)\b", user_text.lower())
-                )
-            )
-        ):
+        # Default "show me X sales" → months + AMS (even if a stale prior_spec
+        # sits in the thread; real table ops keep their own grain below).
+        if mode != "analytical" and _wants_scoped_month_ams(user_text):
             columns = "month"
-            months_back = _months_back_from_text(user_text, months_back)
+            months_back = _months_back_from_text(user_text, 6)
             mode = "matrix"
         elif _looks_month_wise(user_text):
             columns = "month"
-            months_back = _months_back_from_text(user_text, months_back)
+            months_back = _months_back_from_text(user_text, 6)
             mode = "matrix"
 
         units = list(arguments.get("business_units") or [])
@@ -2846,18 +2902,16 @@ def _dispatch_tool(
             if not _extract_business_units_from_text(user_text):
                 uniq = []
 
-        # If user asked about a client type but did not name a BU, do not keep a
-        # model-invented Business Unit (e.g. Eva Consumer for "Imtiaz store").
+        # Drop model-invented BUs when user scoped by client type and/or city only.
         mentioned_units = (
             _extract_business_units_from_text(user_text)
             + _companion_business_units(user_text, prior_spec)
         )
-        if (ctype and not mentioned_units) or (is_drill and use_prior and not mentioned_units):
-            # Drill-downs keep prior BU filters via prior_spec, not model args
-            if is_drill and use_prior and not mentioned_units:
-                uniq = []
-            elif ctype and not mentioned_units and not is_combine and not is_regroup and not is_remove:
-                uniq = []
+        scoped_filter_only = bool((ctype or city_arg) and not mentioned_units)
+        if (scoped_filter_only or (is_drill and use_prior and not mentioned_units)) and (
+            not is_combine and not is_regroup and not is_remove
+        ):
+            uniq = []
 
         # Regroup / remove: do not invent city/client from this short follow-up text
         if is_regroup or is_remove:
@@ -2882,6 +2936,19 @@ def _dispatch_tool(
         if is_yoy and use_prior and use_prior.get("column_dimension") and not lock_columns:
             columns = str(use_prior["column_dimension"])
 
+        # Ignore GPT-invented prior_spec unless this turn is a real table follow-up
+        model_prior = arguments.get("prior_spec")
+        if model_prior and not (
+            use_prior
+            or is_combine
+            or is_drill
+            or is_yoy
+            or is_regroup
+            or is_remove
+            or _is_explicit_followup(user_text)
+        ):
+            model_prior = None
+
         return query_sales(
             period=period_arg,
             date_from=arguments.get("date_from"),
@@ -2900,7 +2967,7 @@ def _dispatch_tool(
             clear_filters=clear_filters,
             lock_columns=lock_columns,
             excludes=excludes,
-            prior_spec=use_prior or arguments.get("prior_spec"),
+            prior_spec=use_prior or model_prior,
             compare="yoy" if is_yoy else (arguments.get("compare") or None),
         )
     if name == "lookup_party":
@@ -3088,10 +3155,10 @@ def _dispatch_tool(
         if not product_query and not arguments.get("product"):
             product_query = user_text
         return query_price(
-            period=arguments.get("period"),
+            period=arguments.get("period") or _extract_period_phrase(user_text),
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
-            city=arguments.get("city"),
+            city=arguments.get("city") or extract_city_from_text(user_text),
             business_unit=arguments.get("business_unit"),
             oil_type=oil,
             packing_category=pack,
