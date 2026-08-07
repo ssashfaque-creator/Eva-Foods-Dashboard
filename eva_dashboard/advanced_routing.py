@@ -63,6 +63,9 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
         "group_by": None,
         "party_query": None,
         "grain": "week",
+        "entity": "party",
+        "op": None,
+        "threshold": None,
     }
     if re.search(r"\beva consumer\b", t):
         out["business_unit"] = "Eva Consumer"
@@ -198,6 +201,131 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
             out["left"], out["right"] = "Eva Distributors", "Imtiaz Store"
         if re.search(r"\b(growth|grew|yoy)\b", t):
             out["metric"] = "growth"
+        return out
+
+    # Filter entities by volume / YoY / MoM conditions
+    # e.g. sales > 10 MT, declined more than 10%, more this month than last
+    volume_m = re.search(
+        r"(?:sales|volume).{0,40}(?:more than|greater than|over|above|>)\s*"
+        r"([\d.]+)\s*(?:mt|tons?|tonnes?)\b"
+        r"|"
+        r"(?:more than|greater than|over|above|>)\s*([\d.]+)\s*(?:mt|tons?|tonnes?)\b"
+        r"|"
+        r"(?:sales|volume).{0,40}(?:less than|under|below|<)\s*"
+        r"([\d.]+)\s*(?:mt|tons?|tonnes?)\b"
+        r"|"
+        r"(?:less than|under|below|<)\s*([\d.]+)\s*(?:mt|tons?|tonnes?)\b",
+        t,
+    )
+    pct_decl = re.search(
+        r"(?:declined?|dropped|fallen|fell|decreased?|down)\s+"
+        r"(?:by\s+)?(?:more than|over|at least|>)\s*([\d.]+)\s*%",
+        t,
+    )
+    pct_grow = re.search(
+        r"(?:grown|grew|increased?|up)\s+"
+        r"(?:by\s+)?(?:more than|over|at least|>)\s*([\d.]+)\s*%",
+        t,
+    )
+    has_mom = bool(
+        re.search(
+            r"\bmore\s+(?:sales|volume)\s+this\s+month\s+than\s+last\b|"
+            r"\bthis\s+month\b.{0,40}\b(?:more|higher|greater)\b.{0,25}"
+            r"\b(?:than|vs\.?)\b.{0,15}\blast\s+month\b|"
+            r"\bmore this month than last(?:\s+month)?\b|"
+            r"\b(?:mom|month[- ]over[- ]month)\b.{0,30}"
+            r"\b(grown|grew|increased?|declined?|dropped)\b|"
+            r"\b(grown|grew|increased?|declined?|dropped)\b.{0,30}"
+            r"\b(?:mom|month[- ]over[- ]month|vs last month)\b",
+            t,
+        )
+    )
+    has_growth_filter = bool(
+        re.search(
+            r"\b(?:where|that|which|who)\b.{0,60}"
+            r"(?:sales|volume).{0,30}"
+            r"(?:have |has )?(?:declined|dropped|fallen|decreased|grown|increased|grew)\b|"
+            r"\b(?:sales|volume)\s+have\s+(?:declined|dropped|fallen|decreased|"
+            r"grown|increased)\b|"
+            r"\b(?:customers?|distributors?|parties|clients?|products?|skus?|"
+            r"packing|oils?)\b.{0,40}"
+            r"(?:that |which )?(?:have |has )?"
+            r"(?:declined|dropped|fallen|decreased|grown|increased|grew)\b|"
+            r"\bcustomers that have grown\b|"
+            r"\bwhere sales have declined\b",
+            t,
+        )
+    )
+    # Pure packing/oil ranking stays on dimension_growth (handled below)
+    packing_oil_rank = bool(
+        re.search(
+            r"\b(which packing|packing.{0,20}grow|grow.{0,20}packing|"
+            r"fastest packing|oil.{0,20}grow|which oil)\b",
+            t,
+        )
+        or re.search(r"\b(rank|top)\b.+\b(packing|oil)\b.+\b(growth|grow)\b", t)
+    ) and not (volume_m or pct_decl or pct_grow or has_mom)
+
+    if (volume_m or pct_decl or pct_grow or has_mom or has_growth_filter) and not packing_oil_rank:
+        out["mode"] = "filter_entities"
+        out["limit"] = max(out["limit"], 50)
+
+        # Entity
+        if re.search(r"\b(skus?|products?)\b", t):
+            out["entity"] = "product"
+        elif re.search(r"\bpacking\b", t):
+            out["entity"] = "packing_category"
+        elif re.search(r"\boil\b", t) and not re.search(r"\boil\s+for\b", t):
+            out["entity"] = "oil_type"
+        elif re.search(r"\b(business units?|bus)\b", t):
+            out["entity"] = "business_unit"
+        elif re.search(r"\bcities\b", t) and not out["city"]:
+            out["entity"] = "city"
+        else:
+            out["entity"] = "party"
+            if not out["client_type"] and re.search(r"\bdistributors?\b", t):
+                out["client_type"] = "Eva Distributors"
+
+        if volume_m:
+            out["metric"] = "volume"
+            # groups: more(...), more(bare), less(...), less(bare)
+            thr = next(
+                (g for g in volume_m.groups() if g is not None),
+                None,
+            )
+            out["threshold"] = float(thr) if thr is not None else None
+            if re.search(
+                r"(?:less than|under|below|<)\s*[\d.]+\s*(?:mt|tons?|tonnes?)",
+                t,
+            ):
+                out["op"] = "lt"
+            else:
+                out["op"] = "gt"
+        elif has_mom and not (pct_decl or pct_grow):
+            out["metric"] = "mom"
+            out["period"] = out["period"] or "this month"
+            if re.search(r"\b(declined?|dropped|fallen|decreased|down)\b", t):
+                out["op"] = "declined"
+            else:
+                out["op"] = "grown"
+            out["threshold"] = 0.0
+        else:
+            # YoY growth/decline (default when not MoM/volume)
+            out["metric"] = "mom" if has_mom else "yoy"
+            if pct_decl:
+                out["op"] = "declined"
+                out["threshold"] = float(pct_decl.group(1))
+            elif pct_grow:
+                out["op"] = "grown"
+                out["threshold"] = float(pct_grow.group(1))
+            elif re.search(
+                r"\b(declined|dropped|fallen|decreased|down)\b", t
+            ):
+                out["op"] = "declined"
+                out["threshold"] = 0.0
+            else:
+                out["op"] = "grown"
+                out["threshold"] = 0.0
         return out
 
     # Packing / oil growth ranks

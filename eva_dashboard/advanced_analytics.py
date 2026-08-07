@@ -1528,3 +1528,400 @@ def top_skus(
         "answer_markdown": _analysis(lines, tips),
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Filter entities by volume / YoY / MoM conditions
+# ---------------------------------------------------------------------------
+
+_ENTITY_DIMS = {
+    "party": "party",
+    "parties": "party",
+    "distributor": "party",
+    "distributors": "party",
+    "customer": "party",
+    "customers": "party",
+    "client": "party",
+    "clients": "party",
+    "product": "product",
+    "products": "product",
+    "sku": "product",
+    "skus": "product",
+    "packing": "packing_category",
+    "packing_category": "packing_category",
+    "oil": "oil_type",
+    "oil_type": "oil_type",
+    "business_unit": "business_unit",
+    "bu": "business_unit",
+    "city": "city",
+    "cities": "city",
+    "client_type": "client_type",
+}
+
+
+def _yoy_prior_dates(d0: str, d1: str) -> tuple[str, str]:
+    c0 = date.fromisoformat(d0)
+    c1 = date.fromisoformat(d1)
+    try:
+        return (
+            c0.replace(year=c0.year - 1).isoformat(),
+            c1.replace(year=c1.year - 1).isoformat(),
+        )
+    except ValueError:
+        return (
+            c0.replace(year=c0.year - 1, day=28).isoformat(),
+            c1.replace(year=c1.year - 1, day=28).isoformat(),
+        )
+
+
+def _mom_prior_dates(d0: str, d1: str) -> tuple[str, str]:
+    """Previous calendar month (full month) for 'vs last month' filters."""
+    c0 = date.fromisoformat(d0)
+    if c0.month == 1:
+        p_start = date(c0.year - 1, 12, 1)
+    else:
+        p_start = date(c0.year, c0.month - 1, 1)
+    last_day = calendar.monthrange(p_start.year, p_start.month)[1]
+    p_end = date(p_start.year, p_start.month, last_day)
+    return p_start.isoformat(), p_end.isoformat()
+
+
+def _passes_condition(
+    value: float | None,
+    *,
+    op: str,
+    threshold: float | None,
+    metric: str,
+) -> bool:
+    thr = 0.0 if threshold is None else float(threshold)
+    if metric in {"yoy", "mom"}:
+        if value is None:
+            return False
+        if op in {"grown", "gt"}:
+            return value > thr
+        if op == "gte":
+            return value >= thr
+        if op in {"declined", "lt"}:
+            # "declined more than 10%" → value < -10
+            cut = -abs(thr) if op == "declined" else thr
+            return value < cut
+        if op == "lte":
+            return value <= thr
+        if op == "eq":
+            return abs(value - thr) < 1e-9
+        return False
+    # volume
+    v = 0.0 if value is None else float(value)
+    if op in {"grown", "gt"}:
+        return v > thr
+    if op == "gte":
+        return v >= thr
+    if op in {"declined", "lt"}:
+        return v < thr
+    if op == "lte":
+        return v <= thr
+    if op == "eq":
+        return abs(v - thr) < 1e-9
+    return False
+
+
+def _group_volumes(frame: pd.DataFrame, dim: str) -> pd.DataFrame:
+    if frame.empty:
+        cols = [dim, "mt"]
+        if dim == "party":
+            cols += ["city", "client_type"]
+        return pd.DataFrame(columns=cols)
+    if dim == "party":
+        return (
+            frame.groupby("party", as_index=False)
+            .agg(
+                mt=("mt", "sum"),
+                city=("city", "first"),
+                client_type=("client_type", "first"),
+            )
+        )
+    g = frame.groupby(dim, as_index=False)["mt"].sum()
+    return g
+
+
+def filter_entities(
+    *,
+    entity: str = "party",
+    metric: str = "volume",  # volume | yoy | mom
+    op: str = "gt",  # gt | gte | lt | lte | eq | grown | declined
+    threshold: float | None = None,
+    period: str | None = None,
+    city: str | None = None,
+    client_type: str | None = None,
+    business_unit: str | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    exclude_client_types: list[str] | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List entities matching a volume or growth condition.
+
+    Examples:
+      volume > 10 MT; YoY declined (or declined more than 10%);
+      MoM more this month than last month.
+    """
+    dim_key = (entity or "party").strip().lower().replace(" ", "_").replace("-", "_")
+    dim = _ENTITY_DIMS.get(dim_key, dim_key)
+    if dim not in {
+        "party", "product", "packing_category", "oil_type",
+        "business_unit", "city", "client_type",
+    }:
+        dim = "party"
+
+    met = (metric or "volume").strip().lower()
+    if met in {"sales", "mt", "tons", "tonnes", "absolute"}:
+        met = "volume"
+    if met in {"yoy_pct", "year_over_year", "growth", "yoy_growth"}:
+        met = "yoy"
+    if met in {"month_over_month", "mom_pct", "vs_last_month"}:
+        met = "mom"
+    if met not in {"volume", "yoy", "mom"}:
+        met = "volume"
+
+    op_n = (op or "gt").strip().lower()
+    if op_n in {"greater", "greater_than", "above", "over", "more", "more_than", ">"}:
+        op_n = "gt"
+    if op_n in {"less", "less_than", "below", "under", "<"}:
+        op_n = "lt"
+    if op_n in {"grow", "grew", "increased", "increase", "up", "positive"}:
+        op_n = "grown"
+    if op_n in {"decline", "dropped", "drop", "fallen", "fall", "decreased", "decrease", "down", "negative"}:
+        op_n = "declined"
+    if op_n not in {"gt", "gte", "lt", "lte", "eq", "grown", "declined"}:
+        op_n = "gt"
+
+    period_info = resolve_period(period or ("this month" if met == "mom" else "this month"))
+    if period_info.get("ok") is False:
+        return {"ok": False, "error": period_info.get("error")}
+    d0, d1 = period_info["date_from"], period_info["date_to"]
+    bu = _normalize_business_unit(business_unit)
+    oil = normalize_oil_type(oil_type)
+    pack = normalize_packing_category(packing_category)
+    ctype = normalize_client_type(client_type)
+
+    fetch_kw = dict(
+        city=city, client_type=ctype, business_unit=bu, oil_type=oil,
+        packing_category=pack, exclude_client_types=exclude_client_types,
+    )
+    cur = _fetch_filtered_lines(date_from=d0, date_to=d1, **fetch_kw)
+    cur_g = _group_volumes(cur, dim)
+
+    prior_label = None
+    pri_g = None
+    if met in {"yoy", "mom"}:
+        if met == "yoy":
+            p0, p1 = _yoy_prior_dates(d0, d1)
+            prior_label = f"same period last year ({p0} → {p1})"
+        else:
+            p0, p1 = _mom_prior_dates(d0, d1)
+            prior_label = f"prior month ({p0} → {p1})"
+        pri = _fetch_filtered_lines(date_from=p0, date_to=p1, **fetch_kw)
+        pri_g = _group_volumes(pri, dim)
+
+    # Build candidate keys
+    keys: set[str] = set()
+    if not cur_g.empty:
+        keys |= set(cur_g[dim].astype(str))
+    if pri_g is not None and not pri_g.empty:
+        keys |= set(pri_g[dim].astype(str))
+
+    cur_map = {}
+    if not cur_g.empty:
+        for _, r in cur_g.iterrows():
+            cur_map[str(r[dim])] = r
+    pri_map = {}
+    if pri_g is not None and not pri_g.empty:
+        for _, r in pri_g.iterrows():
+            pri_map[str(r[dim])] = r
+
+    rows: list[dict[str, Any]] = []
+    for k in keys:
+        c_row = cur_map.get(k)
+        p_row = pri_map.get(k)
+        c_mt = float(c_row["mt"]) if c_row is not None else 0.0
+        p_mt = float(p_row["mt"]) if p_row is not None else 0.0
+        if met == "volume":
+            score = c_mt
+            change_pct = None
+        else:
+            change_pct = pct_change(c_mt, p_mt)
+            score = change_pct
+        if not _passes_condition(score, op=op_n, threshold=threshold, metric=met):
+            continue
+        item: dict[str, Any] = {
+            "entity": k,
+            "volume_mt": mt_round(c_mt),
+        }
+        if met != "volume":
+            item["prior_mt"] = mt_round(p_mt)
+            item["delta_mt"] = mt_round(c_mt - p_mt)
+            item["change_pct"] = pct_round(change_pct) if change_pct is not None else None
+        if dim == "party":
+            src = c_row if c_row is not None else p_row
+            if src is not None:
+                item["city"] = str(src.get("city") or "")
+                item["client_type"] = str(src.get("client_type") or "")
+        rows.append(item)
+
+    # Sort: declined → most negative first; grown/gt volume → highest first; lt volume → lowest
+    reverse = op_n in {"grown", "gt", "gte"} or (
+        met == "volume" and op_n not in {"lt", "lte", "declined"}
+    )
+    if met == "volume":
+        rows.sort(key=lambda r: r["volume_mt"], reverse=reverse)
+    else:
+        rows.sort(
+            key=lambda r: (
+                r["change_pct"] is None,
+                -(r["change_pct"] if r["change_pct"] is not None else 0)
+                if reverse
+                else (r["change_pct"] if r["change_pct"] is not None else 0),
+                -r["volume_mt"],
+            )
+        )
+
+    lim = max(1, min(int(limit or 50), 200))
+    rows = rows[:lim]
+
+    filters = {
+        "city": city, "client_type": ctype, "business_unit": bu,
+        "oil_type": oil, "packing_category": pack,
+        "exclude_client_types": exclude_client_types,
+    }
+
+    # Condition label
+    thr_s = f"{threshold:g}" if threshold is not None else None
+    if met == "volume":
+        op_words = {
+            "gt": f"sales > {thr_s} MT",
+            "gte": f"sales ≥ {thr_s} MT",
+            "lt": f"sales < {thr_s} MT",
+            "lte": f"sales ≤ {thr_s} MT",
+            "eq": f"sales = {thr_s} MT",
+            "grown": f"sales > {thr_s or '0'} MT",
+            "declined": f"sales < {thr_s or '0'} MT",
+        }
+        cond = op_words.get(op_n, f"sales filter ({op_n})")
+        metric_title = "Volume"
+    elif met == "yoy":
+        if op_n == "declined":
+            cond = (
+                f"YoY declined more than {thr_s}%"
+                if thr_s and float(threshold or 0) > 0
+                else "YoY declined"
+            )
+        elif op_n == "grown":
+            cond = (
+                f"YoY grown more than {thr_s}%"
+                if thr_s and float(threshold or 0) > 0
+                else "YoY grown"
+            )
+        else:
+            cond = f"YoY {op_n} {thr_s}%"
+        metric_title = "YoY %"
+    else:
+        if op_n == "declined":
+            cond = (
+                f"MoM declined more than {thr_s}%"
+                if thr_s and float(threshold or 0) > 0
+                else "MoM declined (less than last month)"
+            )
+        elif op_n == "grown":
+            cond = (
+                f"MoM grown more than {thr_s}%"
+                if thr_s and float(threshold or 0) > 0
+                else "more sales this month than last month"
+            )
+        else:
+            cond = f"MoM {op_n} {thr_s}%"
+        metric_title = "MoM %"
+
+    dim_title = dim.replace("_", " ").title()
+    if dim == "party":
+        dim_title = "Party"
+    list_title = "Parties" if dim == "party" else f"{dim_title}s"
+
+    lines = [
+        f"{list_title} where {cond} — {period_info.get('label')} · {_scope_bits(filters)}.",
+    ]
+    if prior_label:
+        lines.append(f"Compare vs {prior_label}.")
+    lines.append("")
+
+    if dim == "party":
+        if met == "volume":
+            lines += [
+                "| # | Party | City | Client Type | Volume (MT) |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+            for i, r in enumerate(rows, 1):
+                lines.append(
+                    f"| {i} | {r['entity']} | {r.get('city', '')} | "
+                    f"{r.get('client_type', '')} | {r['volume_mt']} |"
+                )
+        else:
+            lines += [
+                f"| # | Party | City | Client Type | Volume | Prior | {metric_title} | Δ MT |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            for i, r in enumerate(rows, 1):
+                ch = r.get("change_pct")
+                cs = f"{ch:+.1f}%" if ch is not None else "—"
+                lines.append(
+                    f"| {i} | {r['entity']} | {r.get('city', '')} | "
+                    f"{r.get('client_type', '')} | {r['volume_mt']} | "
+                    f"{r.get('prior_mt', 0)} | {cs} | {r.get('delta_mt', 0)} |"
+                )
+    else:
+        if met == "volume":
+            lines += [
+                f"| # | {dim_title} | Volume (MT) |",
+                "| --- | --- | --- |",
+            ]
+            for i, r in enumerate(rows, 1):
+                lines.append(f"| {i} | {r['entity']} | {r['volume_mt']} |")
+        else:
+            lines += [
+                f"| # | {dim_title} | Volume | Prior | {metric_title} | Δ MT |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+            for i, r in enumerate(rows, 1):
+                ch = r.get("change_pct")
+                cs = f"{ch:+.1f}%" if ch is not None else "—"
+                lines.append(
+                    f"| {i} | {r['entity']} | {r['volume_mt']} | "
+                    f"{r.get('prior_mt', 0)} | {cs} | {r.get('delta_mt', 0)} |"
+                )
+
+    if not rows:
+        lines.append("_No matching entities._")
+
+    tips = []
+    if rows:
+        tip_name = rows[0]["entity"]
+        if met == "volume":
+            tips.append(f"**{tip_name}** leads this filter at **{rows[0]['volume_mt']} MT**.")
+        else:
+            ch = rows[0].get("change_pct")
+            if ch is not None:
+                tips.append(f"**{tip_name}** is extreme in this cut at **{ch:+.1f}%**.")
+        tips.append(f"Showing {len(rows)} match(es) (limit {lim}).")
+
+    return {
+        "ok": True,
+        "mode": "filter_entities",
+        "entity": dim,
+        "metric": met,
+        "op": op_n,
+        "threshold": threshold,
+        "period": period_info,
+        "filters": filters,
+        "rows": rows,
+        "answer_markdown": _analysis(lines, tips),
+        "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+    }

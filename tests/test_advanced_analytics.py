@@ -9,6 +9,7 @@ from pathlib import Path
 from eva_dashboard.advanced_analytics import (
     compare_segments,
     detect_dumping,
+    filter_entities,
     not_ordered,
     silent_parties,
 )
@@ -159,6 +160,114 @@ def test_compare_silent_not_ordered_dumping_routing() -> None:
             )
             assert out["ok"] is True
             assert out["mode"] == "not_ordered"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_filter_entities_volume_yoy_mom_routing() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+
+            vol = filter_entities(
+                entity="party",
+                metric="volume",
+                op="gt",
+                threshold=10,
+                period="this month",
+                client_type="Eva Distributors",
+            )
+            assert vol["ok"] is True
+            names = [r["entity"] for r in vol["rows"]]
+            assert "Alpha Dist" in names
+            assert all(r["volume_mt"] > 10 for r in vol["rows"])
+
+            yoy = filter_entities(
+                entity="party",
+                metric="yoy",
+                op="declined",
+                threshold=0,
+                period="this month",
+                client_type="Eva Distributors",
+            )
+            assert yoy["ok"] is True
+            declined = [r["entity"] for r in yoy["rows"]]
+            assert "Beta Dist" in declined
+            assert "Alpha Dist" not in declined
+
+            grown = filter_entities(
+                entity="party",
+                metric="yoy",
+                op="grown",
+                threshold=10,
+                period="this month",
+            )
+            assert any(r["entity"] == "Alpha Dist" for r in grown["rows"])
+
+            mom = filter_entities(
+                entity="party",
+                metric="mom",
+                op="grown",
+                threshold=0,
+                period="this month",
+            )
+            assert mom["ok"] is True
+            # Alpha Aug (100) > July (38)
+            assert any(r["entity"] == "Alpha Dist" for r in mom["rows"])
+
+            prod = filter_entities(
+                entity="product",
+                metric="volume",
+                op="gt",
+                threshold=50,
+                period="this month",
+            )
+            assert prod["rows"]
+            assert all(r["volume_mt"] > 50 for r in prod["rows"])
+
+            inf = infer_advanced_from_text(
+                "Distributors in Lahore where sales have declined"
+            )
+            assert inf["mode"] == "filter_entities"
+            assert inf["op"] == "declined"
+            assert inf["metric"] == "yoy"
+            assert inf["city"] == "Lahore"
+            assert inf["client_type"] == "Eva Distributors"
+
+            inf2 = infer_advanced_from_text("sales more than 10 tons")
+            assert inf2["mode"] == "filter_entities"
+            assert inf2["metric"] == "volume"
+            assert inf2["op"] == "gt"
+            assert inf2["threshold"] == 10.0
+
+            inf3 = infer_advanced_from_text(
+                "products that declined more than 10%"
+            )
+            assert inf3["mode"] == "filter_entities"
+            assert inf3["entity"] == "product"
+            assert inf3["op"] == "declined"
+            assert inf3["threshold"] == 10.0
+
+            inf4 = infer_advanced_from_text(
+                "more sales this month than last month"
+            )
+            assert inf4["mode"] == "filter_entities"
+            assert inf4["metric"] == "mom"
+            assert inf4["op"] == "grown"
+
+            out = _dispatch_tool(
+                "advanced_query",
+                {},
+                user_text="Customers that have grown sales",
+            )
+            assert out["ok"] is True
+            assert out["mode"] == "filter_entities"
+            assert out["op"] == "grown"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

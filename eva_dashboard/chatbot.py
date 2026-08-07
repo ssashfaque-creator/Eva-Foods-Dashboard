@@ -323,6 +323,15 @@ Examples:
   "Which distributors grew VTF most vs July last year?"
     → analyze_parties client_type='Eva Distributors', oil_type='Eva VTF',
       period='July', compare_period='July last year', metric='yoy'
+  "Distributors in Lahore where sales have declined"
+    → advanced_query mode='filter_entities' entity='party'
+      client_type='Eva Distributors' city='Lahore' metric='yoy' op='declined'
+  "Customers that have grown sales" / "products that declined more than 10%"
+    → filter_entities (entity party|product, op grown|declined, threshold %)
+  "Sales more than 10 tons" / "parties with volume over 10 MT"
+    → filter_entities metric='volume' op='gt' threshold=10
+  "More sales this month than last month"
+    → filter_entities metric='mom' op='grown' threshold=0
 
 MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
@@ -333,6 +342,8 @@ MODE FROM LANGUAGE:
   (default: dim on rows/Y; month stays on columns/X; 'as columns' → dim on X)
 - remove / exclude / without X → if X is a table layer, drop the layer;
   if X is a value (Lahore, distributors), filter that value out
+- where sales declined / grown / more than X% / sales > N tons /
+  more this month than last → advanced_query filter_entities
 - show by product / product category / packing → rows = Packing Category (keep prior)
 - dissect further / SKU / sku-wise → rows = Product SKU (keep prior)
 - Messages starting with [FOLLOW-UP …] are replies to the previous answer —
@@ -1049,7 +1060,9 @@ TOOLS.append(
                 "Advanced analytics: city/client compare (+growth), WoW, packing/oil "
                 "growth, expected month close, silent this week, not ordered packing, "
                 "reactivated, days since invoice, concentration/shares, oil mix, "
-                "packing contribution, top SKUs, party profile, dumping/excessive sales."
+                "packing contribution, top SKUs, party profile, dumping/excessive sales, "
+                "filter entities by volume/YoY/MoM (sales > 10 MT, declined >10%, "
+                "more this month than last)."
             ),
             "parameters": {
                 "type": "object",
@@ -1074,6 +1087,7 @@ TOOLS.append(
                             "top_skus",
                             "party_profile",
                             "dumping",
+                            "filter_entities",
                         ],
                     },
                     "period": {"type": "string"},
@@ -1087,6 +1101,25 @@ TOOLS.append(
                     "party_query": {"type": "string"},
                     "group_by": {"type": "string"},
                     "metric": {"type": "string"},
+                    "entity": {
+                        "type": "string",
+                        "description": (
+                            "For filter_entities: party|product|packing_category|"
+                            "oil_type|business_unit|city|client_type"
+                        ),
+                    },
+                    "op": {
+                        "type": "string",
+                        "description": (
+                            "For filter_entities: gt|gte|lt|lte|grown|declined"
+                        ),
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": (
+                            "Volume MT, or % for YoY/MoM (e.g. 10 for declined >10%)"
+                        ),
+                    },
                     "limit": {"type": "integer"},
                     "exclude_client_types": {
                         "type": "array",
@@ -2119,6 +2152,7 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
         party_profile,
         detect_dumping,
         top_skus,
+        filter_entities,
     )
     from eva_dashboard.seasonality import expected_month_close
     from eva_dashboard.advanced_routing import infer_advanced_from_text
@@ -2140,6 +2174,11 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
     right = arguments.get("right") or inferred.get("right")
     group_by = arguments.get("group_by") or inferred.get("group_by")
     party_query = arguments.get("party_query") or inferred.get("party_query") or user_text
+    entity = arguments.get("entity") or inferred.get("entity") or "party"
+    op = arguments.get("op") or inferred.get("op")
+    threshold = arguments.get("threshold")
+    if threshold is None:
+        threshold = inferred.get("threshold")
 
     # Inherit filters from prior sales table when user says dump break-down follow-up
     if prior_spec and inferred.get("mode") == "dumping" and group_by:
@@ -2226,6 +2265,22 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
             period=period, city=city, client_type=ctype, business_unit=bu,
             oil_type=oil, packing_category=pack, exclude_client_types=exclude,
             group_by=group_by, limit=limit,
+        )
+    if mode == "filter_entities":
+        thr = None if threshold is None else float(threshold)
+        return filter_entities(
+            entity=entity,
+            metric=metric,
+            op=op or "gt",
+            threshold=thr,
+            period=period,
+            city=city,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            exclude_client_types=exclude,
+            limit=max(limit, 50) if limit < 50 else limit,
         )
     return {"ok": False, "error": f"Unknown advanced mode: {mode}"}
 
