@@ -1,3 +1,3 @@
 """Eva Foods sales dashboard."""
 
-__version__ = "0.4.14"
+__version__ = "0.4.15"

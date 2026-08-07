@@ -119,13 +119,16 @@ def test_routing_client_list_vs_name_lookup() -> None:
     from eva_dashboard.chatbot import resolve_forced_tool
 
     grew = "Which distributors grew VTF vs July last year"
-    assert looks_advanced(grew)
-    # v0.4.0: advanced asks are not hard-forced; model chooses under required
-    assert resolve_forced_tool(grew) == "required"
+    # Party growth rankings beat advanced filter_entities
+    assert resolve_forced_tool(grew) == "analyze_parties"
     from eva_dashboard.chatbot import suggest_preferred_tool
 
-    assert suggest_preferred_tool(grew) == "advanced_query"
-    assert not _looks_party_analytics(grew)
+    assert suggest_preferred_tool(grew) == "analyze_parties"
+    assert _looks_party_analytics(grew)
+    # % threshold filters still stay on advanced
+    thr = "Parties that grew more than 30% last month"
+    assert looks_advanced(thr)
+    assert resolve_forced_tool(thr) == "advanced_query"
     assert _looks_party_analytics("Who were the top distributors in this")
 
 

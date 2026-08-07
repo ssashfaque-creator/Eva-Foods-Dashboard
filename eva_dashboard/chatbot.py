@@ -15,6 +15,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from eva_dashboard.client_language import (
+    extract_all_client_types_from_text,
     extract_client_type_from_text,
     extract_oil_type_from_text,
     extract_packing_from_text,
@@ -256,10 +257,12 @@ DATA MODEL (filters you set; tools build tables):
   "which Chase Up is active in Lahore"; "who are the CSD stores".
 - Named party / "who is X?" → lookup_party (not a client-type filter).
 - "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
+- Which distributors grew / vs AMS / vs last year (VTF etc.) → analyze_parties with
+  YoY % (+ AMS columns when both asked). Never a packing matrix or bare MT list.
 
 TOOL CHOICE:
 - Volume pivots / month grids / regroup / include-bulk / remove / YoY on a table → query_sales
-- Party rankings, AMS, share, mix, new/lost/silent, invoice frequency → analyze_parties
+- Party rankings, growth, AMS, share, mix, new/lost/silent → analyze_parties
 - Rate / price / Price Fetch / cost factor / packing cost / factor breakdown → query_price
 - City/client compares (2+ sides: Lahore vs Karachi vs Islamabad; Imtiaz vs Metro
   vs Chase Up) → advanced_query with mode compare_cities/compare_client_types and
@@ -2449,16 +2452,63 @@ def _looks_per_party_mix(text: str) -> bool:
     )
 
 
+def _looks_party_growth_rank(text: str) -> bool:
+    """Which distributors/parties grew/declined (YoY) — analyze_parties, not filter/sales.
+
+    Leaves segment compares (Imtiaz vs distributors) and % threshold filters
+    (grew more than 30%) on advanced_query.
+    """
+    t = (text or "").lower()
+    has_parties = bool(
+        re.search(
+            r"\b(distributors?|parties|clients?|imtiaz|stores?|customers?)\b",
+            t,
+        )
+    )
+    if not has_parties:
+        return False
+    # Pairwise / multi client-type or city compare stays advanced
+    if re.search(r"\bcompar(?:e|ison|ing)\b", t) and (
+        re.search(r"\bvs\.?\b|\bversus\b", t)
+        or len(extract_all_client_types_from_text(text)) >= 2
+    ):
+        return False
+    # "% threshold" filter_entities (grew more than 30%, declined >10%)
+    if re.search(
+        r"\b(more than|greater than|over|at least|>)\s*[\d.]+\s*%|"
+        r"\b(grown|grew|growth|declined?|dropped).{0,24}"
+        r"(more than|greater than|over|at least|>)\s*[\d.]+",
+        t,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"grown|grew|growth|grow|"
+            r"declined?|dropped|fallen|fell|"
+            r"vs\.?\s*ams|against ams|relative to ams|"
+            r"year over year|\byoy\b|vs\.?\s*last year|versus last year|"
+            r"since last year|from last year"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _looks_party_analytics(text: str) -> bool:
     t = (text or "").lower()
     # Sales-table YoY compare is query_sales, not party ranking
     if _looks_sales_yoy_compare(t):
         return False
+    # Party growth/AMS rankings beat advanced filter_entities
+    if _looks_party_growth_rank(t):
+        return True
     # Advanced analytics (compare / filter / days-since / …) wins over rankings
     if looks_advanced(text):
         return False
     # Distributor-wise break of a prior table is list_clients, not rankings
-    if _looks_party_breakdown(t):
+    # (unless growth / AMS / YoY columns were requested — then rank)
+    if _looks_party_breakdown(t) and not _looks_party_growth_rank(t):
         return False
     # Row drill-downs ("show by product" / "SKU wise" alone) stay on query_sales
     if _looks_row_drilldown(t) and not _looks_party_mix_query(t):
@@ -2477,7 +2527,7 @@ def _looks_party_analytics(text: str) -> bool:
             r"top\s+(distributors?|parties|clients|imtiaz|stores?|cities|city)|"
             r"doing well|performing well|performing poorly|poorly|"
             r"falling behind|falling in sales|behind on|not doing well|"
-            r"underperform|grew|grow(th|n)?|"
+            r"underperform|grew|grown|grow(th)?|"
             r"percent of|% of|share of|vs\s*ams|against ams|"
             r"relative to ams|year over year|\byoy\b|"
             r"parties by|by average|by ams|by volume|"
@@ -2492,7 +2542,7 @@ def _looks_party_analytics(text: str) -> bool:
             r"behind on average|falling behind|bottom\s+\d+|"
             # last year only with party/growth intent
             r"(distributors?|parties|imtiaz).{0,40}last year|"
-            r"last year.{0,40}(distributors?|parties|imtiaz|growth|grew)"
+            r"last year.{0,40}(distributors?|parties|imtiaz|growth|grew|grown)"
             r")\b",
             t,
         )
@@ -2658,6 +2708,9 @@ def _looks_party_breakdown(text: str) -> bool:
     t = (text or "").lower()
     # Product/packing mix for each distributor is analyze_parties, not a list
     if _looks_party_mix_query(t):
+        return False
+    # Growth / AMS / YoY on individuals → ranked analyze_parties table
+    if _looks_party_growth_rank(t):
         return False
     if _looks_sold_to_parties(t):
         return True
@@ -3694,6 +3747,16 @@ def _dispatch_tool(
             limit=int(arguments.get("limit") or 10),
         )
     if name == "list_clients":
+        # Growth / AMS / YoY on individuals must not become a plain MT list
+        if _looks_party_growth_rank(user_text):
+            return _dispatch_tool(
+                "analyze_parties",
+                arguments,
+                user_text=user_text,
+                prior_spec=prior_spec,
+                prior_price_spec=prior_price_spec,
+                prior_party_spec=prior_party_spec,
+            )
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
         # Period-only on a prior party list (when tool still chosen as list_clients)
@@ -3861,6 +3924,9 @@ def _dispatch_tool(
             sort=arguments.get("sort") or inferred.get("sort") or "desc",
             limit=mix_limit,
             per_party_mix=per_party_mix,
+            grown_only=bool(
+                arguments.get("grown_only") or inferred.get("grown_only")
+            ),
         )
     if name == "query_price":
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
@@ -4318,6 +4384,8 @@ def suggest_preferred_tool(
         return "analyze_parties" if kind == "analyze_parties" else "list_clients"
     if _looks_channel_growth_ask(text):
         return "query_sales"
+    if _looks_party_growth_rank(text):
+        return "analyze_parties"
     if looks_advanced(text):
         return "advanced_query"
     if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
@@ -4388,6 +4456,10 @@ def resolve_forced_tool(
     # 2b2) Rate / Price Fetch / cost factor / packing cost / factor breakdown
     if _looks_price_query(text):
         return "query_price"
+
+    # 2b3) Which distributors grew / vs AMS / YoY — before advanced filter_entities
+    if _looks_party_growth_rank(text):
+        return "analyze_parties"
 
     # 2c) High-confidence advanced modes (city/client compares, etc.)
     if looks_advanced(text):
