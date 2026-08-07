@@ -580,10 +580,14 @@ def page_chat() -> None:
         placeholder="sk-… (or set OPENAI_API_KEY)",
         help="Used only for this session unless OPENAI_API_KEY is already set in the environment.",
     )
+    model_options = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+    default_idx = (
+        model_options.index(DEFAULT_MODEL) if DEFAULT_MODEL in model_options else 0
+    )
     model = c2.selectbox(
         "Model",
-        options=["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
-        index=0,
+        options=model_options,
+        index=default_idx,
     )
     if c3.button("Clear chat", key="chat_clear"):
         st.session_state.pop("eva_chat_messages", None)

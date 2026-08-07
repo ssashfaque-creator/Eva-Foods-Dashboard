@@ -41,7 +41,7 @@ from eva_dashboard.sales_query import (
 )
 from eva_dashboard.seasonality import expected_month_close
 
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gpt-4o-mini"
 MAX_SQL_ROWS = 200
 MAX_TOOL_ROUNDS = 4  # Prefer one structured query_sales call over many SQL rounds
 
