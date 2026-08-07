@@ -64,6 +64,7 @@ PREFERRED_CASES: list[tuple[str, str]] = [
     # Advanced
     ("Compare Lahore vs Karachi last month", "advanced_query"),
     ("Compare Imtiaz vs distributors growth last month", "advanced_query"),
+    # (forced via advanced_query for city/client compares — see FORCED_EXCEPTIONS)
     ("Week over week sales change", "advanced_query"),
     ("Which packing is growing fastest?", "advanced_query"),
     ("What are our expected sales for this month?", "advanced_query"),
@@ -91,6 +92,13 @@ FORCED_EXCEPTIONS: dict[str, str] = {
     "Who is Al Bari?": "lookup_party",
     "show me Alpha Dist sales in July": "lookup_party",
     "Who are the distributors in Lahore?": "list_clients",
+    "Compare Lahore vs Karachi last month": "advanced_query",
+    "Compare Imtiaz vs distributors growth last month": "advanced_query",
+    "What are our expected sales for this month?": "advanced_query",
+    "Identify any dumping this month": "advanced_query",
+    "Which packing is growing fastest?": "advanced_query",
+    "Which cities declined more than 20% YoY?": "advanced_query",
+    "Parties that grew more than 30% last month": "advanced_query",
 }
 
 
@@ -162,6 +170,10 @@ def test_advanced_modes_not_stolen_by_party_analytics() -> None:
     assert infer_advanced_from_text("Show reactivated parties")["mode"] == "reactivated"
     assert looks_advanced("Days since last invoice for distributors")
     assert looks_advanced("Which cities declined more than 20% YoY?")
+    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == (
+        "advanced_query"
+    )
+    assert resolve_forced_tool("what Food Panda are active") == "list_clients"
 
 
 def test_named_party_dist_suffix_and_exclude_online_execute() -> None:

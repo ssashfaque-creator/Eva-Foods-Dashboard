@@ -248,11 +248,11 @@ DATA MODEL (filters you set; tools build tables):
 - Client-type aliases (set `client_type`, never invent a Business Unit for these):
   Imtiaz/store → Imtiaz Store; distributors → Eva Distributors; else exact live type
   (Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, LMT, …).
-- which/what/who + distributors|Imtiaz|stores → individual parties in that client type
+- which/what/who + ANY client type (Distributors, Imtiaz, Metro, Chase Up, CSD,
+  SPAR, Food Panda, Gelani, Online, LMT, …) → individual parties in that type
   (list_clients or analyze_parties). Inherit prior city/type/period.
-  Examples: "which distributor is selling Maan" → parties with BU Maan Consumer;
-  "what Imtiaz store sells the most VTF" → rank Imtiaz stores by VTF volume;
-  "what distributors are active in Lahore" → list_clients Lahore + Eva Distributors.
+  Examples: "which distributor is selling Maan"; "what Metro sells the most VTF";
+  "which Chase Up is active in Lahore"; "who are the CSD stores".
 - Named party / "who is X?" → lookup_party (not a client-type filter).
 - "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
 
@@ -365,7 +365,9 @@ _ANALYSIS_ONLY_SYSTEM = (
     "- Prefer: who leads + gap/share; volume vs AMS / % change when present; "
     "one risk or soft spot.\n"
     "- Skip obvious restatements of every row. No filler.\n"
-    "- Use only numbers visible in the tool tables."
+    "- Use only numbers visible in the tool tables.\n"
+    "- If the tool says no sales / no matching entities / empty table, say that "
+    "in one line — do NOT invent leaders or volumes."
 )
 
 
@@ -2539,23 +2541,29 @@ def _looks_sold_to_parties(text: str) -> bool:
     )
 
 
-def _looks_which_parties_ask(text: str) -> bool:
-    """which/what + distributors|Imtiaz|stores → identify individual parties.
+def _client_type_mentioned(text: str) -> str | None:
+    """Canonical client type if the ask names any known channel/type."""
+    return extract_client_type_from_text(text)
 
-    Covers selling-BU / sells-most / active-in asks. Defers AMS rankings,
-    growth filters, and other advanced party analytics.
+
+def _looks_which_parties_ask(text: str) -> bool:
+    """which/what + any client type → identify individual parties in that type.
+
+    Applies to all channels (Distributors, Imtiaz, Metro, Chase Up, CSD, SPAR,
+    Food Panda, Gelani, Online, LMT, …), not only distributors/Imtiaz.
+    Covers selling-BU / sells-most / active-in / who-are asks.
     """
     t = (text or "").lower()
     if _looks_channel_growth_ask(t) or looks_advanced(text):
         return False
-    # Plain "distributor sales" matrix (not "is selling …")
-    if re.search(r"\b(distributors?|imtiaz)\s+sales\b", t) and not re.search(
-        r"\b(selling|sells)\b", t
-    ):
+    # Plain "X sales" matrix (e.g. Imtiaz sales / Metro sales) — not party list
+    if re.search(
+        r"\b(distributors?|imtiaz|metro|chase\s*up|spar|gelani|csd|"
+        r"food\s*panda|online|lmt)\s+sales\b",
+        t,
+    ) and not re.search(r"\b(selling|sells)\b", t):
         return False
-    if re.search(r"\bchannels?\b", t) and not re.search(
-        r"\b(distributors?|imtiaz|stores?|parties)\b", t
-    ):
+    if re.search(r"\bchannels?\b", t) and not _client_type_mentioned(text):
         return False
     # Leave AMS / growth / share rankings to analyze_parties heuristics
     if re.search(
@@ -2569,14 +2577,11 @@ def _looks_which_parties_ask(text: str) -> bool:
     ):
         return False
 
-    has_type = bool(
-        re.search(
-            r"\b(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?|"
-            r"customers?)\b",
-            t,
-        )
+    ctype = _client_type_mentioned(text)
+    generic_parties = bool(
+        re.search(r"\b(parties|clients?|customers?)\b", t)
     )
-    if not has_type:
+    if not ctype and not generic_parties:
         return False
 
     identify = bool(
@@ -2589,20 +2594,13 @@ def _looks_which_parties_ask(text: str) -> bool:
             t,
         )
     )
-    which_type = bool(
-        re.search(
-            r"\b(which|what|who)\s+(are\s+|were\s+|is\s+|the\s+)*"
-            r"(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?|"
-            r"customers?)\b",
-            t,
-        )
-        or re.search(
-            r"\b(which|what|who)\b.{0,48}\b"
-            r"(distributors?|imtiaz(\s+stores?)?|stores?|parties|clients?)\b",
-            t,
-        )
+    which_word = bool(re.search(r"\b(which|what|who)\b", t))
+    # "which Metro" / "what Chase Up" / "who are the distributors"
+    which_type = which_word and (bool(ctype) or generic_parties)
+    return bool(
+        identify
+        and (which_type or re.search(r"\b(selling|sells|active)\b", t))
     )
-    return bool(identify and (which_type or re.search(r"\b(selling|sells|active)\b", t)))
 
 
 def _looks_party_rank_ask(text: str) -> bool:
@@ -3142,17 +3140,8 @@ def _dispatch_which_parties(
     ctype = normalize_client_type(
         args.get("client_type")
         or inferred.get("client_type")
+        or _client_type_mentioned(user_text)
         or prior_ctx.get("client_type")
-        or (
-            "Eva Distributors"
-            if re.search(r"\bdistributors?\b", t)
-            else None
-        )
-        or (
-            "Imtiaz Store"
-            if re.search(r"\bimtiaz\b", t)
-            else None
-        )
     )
     city_from_text = (
         args.get("city")
@@ -3886,6 +3875,10 @@ def _looks_factual(text: str) -> bool:
         "reactivat", "declin", "invoice", "dump", "silent", "group by",
         "oil type", "packing", "expected", "forecast", "yoy", "wow",
         "week over", "exclude", "without", "remove", "city wise", "sku wise",
+        # All trade channels / client types
+        "channel", "metro", "chase", "spar", "gelani", "panda", "food panda",
+        "csd", "canteen", "online", "lmt", "active", "selling", "sells",
+        "which", "what ",
     )
     return any(k in t for k in keys)
 
@@ -4266,8 +4259,19 @@ def resolve_forced_tool(
     if _looks_channel_growth_ask(text):
         return "query_sales"
 
-    # 2c) Advanced analytics win over which-party shortcuts
+    # 2c) High-confidence advanced modes (city/client compares, etc.)
     if looks_advanced(text):
+        adv = infer_advanced_from_text(text)
+        mode = str(adv.get("mode") or "")
+        if mode in {
+            "compare_cities",
+            "compare_client_types",
+            "dumping",
+            "expected_month",
+            "filter_entities",
+            "dimension_growth",
+        }:
+            return "advanced_query"
         return "required"
 
     # 2d) which/what distributors|Imtiaz … (selling BU / most VTF / active)

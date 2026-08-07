@@ -60,7 +60,10 @@ def test_v040_forces_only_high_confidence() -> None:
     """General factual asks must not hard-pin a tool name."""
     assert resolve_forced_tool("Show me Lahore sales") == "required"
     assert resolve_forced_tool("Top 10 distributors by AMS last month") == "required"
-    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == "required"
+    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == (
+        "advanced_query"
+    )
+    assert resolve_forced_tool("what Food Panda are active") == "list_clients"
     assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == "required"
     # High-confidence party / named-party asks stay forced
     assert resolve_forced_tool("Who are the distributors in Lahore?") == "list_clients"

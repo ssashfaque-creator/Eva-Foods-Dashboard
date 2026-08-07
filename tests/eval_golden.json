@@ -125,20 +125,26 @@
     {
       "id": "adv-compare-cities",
       "q": "Compare Lahore vs Karachi last month",
-      "expected_forced": "required",
+      "expected_forced": "advanced_query",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "adv-expected-month",
       "q": "What are our expected sales for this month?",
-      "expected_forced": "required",
+      "expected_forced": "advanced_query",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "adv-dumping",
       "q": "Identify any dumping this month",
-      "expected_forced": "required",
+      "expected_forced": "advanced_query",
       "preferred_tool": "advanced_query"
+    },
+    {
+      "id": "list-food-panda-active",
+      "q": "what Food Panda are active",
+      "expected_forced": "list_clients",
+      "preferred_tool": "list_clients"
     },
     {
       "id": "adv-reactivated",
@@ -149,7 +155,7 @@
     {
       "id": "adv-filter-decline",
       "q": "Which cities declined more than 20% YoY?",
-      "expected_forced": "required",
+      "expected_forced": "advanced_query",
       "preferred_tool": "advanced_query"
     },
     {

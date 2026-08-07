@@ -165,13 +165,28 @@ def extract_client_type_from_text(text: str) -> str | None:
     if not t:
         return None
 
+    # Ultra-generic shorthand — ignore when a specific channel is also named
+    # ("who are the CSD stores" must not become Imtiaz via bare "stores").
+    generic_aliases = {
+        "store",
+        "stores",
+        "dist",
+        "distributor",
+        "distributors",
+    }
+
     # Prefer multi-word / longer aliases so "canteen store" beats "store"
     aliases = sorted(CLIENT_TYPE_ALIASES.keys(), key=len, reverse=True)
+    matches: list[str] = []
     for alias in aliases:
         # word-boundary-ish: alias as whole phrase
         pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
         if re.search(pattern, t):
-            return CLIENT_TYPE_ALIASES[alias]
+            matches.append(alias)
+    if matches:
+        specific = [a for a in matches if a not in generic_aliases]
+        chosen = (specific or matches)[0]
+        return CLIENT_TYPE_ALIASES[chosen]
 
     # Live type names mentioned verbatim
     for name in list_known_client_types():
