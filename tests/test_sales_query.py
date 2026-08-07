@@ -756,3 +756,78 @@ def test_regroup_city_wise_and_month_group_by_city() -> None:
                 os.environ.pop("EVA_DATA_DIR", None)
             else:
                 os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_remove_layer_and_exclude_value_followups() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool, resolve_remove_request
+
+            # Eva sales (all client types as columns)
+            first = _dispatch_tool(
+                "query_sales",
+                {"period": "July", "business_unit": "Eva Consumer"},
+                user_text="Show me Eva Consumer sales in July",
+            )
+            assert first["ok"] is True
+            prior = first["table_spec"]
+
+            plan = resolve_remove_request(
+                "remove distributors from the table", prior_spec=prior
+            )
+            assert plan is not None
+            assert plan["mode"] == "exclude_value"
+            assert plan["excludes"]["client_type"] == ["Eva Distributors"]
+
+            filtered = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="remove distributors from the table",
+                prior_spec=prior,
+            )
+            assert filtered["ok"] is True
+            assert "Eva Distributors" not in (filtered["matrix"].get("columns") or [])
+            assert (filtered.get("excludes") or {}).get("client_type") == [
+                "Eva Distributors"
+            ]
+
+            # City-wise then remove Lahore
+            cityish = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="group by city",
+                prior_spec=filtered["table_spec"],
+            )
+            assert cityish["ok"] is True
+            drop_lhr = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="remove Lahore",
+                prior_spec=cityish["table_spec"],
+            )
+            assert drop_lhr["ok"] is True
+            assert (drop_lhr.get("excludes") or {}).get("city") == ["Lahore"]
+            # Lahore should not appear as a leaf city row
+            cities = {
+                r.get("city")
+                for r in drop_lhr["matrix"]["rows"]
+                if r.get("row_kind", "leaf") == "leaf" and r.get("city")
+            }
+            assert "Lahore" not in cities
+
+            # Remove city layer (structural)
+            layer = resolve_remove_request(
+                "remove the city",
+                prior_spec=cityish["table_spec"],
+            )
+            assert layer["mode"] == "remove_layer"
+            assert layer["dimension"] == "city"
+            assert "city" not in (layer.get("row_groups") or [])
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous

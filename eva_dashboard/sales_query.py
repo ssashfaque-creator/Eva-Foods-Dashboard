@@ -416,6 +416,7 @@ def _fetch_lines(
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    excludes: dict[str, list[str]] | None = None,
 ) -> pd.DataFrame:
     """Pull line-level MT with taxonomy + geography + client type."""
     init_db()
@@ -455,6 +456,48 @@ def _fetch_lines(
             """
         )
         params.append(client_type)
+
+    ex = excludes or {}
+    if ex.get("city"):
+        placeholders = ",".join("?" for _ in ex["city"])
+        where.append(
+            f"lower(trim(COALESCE(cl.city_filter, ''))) NOT IN ({placeholders})"
+        )
+        params.extend(v.lower().strip() for v in ex["city"])
+    if ex.get("client_type"):
+        placeholders = ",".join("?" for _ in ex["client_type"])
+        where.append(
+            f"""
+            lower(trim(COALESCE(
+              NULLIF(trim(cl.type), ''),
+              NULLIF(trim(s.client_type), ''),
+              'Unmapped'
+            ))) NOT IN ({placeholders})
+            """
+        )
+        params.extend(v.lower().strip() for v in ex["client_type"])
+    if ex.get("business_unit"):
+        placeholders = ",".join("?" for _ in ex["business_unit"])
+        where.append(
+            f"lower(trim(COALESCE(c.category_1, ''))) NOT IN ({placeholders})"
+        )
+        params.extend(v.lower().strip() for v in ex["business_unit"])
+    if ex.get("oil_type"):
+        placeholders = ",".join("?" for _ in ex["oil_type"])
+        where.append(
+            f"lower(trim(COALESCE(c.category_2, ''))) NOT IN ({placeholders})"
+        )
+        params.extend(v.lower().strip() for v in ex["oil_type"])
+    if ex.get("packing_category"):
+        placeholders = ",".join("?" for _ in ex["packing_category"])
+        where.append(
+            f"lower(trim(COALESCE(c.packing_category, ''))) NOT IN ({placeholders})"
+        )
+        params.extend(v.lower().strip() for v in ex["packing_category"])
+    if ex.get("product"):
+        placeholders = ",".join("?" for _ in ex["product"])
+        where.append(f"lower(trim(COALESCE(s.product, ''))) NOT IN ({placeholders})")
+        params.extend(v.lower().strip() for v in ex["product"])
 
     sql = f"""
     SELECT
@@ -1287,6 +1330,7 @@ def query_sales(
     row_groups: list[str] | None = None,
     clear_filters: list[str] | None = None,
     lock_columns: bool = False,
+    excludes: dict[str, list[str]] | None = None,
     prior_spec: dict[str, Any] | None = None,
     compare: str | None = None,
 ) -> dict[str, Any]:
@@ -1306,13 +1350,16 @@ def query_sales(
     ``clear_filters``: drop inherited filters when a follow-up promotes that
     dimension to rows/columns (e.g. group by city clears city=Lahore).
 
+    ``excludes``: drop specific values from the result (e.g. city=Lahore,
+    client_type=Eva Distributors) while keeping the same table grain.
+
     columns: client_type | city | month
       month → last ``months_back`` months as columns + Average
 
     client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
 
     prior_spec: previous table_spec for follow-ups like "add Eva Bulk" /
-    "show by product" / "SKU wise" / "group by city".
+    "show by product" / "SKU wise" / "group by city" / "remove Lahore".
 
     compare: ``yoy`` / ``same_period_last_year`` — same filters & grain vs
     the same calendar span one year earlier (partial months keep day range).
@@ -1344,6 +1391,16 @@ def query_sales(
         for c in (clear_filters or [])
         if c
     }
+    ex_map: dict[str, list[str]] = {}
+    for dim, vals in (excludes or {}).items():
+        key = normalize_row_dimension(dim) or str(dim).strip()
+        if not key:
+            continue
+        bucket = ex_map.setdefault(key, [])
+        for v in vals or []:
+            vs = str(v).strip()
+            if vs and vs not in bucket:
+                bucket.append(vs)
 
     if prior_spec:
         # Carry forward dimensions; merge new business units
@@ -1388,6 +1445,16 @@ def query_sales(
             # follow-ups that only add a BU should preserve rows; drill-downs
             # pass an explicit override.
             pass
+        # Cumulative excludes (remove Lahore, remove distributors, …)
+        for dim, vals in (prior_spec.get("excludes") or {}).items():
+            key = normalize_row_dimension(dim) or str(dim).strip()
+            if not key:
+                continue
+            bucket = ex_map.setdefault(key, [])
+            for v in vals or []:
+                vs = str(v).strip()
+                if vs and vs not in bucket:
+                    bucket.append(vs)
 
     # Apply clears after inherit (regroup promoted a filter to a dimension)
     if "city" in clear:
@@ -1464,6 +1531,7 @@ def query_sales(
         oil_type=oil,
         packing_category=pack,
         client_type=ctype,
+        excludes=ex_map or None,
     )
 
     if col == "month":
@@ -1514,6 +1582,7 @@ def query_sales(
         "column_dimension": col,
         "row_dimension": row_dim,
         "row_groups": groups or None,
+        "excludes": ex_map or None,
         "months_back": mb if col == "month" else None,
         "compare": "yoy" if want_yoy else None,
     }
@@ -1526,6 +1595,7 @@ def query_sales(
         "business_units": units,
         "row_dimension": row_dim,
         "column_dimension": col,
+        "excludes": ex_map or None,
         "matrix": primary,
         "table_spec": table_spec,
     }
@@ -1541,6 +1611,7 @@ def query_sales(
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            excludes=ex_map or None,
         )
         if col == "month":
             # Collapse to row totals vs prior-year same span (not month columns)
@@ -1946,7 +2017,7 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
     return "\n".join(lines) + note + "\n"
 
 
-def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[str] | None = None) -> str:
+def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[str] | None = None, excludes: dict[str, list[str]] | None = None) -> str:
     bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
@@ -1961,6 +2032,11 @@ def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[s
         bits.append(f"Oil Type **{filters['oil_type']}**")
     if filters.get("packing_category"):
         bits.append(f"Packing **{filters['packing_category']}**")
+    if excludes:
+        for dim, vals in excludes.items():
+            if vals:
+                label = dim.replace("_", " ")
+                bits.append(f"excl. {label} **" + "**, **".join(vals) + "**")
     return " · ".join(bits)
 
 
@@ -2130,7 +2206,12 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
     period = result.get("period") or {}
     filters = result.get("filters") or {}
     row_dim = str(result.get("row_dimension") or "row")
-    blurb = _filter_blurb(filters, period, result.get("business_units"))
+    blurb = _filter_blurb(
+        filters,
+        period,
+        result.get("business_units"),
+        (result.get("table_spec") or {}).get("excludes") or result.get("excludes"),
+    )
     parts = [f"Sales for {blurb} (MT).\n"]
 
     if result.get("mode") == "yoy":

@@ -284,6 +284,10 @@ Examples:
       Nest prior packing/SKU/BU under City when those were the prior rows.
   "Group by client type" / "business unit wise" / "as columns by city"
     → same idea; 'as columns' puts the dim on X instead of Y
+  "Remove distributors" / "remove Lahore" (follow-up)
+    → If X is an active row/column/grouping layer → drop that layer (filters stay).
+      If X is a value in the table (Lahore, distributors, Eva Consumer) → exclude
+      those rows/columns from the data; other filters/grain stay.
   "How were Eva Consumer sales in July?"
     → analytical (city + client + AMS); rows = Packing Category
   "What's the Average sale for Imtiaz store last 6 months"
@@ -327,6 +331,8 @@ MODE FROM LANGUAGE:
 - does this include bulk? → inclusion check (Bulk table for same filters)
 - city wise / group by city|client type|BU|product → regroup prior table
   (default: dim on rows/Y; month stays on columns/X; 'as columns' → dim on X)
+- remove / exclude / without X → if X is a table layer, drop the layer;
+  if X is a value (Lahore, distributors), filter that value out
 - show by product / product category / packing → rows = Packing Category (keep prior)
 - dissect further / SKU / sku-wise → rows = Product SKU (keep prior)
 - Messages starting with [FOLLOW-UP …] are replies to the previous answer —
@@ -1257,12 +1263,14 @@ def _looks_table_followup(text: str) -> bool:
         return True
     if _looks_combine_tables(t):
         return True
+    if _looks_remove(t):
+        return True
     if _looks_regroup(t):
         return True
     if _looks_row_drilldown(t):
         return True
     if _is_explicit_followup(t) and re.search(
-        r"\b(add|include|combine|merge|bulk|consumer|group|city|wise)\b", t
+        r"\b(add|include|combine|merge|bulk|consumer|group|city|wise|remove|exclude)\b", t
     ):
         return True
     return False
@@ -1369,6 +1377,226 @@ def _looks_row_drilldown(text: str) -> bool:
 def _looks_regroup(text: str) -> bool:
     """True for 'city wise' / 'group by client type' follow-ups."""
     return resolve_regroup_request(text, prior_spec={"column_dimension": "_"}) is not None
+
+
+def _looks_remove(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(remove|exclude|drop|without|filter\s+out)\b.+"
+            r"|\b(remove|exclude|drop)\s+(the\s+)?\w+",
+            t,
+        )
+    ) and bool(
+        re.search(
+            r"\b(remove|exclude|drop|without|filter\s+out)\b",
+            t,
+        )
+    )
+
+
+_STRUCT_DIM_PHRASES: list[tuple[str, str]] = [
+    ("client types", "client_type"),
+    ("client type", "client_type"),
+    ("business units", "business_unit"),
+    ("business unit", "business_unit"),
+    ("packing categories", "packing_category"),
+    ("packing category", "packing_category"),
+    ("oil types", "oil_type"),
+    ("oil type", "oil_type"),
+    ("packings", "packing_category"),
+    ("packing", "packing_category"),
+    ("products", "packing_category"),
+    ("product", "packing_category"),
+    ("skus", "product"),
+    ("sku", "product"),
+    ("cities", "city"),
+    ("city", "city"),
+    ("months", "month"),
+    ("month", "month"),
+    ("bu", "business_unit"),
+]
+
+
+def _extract_remove_phrase(text: str) -> str | None:
+    t = (text or "").strip()
+    m = re.search(
+        r"\b(?:remove|exclude|drop|without|filter\s+out)\s+"
+        r"(?:the\s+)?(.+?)(?:\s+from\s+(?:the\s+)?(?:table|view|this|that|above))?\s*$",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        m = re.search(
+            r"\b(?:remove|exclude|drop|without|filter\s+out)\s+(?:the\s+)?(.+)",
+            t,
+            flags=re.IGNORECASE,
+        )
+    if not m:
+        return None
+    phrase = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?")
+    phrase = re.sub(
+        r"\s+from\s+(the\s+)?(table|view|this|that|above)$",
+        "",
+        phrase,
+        flags=re.IGNORECASE,
+    ).strip()
+    return phrase or None
+
+
+def _phrase_as_struct_dim(phrase: str) -> str | None:
+    key = (phrase or "").strip().lower()
+    for needle, dim in _STRUCT_DIM_PHRASES:
+        if key == needle or key == needle.replace(" ", ""):
+            return dim
+    return normalize_row_dimension(phrase)
+
+
+def _active_structure(prior_spec: dict[str, Any]) -> dict[str, Any]:
+    row_dim = normalize_row_dimension(prior_spec.get("row_dimension")) or prior_spec.get(
+        "row_dimension"
+    )
+    col_dim = str(prior_spec.get("column_dimension") or "client_type")
+    groups = [
+        normalize_row_dimension(g) or str(g)
+        for g in (prior_spec.get("row_groups") or [])
+        if g
+    ]
+    return {"row_dimension": row_dim, "column_dimension": col_dim, "row_groups": groups}
+
+
+def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
+    """Map a spoken value to (dimension, canonical_value)."""
+    raw = (phrase or "").strip()
+    if not raw:
+        return None
+    # Client types first (distributors, Imtiaz, …) — aliases / extract only,
+    # never passthrough unknown text as a client type.
+    from eva_dashboard.client_language import CLIENT_TYPE_ALIASES, list_known_client_types
+
+    key = re.sub(r"\s+", " ", raw.lower()).strip()
+    if key in CLIENT_TYPE_ALIASES:
+        return ("client_type", CLIENT_TYPE_ALIASES[key])
+    ctype = extract_client_type_from_text(raw)
+    if ctype:
+        return ("client_type", ctype)
+    known_types = {re.sub(r"\s+", " ", t.lower()).strip(): t for t in list_known_client_types()}
+    if key in known_types:
+        return ("client_type", known_types[key])
+
+    from eva_dashboard.party_analytics import extract_city_from_text
+
+    city = extract_city_from_text(raw)
+    if city:
+        return ("city", city)
+    for city_name in (
+        "Lahore",
+        "Karachi",
+        "Islamabad",
+        "Faisalabad",
+        "Multan",
+        "Peshawar",
+        "Rawalpindi",
+        "Gujranwala",
+        "Sialkot",
+        "Hyderabad",
+        "Quetta",
+    ):
+        if raw.lower() == city_name.lower():
+            return ("city", city_name)
+    units = _extract_business_units_from_text(raw)
+    if units:
+        return ("business_unit", units[0])
+    oil = extract_oil_type_from_text(raw)
+    if oil:
+        return ("oil_type", oil)
+    pack = extract_packing_from_text(raw)
+    if pack:
+        return ("packing_category", pack)
+    return None
+
+
+def resolve_remove_request(
+    text: str,
+    *,
+    prior_spec: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Handle 'remove X' follow-ups.
+
+    Rules:
+    - If X is an active row/column/grouping **dimension** → remove that layer
+      (filters stay the same).
+    - If X is a **value** (Lahore, distributors, Eva Consumer, …) → exclude that
+      value from rows/columns (filter it out of the data).
+    """
+    if not prior_spec or not _looks_remove(text):
+        return None
+    phrase = _extract_remove_phrase(text)
+    if not phrase:
+        return None
+
+    struct = _active_structure(prior_spec)
+    dim_name = _phrase_as_struct_dim(phrase)
+    pf = dict(prior_spec.get("filters") or {})
+
+    # --- Structural layer removal ---
+    if dim_name and dim_name in set(struct["row_groups"]) | {
+        struct["row_dimension"],
+        struct["column_dimension"],
+    }:
+        out: dict[str, Any] = {
+            "mode": "remove_layer",
+            "dimension": dim_name,
+            "columns": struct["column_dimension"],
+            "row_dimension": struct["row_dimension"],
+            "row_groups": list(struct["row_groups"]),
+            "clear_filters": [],
+            "excludes": {},
+            "lock_columns": True,
+        }
+        if dim_name in out["row_groups"]:
+            out["row_groups"] = [g for g in out["row_groups"] if g != dim_name]
+        elif dim_name == struct["row_dimension"]:
+            # Drop leaf row dim → fall back under remaining groups or auto grain
+            if out["row_groups"]:
+                # Promote last group to leaf if we only had groups+leaf
+                out["row_dimension"] = out["row_groups"][-1]
+                out["row_groups"] = out["row_groups"][:-1]
+            else:
+                # Sensible default from remaining filters
+                if pf.get("business_unit") or len(prior_spec.get("business_units") or []) == 1:
+                    out["row_dimension"] = "packing_category"
+                else:
+                    out["row_dimension"] = "business_unit"
+        elif dim_name == struct["column_dimension"]:
+            out["columns"] = (
+                "client_type"
+                if struct["column_dimension"] != "client_type"
+                else "city"
+            )
+            if out["columns"] == "city" and pf.get("city"):
+                out["columns"] = "client_type"
+            if out["columns"] == "month":
+                out["columns"] = "client_type"
+        return out
+
+    # --- Value exclusion (filter out row/column values) ---
+    resolved = _resolve_exclude_value(phrase)
+    if not resolved:
+        return None
+    ex_dim, ex_val = resolved
+    out = {
+        "mode": "exclude_value",
+        "dimension": ex_dim,
+        "value": ex_val,
+        "columns": struct["column_dimension"],
+        "row_dimension": struct["row_dimension"],
+        "row_groups": list(struct["row_groups"]),
+        "clear_filters": [],
+        "excludes": {ex_dim: [ex_val]},
+        "lock_columns": True,
+    }
+    return out
 
 
 def extract_regroup_dimension(text: str) -> str | None:
@@ -1646,13 +1874,14 @@ def _looks_context_followup(text: str) -> bool:
             r"above|these sales|those sales|in the above|from the above|"
             r"same (period|filters?|scope|table)|for this|"
             r"combine the tables|merge the tables|add bulk|include bulk|"
-            r"city[- ]?wise|group by|as columns"
+            r"city[- ]?wise|group by|as columns|remove |exclude |without "
             r")\b",
             t,
         )
         or _looks_include_check(t)
         or _looks_combine_tables(t)
         or _looks_regroup(t)
+        or _looks_remove(t)
     )
 
 
@@ -2020,7 +2249,9 @@ def _dispatch_tool(
                 mode=mode_ic,
             )
 
-        if _looks_analytical(user_text):
+        if _looks_analytical(user_text) and not (
+            prior_spec and (_looks_remove(user_text) or _looks_regroup(user_text))
+        ):
             mode = "analytical"
         else:
             mode = "matrix"
@@ -2037,17 +2268,35 @@ def _dispatch_tool(
             units.append(arguments["business_unit"])
 
         prior_row = (prior_spec or {}).get("row_dimension") if prior_spec else None
-        regroup = (
-            resolve_regroup_request(user_text, prior_spec=prior_spec)
+        remove = (
+            resolve_remove_request(user_text, prior_spec=prior_spec)
             if prior_spec
             else None
         )
-        # Prefer regroup over packing/SKU drill language when both could match
+        regroup = (
+            None
+            if remove
+            else (
+                resolve_regroup_request(user_text, prior_spec=prior_spec)
+                if prior_spec
+                else None
+            )
+        )
+        # Prefer remove / regroup over packing/SKU drill language when both could match
         row_dim = arguments.get("row_dimension")
         row_groups: list[str] | None = None
         clear_filters: list[str] | None = None
+        excludes: dict[str, list[str]] | None = None
         lock_columns = False
-        if regroup:
+        if remove:
+            row_dim = remove.get("row_dimension")
+            row_groups = list(remove.get("row_groups") or []) or None
+            clear_filters = list(remove.get("clear_filters") or []) or None
+            excludes = dict(remove.get("excludes") or {}) or None
+            columns = str(remove.get("columns") or columns)
+            lock_columns = True
+            mode = "matrix"
+        elif regroup:
             row_dim = regroup.get("row_dimension")
             row_groups = list(regroup.get("row_groups") or []) or None
             clear_filters = list(regroup.get("clear_filters") or []) or None
@@ -2058,10 +2307,11 @@ def _dispatch_tool(
             row_dim = row_dim or resolve_row_dimension_request(
                 user_text, prior_row_dimension=prior_row
             )
-        is_drill = (not regroup) and (
+        is_drill = (not remove and not regroup) and (
             bool(row_dim) or _looks_row_drilldown(user_text)
         )
         is_regroup = bool(regroup)
+        is_remove = bool(remove)
 
         # Follow-up: merge mentioned BUs / keep prior table / change row grain / YoY
         is_yoy = _looks_sales_yoy_compare(user_text)
@@ -2072,11 +2322,12 @@ def _dispatch_tool(
                 or is_drill
                 or is_yoy
                 or is_regroup
+                or is_remove
                 or _is_explicit_followup(user_text)
             )
             and prior_spec
         ) else None
-        if use_prior or is_combine or is_drill or is_yoy or is_regroup:
+        if use_prior or is_combine or is_drill or is_yoy or is_regroup or is_remove:
             for u in _extract_business_units_from_text(user_text):
                 if u not in units:
                     units.append(u)
@@ -2084,7 +2335,12 @@ def _dispatch_tool(
                 if u not in units:
                     units.append(u)
             # Combine after include_check: restore original prior units + segment
-            if prior_spec and (prior_spec.get("include_check") or is_combine) and not is_regroup:
+            if (
+                prior_spec
+                and (prior_spec.get("include_check") or is_combine)
+                and not is_regroup
+                and not is_remove
+            ):
                 ic = prior_spec.get("include_check") or {}
                 base = ic.get("prior_spec") or prior_spec
                 for u in _prior_units_list(base):
@@ -2139,11 +2395,11 @@ def _dispatch_tool(
             # Drill-downs keep prior BU filters via prior_spec, not model args
             if is_drill and use_prior and not mentioned_units:
                 uniq = []
-            elif ctype and not mentioned_units and not is_combine and not is_regroup:
+            elif ctype and not mentioned_units and not is_combine and not is_regroup and not is_remove:
                 uniq = []
 
-        # Regroup: do not invent city/client from this short follow-up text
-        if is_regroup:
+        # Regroup / remove: do not invent city/client from this short follow-up text
+        if is_regroup or is_remove:
             city_arg = None
             if not extract_client_type_from_text(user_text):
                 ctype = None
@@ -2182,6 +2438,7 @@ def _dispatch_tool(
             row_groups=row_groups,
             clear_filters=clear_filters,
             lock_columns=lock_columns,
+            excludes=excludes,
             prior_spec=use_prior or arguments.get("prior_spec"),
             compare="yoy" if is_yoy else (arguments.get("compare") or None),
         )
@@ -2462,7 +2719,12 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if _looks_include_check(last_user) or _looks_combine_tables(last_user) or _looks_regroup(last_user):
+            if (
+                _looks_include_check(last_user)
+                or _looks_combine_tables(last_user)
+                or _looks_regroup(last_user)
+                or _looks_remove(last_user)
+            ):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "query_sales"},
