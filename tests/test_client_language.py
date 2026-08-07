@@ -216,6 +216,64 @@ def test_query_price_rate_and_price_fetch() -> None:
             assert pf["include_price_fetch"] is True
             assert pf["price_fetch"] is not None
             assert "Price Fetch" in pf["answer_markdown"]
+            # Cost factor shown in stored unit (Ltrs) alongside Price Fetch
+            assert pf["cost_factor"] == 150.0
+            assert pf["cost_unit"] == "Ltrs"
+            assert "Cost Factor (Ltrs)" in pf["answer_markdown"]
+            assert "150" in pf["answer_markdown"]
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_cost_factor_and_packing_cost_asks() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import (
+                _dispatch_tool,
+                _looks_cost_factor_ask,
+                _looks_factor_only_ask,
+                resolve_forced_tool,
+            )
+            from eva_dashboard.sales_query import query_factor_costs
+
+            assert _looks_cost_factor_ask("what's the cost factor?")
+            assert _looks_cost_factor_ask("show factor breakdown")
+            assert _looks_cost_factor_ask(
+                "what's the packing cost for Eva Canola Oil (StandUpPouch)"
+            )
+            assert _looks_factor_only_ask("show factor breakdown")
+            assert resolve_forced_tool("what's the cost factor?") == "query_price"
+            assert resolve_forced_tool(
+                "packing cost for standup canola distributors"
+            ) == "query_price"
+
+            factors = query_factor_costs(
+                client_type="Eva Distributors",
+                product="Eva Canola Oil (StandUpPouch)",
+                breakdown=True,
+            )
+            assert factors["ok"] is True
+            assert factors["rows"]
+            assert factors["rows"][0]["unit"] == "Ltrs"
+            assert factors["rows"][0]["packing_cost"] == 50.0
+            assert "Packing Cost (Ltrs)" in factors["answer_markdown"]
+            assert "Product Cost (Ltrs)" in factors["answer_markdown"]
+            assert "Total Factor Cost (Ltrs)" in factors["answer_markdown"]
+
+            out = _dispatch_tool(
+                "query_price",
+                {},
+                user_text="show factor breakdown for distributors canola standup",
+            )
+            assert out["ok"] is True
+            assert out.get("mode") == "factor_costs"
+            assert "Packing Cost" in out["answer_markdown"]
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
@@ -230,6 +288,7 @@ def test_routing_helpers() -> None:
     assert not _looks_sales_matrix("Canola standup price for Distributors last week")
     assert _looks_sales_matrix("Average sale for Imtiaz store last 6 months")
     assert not _looks_price_query("Average sale for Imtiaz store last 6 months")
+    assert _looks_price_query("what's the cost factor for this")
 
 
 def test_row_drilldown_bu_to_packing_to_sku() -> None:

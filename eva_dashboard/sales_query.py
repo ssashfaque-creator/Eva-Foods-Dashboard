@@ -2654,8 +2654,17 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
     return "\n".join(lines) + note + "\n"
 
 
-def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[str] | None = None, excludes: dict[str, list[str]] | None = None) -> str:
-    bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
+def _filter_blurb(
+    filters: dict[str, Any],
+    period: dict[str, Any] | None,
+    units: list[str] | None = None,
+    excludes: dict[str, list[str]] | None = None,
+) -> str:
+    bits: list[str] = []
+    if period:
+        bits.append(
+            str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")
+        )
     if filters.get("party"):
         bits.append(f"party **{filters['party']}**")
     if filters.get("city"):
@@ -2671,12 +2680,14 @@ def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[s
         bits.append(f"Oil Type **{filters['oil_type']}**")
     if filters.get("packing_category"):
         bits.append(f"Packing **{filters['packing_category']}**")
+    if filters.get("product"):
+        bits.append(f"SKU **{filters['product']}**")
     if excludes:
         for dim, vals in excludes.items():
             if vals:
                 label = dim.replace("_", " ")
                 bits.append(f"excl. {label} **" + "**, **".join(vals) + "**")
-    return " · ".join(bits)
+    return " · ".join(bits) if bits else "all factor costs"
 
 
 def _auto_insights(result: dict[str, Any]) -> list[str]:
@@ -2939,6 +2950,310 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
+def _cost_unit_label(unit: Any) -> str:
+    """Canonical display unit for cost factors (Ltrs / Kgs)."""
+    u = str(unit or "").strip().lower()
+    if u in {"ltr", "ltrs", "liter", "litre", "liters", "litres"}:
+        return "Ltrs"
+    if u in {"kg", "kgs", "kilogram", "kilograms"}:
+        return "Kgs"
+    return str(unit).strip() if unit not in (None, "") else "—"
+
+
+def _blend_cost_factor(
+    frame: pd.DataFrame,
+    *,
+    mt_col: str = "mt",
+    cost_col: str = "total_factor_cost",
+    unit_col: str = "cost_unit",
+) -> dict[str, Any]:
+    """MT-weighted average cost factor when units are consistent."""
+    empty = {
+        "cost_factor": None,
+        "cost_unit": None,
+        "cost_unit_label": None,
+        "product_cost": None,
+        "packing_cost": None,
+        "matched_lines": 0,
+    }
+    if frame.empty or cost_col not in frame.columns:
+        return empty
+    work = frame.dropna(subset=[cost_col]).copy()
+    if work.empty:
+        return empty
+    units = {
+        _cost_unit_label(u)
+        for u in work[unit_col].tolist()
+        if _cost_unit_label(u) != "—"
+    }
+    if len(units) != 1:
+        return {
+            **empty,
+            "matched_lines": int(len(work)),
+            "cost_unit_label": "mixed",
+        }
+    unit_label = next(iter(units))
+    weights = work[mt_col].fillna(0).astype(float)
+    if "mes_qty" in work.columns:
+        weights = weights.where(weights > 0, work["mes_qty"].fillna(0).astype(float))
+    if float(weights.sum()) <= 0:
+        weights = pd.Series([1.0] * len(work), index=work.index)
+    cf = weighted_avg(work[cost_col], weights, allow_unweighted_fallback=True)
+    pc = None
+    pk = None
+    if "product_cost" in work.columns:
+        pc = weighted_avg(work["product_cost"], weights, allow_unweighted_fallback=True)
+    if "packing_cost" in work.columns:
+        pk = weighted_avg(work["packing_cost"], weights, allow_unweighted_fallback=True)
+    return {
+        "cost_factor": round(float(cf), 4) if cf is not None else None,
+        "cost_unit": unit_label,
+        "cost_unit_label": unit_label,
+        "product_cost": round(float(pc), 4) if pc is not None else None,
+        "packing_cost": round(float(pk), 4) if pk is not None else None,
+        "matched_lines": int(len(work)),
+    }
+
+
+def query_factor_costs(
+    *,
+    client_type: str | None = None,
+    business_unit: str | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    product: str | None = None,
+    product_query: str | None = None,
+    breakdown: bool = True,
+    limit: int = 40,
+    prior_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Look up Total Factor / Product / Packing costs from ``factor_costs``.
+
+    Does not require a sales period — use for "what's the packing cost for X SKU",
+    "show factor breakdown", "what's the cost factor".
+    """
+    oil = normalize_oil_type((oil_type or "").strip() or None)
+    pack = normalize_packing_category((packing_category or "").strip() or None)
+    ctype = normalize_client_type((client_type or "").strip() or None)
+    bu = _normalize_business_unit(business_unit)
+    exact_product = (product or "").strip() or None
+    resolution = None
+
+    if prior_spec:
+        prior_filters = prior_spec.get("filters") or {}
+        if not ctype:
+            ctype = prior_filters.get("client_type") or None
+        if not oil:
+            oil = prior_filters.get("oil_type") or None
+        if not pack:
+            pack = prior_filters.get("packing_category") or None
+        if not bu:
+            bu = prior_filters.get("business_unit") or None
+        if not exact_product:
+            exact_product = prior_filters.get("product") or None
+
+    if not exact_product and product_query:
+        from eva_dashboard.product_language import resolve_product_language
+
+        resolution = resolve_product_language(product_query, limit=5)
+        exact_product = resolution.get("top_product") or None
+        top = (resolution.get("matches") or [None])[0] or {}
+        if not oil and top.get("oil_type"):
+            oil = top["oil_type"]
+        if not pack and top.get("packing_category"):
+            pack = top["packing_category"]
+        if not bu and top.get("business_unit"):
+            bu = top["business_unit"]
+
+    params: list[Any] = []
+    where = ["1=1"]
+    if ctype:
+        where.append("lower(trim(fc.client_type)) = lower(trim(?))")
+        params.append(ctype)
+    if exact_product:
+        where.append("lower(trim(fc.product)) = lower(trim(?))")
+        params.append(exact_product)
+    if bu:
+        where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
+        params.append(bu)
+    if oil:
+        where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
+        params.append(oil)
+    if pack:
+        where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
+        params.append(pack)
+
+    sql = f"""
+    SELECT
+      fc.client_type,
+      fc.prod_id,
+      fc.product,
+      fc.unit,
+      fc.product_cost,
+      fc.packing_cost,
+      fc.total_factor_cost,
+      fc.product_cost_date,
+      fc.packing_cost_date,
+      COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
+      COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
+      COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category
+    FROM factor_costs fc
+    LEFT JOIN category c ON c.product = fc.product
+    WHERE {' AND '.join(where)}
+    ORDER BY fc.client_type, fc.product
+    LIMIT ?
+    """
+    params.append(max(1, min(int(limit or 40), 100)))
+    init_db()
+    with connect() as conn:
+        frame = pd.read_sql_query(sql, conn, params=params)
+
+    filters = {
+        "client_type": ctype,
+        "business_unit": bu,
+        "oil_type": oil,
+        "packing_category": pack,
+        "product": exact_product,
+    }
+    if frame.empty:
+        return {
+            "ok": True,
+            "mode": "factor_costs",
+            "filters": filters,
+            "rows": [],
+            "resolution": resolution,
+            "answer_markdown": (
+                f"No factor costs match {_filter_blurb(filters, None)}.\n"
+                "Upload product cost factors + packing costs on the Cost structure page "
+                "if this SKU / client type should have a factor.\n"
+            ),
+            "price_spec": {
+                "filters": filters,
+                "include_price_fetch": False,
+                "include_cost_factor": True,
+                "factor_breakdown": breakdown,
+            },
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    rows_out: list[dict[str, Any]] = []
+    for _, r in frame.iterrows():
+        unit_label = _cost_unit_label(r.get("unit"))
+        rows_out.append(
+            {
+                "client_type": str(r.get("client_type") or ""),
+                "product": str(r.get("product") or ""),
+                "business_unit": str(r.get("business_unit") or ""),
+                "oil_type": str(r.get("oil_type") or ""),
+                "packing_category": str(r.get("packing_category") or ""),
+                "unit": unit_label,
+                "product_cost": (
+                    round(float(r["product_cost"]), 4)
+                    if r.get("product_cost") is not None and not pd.isna(r["product_cost"])
+                    else None
+                ),
+                "packing_cost": (
+                    round(float(r["packing_cost"]), 4)
+                    if r.get("packing_cost") is not None and not pd.isna(r["packing_cost"])
+                    else None
+                ),
+                "total_factor_cost": (
+                    round(float(r["total_factor_cost"]), 4)
+                    if r.get("total_factor_cost") is not None
+                    and not pd.isna(r["total_factor_cost"])
+                    else None
+                ),
+            }
+        )
+
+    blurb = _filter_blurb(filters, None)
+    lines = [f"Cost factors for {blurb}.\n"]
+    if len(rows_out) == 1:
+        one = rows_out[0]
+        u = one["unit"]
+        lines += [
+            "| Metric | Value |",
+            "| --- | --- |",
+            f"| SKU | {one['product']} |",
+            f"| Client Type | {one['client_type'] or '—'} |",
+            f"| Unit | {u} |",
+        ]
+        if breakdown:
+            lines.append(
+                f"| Product Cost ({u}) | "
+                f"{one['product_cost'] if one['product_cost'] is not None else '—'} |"
+            )
+            lines.append(
+                f"| Packing Cost ({u}) | "
+                f"{one['packing_cost'] if one['packing_cost'] is not None else '—'} |"
+            )
+        lines.append(
+            f"| **Total Factor Cost ({u})** | "
+            f"**{one['total_factor_cost'] if one['total_factor_cost'] is not None else '—'}** |"
+        )
+    else:
+        if breakdown:
+            lines.append(
+                "| Client Type | SKU | Packing | Unit | Product Cost | "
+                "Packing Cost | Total Factor |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+            for row in rows_out:
+                lines.append(
+                    "| {ct} | {sku} | {pack} | {u} | {pc} | {pk} | {tot} |".format(
+                        ct=str(row["client_type"]).replace("|", "/"),
+                        sku=str(row["product"]).replace("|", "/"),
+                        pack=str(row["packing_category"]).replace("|", "/"),
+                        u=row["unit"],
+                        pc=row["product_cost"] if row["product_cost"] is not None else "—",
+                        pk=row["packing_cost"] if row["packing_cost"] is not None else "—",
+                        tot=row["total_factor_cost"]
+                        if row["total_factor_cost"] is not None
+                        else "—",
+                    )
+                )
+        else:
+            lines.append("| Client Type | SKU | Packing | Unit | Total Factor |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            for row in rows_out:
+                lines.append(
+                    "| {ct} | {sku} | {pack} | {u} | {tot} |".format(
+                        ct=str(row["client_type"]).replace("|", "/"),
+                        sku=str(row["product"]).replace("|", "/"),
+                        pack=str(row["packing_category"]).replace("|", "/"),
+                        u=row["unit"],
+                        tot=row["total_factor_cost"]
+                        if row["total_factor_cost"] is not None
+                        else "—",
+                    )
+                )
+    lines.append(
+        "\n_Cost factor unit follows the product-cost file (Ltrs or Kgs). "
+        "Price Fetch converts Ltrs → per kg (÷ 0.915) before the maund calc._"
+    )
+
+    return {
+        "ok": True,
+        "mode": "factor_costs",
+        "filters": filters,
+        "rows": rows_out,
+        "breakdown": breakdown,
+        "resolution": resolution,
+        "price_spec": {
+            "filters": filters,
+            "include_price_fetch": False,
+            "include_cost_factor": True,
+            "factor_breakdown": breakdown,
+        },
+        "answer_markdown": "\n".join(lines).strip() + "\n",
+        "response_instructions": (
+            "REQUIRED: Reply with `answer_markdown` verbatim. "
+            "Cost factor / packing cost / product cost are from factor_costs "
+            "(not invented). Unit is Ltrs or Kgs as stored."
+        ),
+    }
+
+
 def query_price(
     *,
     period: str | None = None,
@@ -2952,13 +3267,16 @@ def query_price(
     product: str | None = None,
     product_query: str | None = None,
     include_price_fetch: bool = False,
+    include_cost_factor: bool = False,
+    factor_breakdown: bool = False,
     prior_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Average Rate (and optional Price Fetch) from sales lines.
+    """Average Rate (and optional Price Fetch / cost factor) from sales lines.
 
     Rate = MT-weighted average of ``sales.rate``.
     Amount/kg = Incl GST/FED ÷ (MT × 1000).
     Price Fetch = (amount/kg − cost factor/kg) × maund factor, when factor_costs match.
+    Cost factor is shown in its stored unit (Ltrs or Kgs).
     """
     oil = normalize_oil_type((oil_type or "").strip() or None)
     pack = normalize_packing_category((packing_category or "").strip() or None)
@@ -2989,6 +3307,14 @@ def query_price(
             date_to = (prior_spec["period"] or {}).get("date_to")
         if prior_spec.get("include_price_fetch"):
             include_price_fetch = True
+        if prior_spec.get("include_cost_factor"):
+            include_cost_factor = True
+        if prior_spec.get("factor_breakdown"):
+            factor_breakdown = True
+
+    # Price Fetch always surfaces the cost factor used in the formula
+    if include_price_fetch:
+        include_cost_factor = True
 
     if not exact_product and product_query:
         from eva_dashboard.product_language import resolve_product_language
@@ -3068,6 +3394,8 @@ def query_price(
         ELSE 0
       END AS mt,
       fc.total_factor_cost,
+      fc.product_cost,
+      fc.packing_cost,
       fc.unit AS cost_unit
     FROM sales s
     {_PARTY_JOIN}
@@ -3102,6 +3430,8 @@ def query_price(
             "avg_rate": None,
             "amount_per_kg": None,
             "price_fetch": None,
+            "cost_factor": None,
+            "cost_unit": None,
             "by_product": [],
             "resolution": resolution,
             "answer_markdown": (
@@ -3113,6 +3443,8 @@ def query_price(
                 "period": {"date_from": d0, "date_to": d1, "label": period_info.get("label")},
                 "filters": filters,
                 "include_price_fetch": include_price_fetch,
+                "include_cost_factor": include_cost_factor,
+                "factor_breakdown": factor_breakdown,
             },
             "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
         }
@@ -3178,6 +3510,11 @@ def query_price(
             "avg_rate": round(float(g_rate), 2) if g_rate is not None else None,
             "amount_per_kg": round(float(g_apk), 4) if g_apk is not None else None,
         }
+        g_factor = _blend_cost_factor(grp)
+        entry["cost_factor"] = g_factor.get("cost_factor")
+        entry["cost_unit"] = g_factor.get("cost_unit_label")
+        entry["product_cost"] = g_factor.get("product_cost")
+        entry["packing_cost"] = g_factor.get("packing_cost")
         # product-level PF
         p_vals: list[float] = []
         p_w: list[float] = []
@@ -3214,6 +3551,7 @@ def query_price(
         by_product.append(entry)
 
     by_product.sort(key=lambda r: -float(r.get("mt") or 0))
+    blended_factor = _blend_cost_factor(frame)
 
     filters = {
         "city": city_f,
@@ -3228,6 +3566,8 @@ def query_price(
         "period": {"date_from": d0, "date_to": d1, "label": period_info.get("label")},
         "filters": filters,
         "include_price_fetch": include_price_fetch,
+        "include_cost_factor": include_cost_factor,
+        "factor_breakdown": factor_breakdown,
     }
 
     blurb = _filter_blurb(filters, period_info)
@@ -3242,6 +3582,30 @@ def query_price(
         f"| Amount / kg (Incl GST/FED) | "
         f"{round(float(amount_per_kg), 4) if amount_per_kg is not None else '—'} |",
     ]
+    unit_lab = blended_factor.get("cost_unit_label")
+    if include_cost_factor:
+        if factor_breakdown and blended_factor.get("cost_factor") is not None and unit_lab not in {
+            None,
+            "mixed",
+        }:
+            lines_md.append(
+                f"| Product Cost ({unit_lab}) | "
+                f"{blended_factor['product_cost'] if blended_factor['product_cost'] is not None else '—'} |"
+            )
+            lines_md.append(
+                f"| Packing Cost ({unit_lab}) | "
+                f"{blended_factor['packing_cost'] if blended_factor['packing_cost'] is not None else '—'} |"
+            )
+        if blended_factor.get("cost_factor") is not None and unit_lab not in {None, "mixed"}:
+            lines_md.append(
+                f"| **Cost Factor ({unit_lab})** | **{blended_factor['cost_factor']}** |"
+            )
+        elif unit_lab == "mixed":
+            lines_md.append(
+                "| **Cost Factor** | **mixed units — see by-product / factor breakdown** |"
+            )
+        else:
+            lines_md.append("| **Cost Factor** | — (no factor cost match) |")
     if include_price_fetch:
         pf_txt = (
             round(float(blended_pf), 2) if blended_pf is not None else "— (no factor cost match)"
@@ -3250,21 +3614,26 @@ def query_price(
         lines_md.append(
             "\n_Price Fetch = (Incl GST/FED per kg − cost factor per kg) × "
             f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund "
-            f"(Ltrs costs ÷ {LTR_TO_KG})._"
+            f"(Ltrs costs ÷ {LTR_TO_KG}). "
+            "Cost Factor is shown in its stored unit (Ltrs or Kgs)._"
         )
-    else:
+    elif not include_cost_factor:
         lines_md.append(
-            "\n_Ask “what’s the Price Fetch?” for the recovery figure on the same scope._"
+            "\n_Ask “what’s the Price Fetch?” or “what’s the cost factor?” "
+            "on the same scope._"
         )
 
     if len(by_product) > 1:
         lines_md.append("\n### By product\n")
         hdr = "| Product | Packing | MT | Avg Rate | Amount/kg |"
+        if include_cost_factor:
+            hdr += " Cost Factor | Unit |"
         if include_price_fetch:
             hdr += " Price Fetch |"
         lines_md.append(hdr)
         lines_md.append(
             "| --- | --- | --- | --- | --- |"
+            + (" --- | --- |" if include_cost_factor else "")
             + (" --- |" if include_price_fetch else "")
         )
         for row in by_product[:15]:
@@ -3275,6 +3644,11 @@ def query_price(
                 str(row["avg_rate"] if row["avg_rate"] is not None else "—"),
                 str(row["amount_per_kg"] if row["amount_per_kg"] is not None else "—"),
             ]
+            if include_cost_factor:
+                cells.append(
+                    str(row["cost_factor"] if row["cost_factor"] is not None else "—")
+                )
+                cells.append(str(row["cost_unit"] or "—"))
             if include_price_fetch:
                 cells.append(
                     str(row["price_fetch"] if row["price_fetch"] is not None else "—")
@@ -3290,13 +3664,20 @@ def query_price(
         "avg_rate": round(float(avg_rate), 2) if avg_rate is not None else None,
         "amount_per_kg": round(float(amount_per_kg), 4) if amount_per_kg is not None else None,
         "price_fetch": round(float(blended_pf), 2) if blended_pf is not None else None,
+        "cost_factor": blended_factor.get("cost_factor"),
+        "cost_unit": blended_factor.get("cost_unit_label"),
+        "product_cost": blended_factor.get("product_cost"),
+        "packing_cost": blended_factor.get("packing_cost"),
         "include_price_fetch": include_price_fetch,
+        "include_cost_factor": include_cost_factor,
+        "factor_breakdown": factor_breakdown,
         "by_product": by_product,
         "resolution": resolution,
         "price_spec": price_spec,
         "answer_markdown": "\n".join(lines_md).strip() + "\n",
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim. "
-            "Keep `price_spec` for follow-ups like 'what's the Price Fetch?'."
+            "Keep `price_spec` for follow-ups like 'what's the Price Fetch?' "
+            "or 'what's the cost factor?' / factor breakdown."
         ),
     }

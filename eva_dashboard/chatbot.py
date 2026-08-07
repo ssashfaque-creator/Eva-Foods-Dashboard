@@ -39,6 +39,7 @@ from eva_dashboard.product_language import (
 from eva_dashboard.sales_query import (
     check_segment_inclusion,
     normalize_row_dimension,
+    query_factor_costs,
     query_price,
     query_sales,
 )
@@ -259,7 +260,7 @@ DATA MODEL (filters you set; tools build tables):
 TOOL CHOICE:
 - Volume pivots / month grids / regroup / include-bulk / remove / YoY on a table → query_sales
 - Party rankings, AMS, share, mix, new/lost/silent, invoice frequency → analyze_parties
-- Rate / price / Price Fetch → query_price
+- Rate / price / Price Fetch / cost factor / packing cost / factor breakdown → query_price
 - City/client compares (2+ sides: Lahore vs Karachi vs Islamabad; Imtiaz vs Metro
   vs Chase Up) → advanced_query with mode compare_cities/compare_client_types and
   `entities` for all sides. Dumping, expected month, filter grown/declined/>N MT
@@ -886,9 +887,10 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "query_price",
             "description": (
-                "Average Rate from sales (and Price Fetch when asked). Use for "
-                "'Canola standup price for Distributors last week', "
-                "'average rate', 'what's the Price Fetch?' follow-ups."
+                "Average Rate from sales, Price Fetch, and cost factors. Use for "
+                "'Canola standup price for Distributors last week', average rate, "
+                "'what's the Price Fetch?', 'what's the cost factor?', "
+                "'show factor breakdown', 'packing cost for [SKU]'."
             ),
             "parameters": {
                 "type": "object",
@@ -919,6 +921,26 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "boolean",
                         "description": (
                             "True when user asks for Price Fetch / recovery"
+                        ),
+                    },
+                    "include_cost_factor": {
+                        "type": "boolean",
+                        "description": (
+                            "True for cost factor / packing cost / factor asks "
+                            "(also auto-on with Price Fetch)"
+                        ),
+                    },
+                    "factor_breakdown": {
+                        "type": "boolean",
+                        "description": (
+                            "True for factor breakdown / product cost + packing cost"
+                        ),
+                    },
+                    "factor_only": {
+                        "type": "boolean",
+                        "description": (
+                            "True when asking only for cost/packing/product factor "
+                            "(no rate/sales period required)"
                         ),
                     },
                     "prior_spec": {
@@ -2786,6 +2808,52 @@ def _replay_party_spec(
     )
 
 
+def _looks_cost_factor_ask(text: str) -> bool:
+    """Cost factor / packing cost / factor breakdown (not volume sales)."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"cost\s*factors?|factor\s*costs?|total\s*factor|"
+            r"packing\s*costs?|product\s*costs?|"
+            r"factor\s*break\s*down|factor\s*breakdown|"
+            r"show\s+factors?|what'?s\s+the\s+factor|"
+            r"what\s+is\s+the\s+(cost\s*)?factor|"
+            r"factor\s+for\b"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_factor_breakdown_ask(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"factor\s*break\s*down|factor\s*breakdown|"
+            r"product\s*cost|packing\s*cost|"
+            r"split\s+(the\s+)?factor|break\s+down\s+(the\s+)?factor"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_factor_only_ask(text: str) -> bool:
+    """Pure factor lookup — no rate/Price Fetch / sales period required."""
+    t = (text or "").lower()
+    if not _looks_cost_factor_ask(t) and not _looks_factor_breakdown_ask(t):
+        return False
+    if re.search(
+        r"\b(price\s*fetch|avg\.?\s*rate|average\s+rate|average\s+price|"
+        r"selling\s+price|\brate\b)\b",
+        t,
+    ):
+        return False
+    return True
+
+
 def _looks_price_query(text: str) -> bool:
     t = (text or "").lower()
     if _looks_party_lookup(t) or _looks_client_list(t) or _looks_party_analytics(t):
@@ -2793,6 +2861,8 @@ def _looks_price_query(text: str) -> bool:
     # "average sale" is volume, not rate
     if re.search(r"\baverage\s+sales?\b|\bavg\.?\s+sales?\b", t):
         return False
+    if _looks_cost_factor_ask(t) or _looks_factor_breakdown_ask(t):
+        return True
     return bool(
         re.search(
             r"\b(price\s*fetch|price fetch|avg\.?\s*rate|average\s+rate|"
@@ -3797,16 +3867,44 @@ def _dispatch_tool(
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
         include_pf = bool(arguments.get("include_price_fetch"))
+        include_cf = bool(arguments.get("include_cost_factor"))
+        factor_bd = bool(arguments.get("factor_breakdown"))
+        factor_only = bool(arguments.get("factor_only"))
         if _looks_price_fetch_followup(user_text):
             include_pf = True
+        if _looks_cost_factor_ask(user_text) or _looks_factor_breakdown_ask(user_text):
+            include_cf = True
+        if _looks_factor_breakdown_ask(user_text):
+            factor_bd = True
+        if _looks_factor_only_ask(user_text) or factor_only:
+            factor_only = True
+            include_cf = True
         use_prior = arguments.get("prior_spec") or (
             prior_price_spec
-            if (_looks_price_fetch_followup(user_text) and prior_price_spec)
+            if (
+                prior_price_spec
+                and (
+                    _looks_price_fetch_followup(user_text)
+                    or _looks_cost_factor_ask(user_text)
+                    or _looks_factor_breakdown_ask(user_text)
+                )
+            )
             else None
         )
         product_query = arguments.get("product_query")
         if not product_query and not arguments.get("product"):
             product_query = user_text
+        if factor_only:
+            return query_factor_costs(
+                client_type=ctype,
+                business_unit=arguments.get("business_unit"),
+                oil_type=oil,
+                packing_category=pack,
+                product=arguments.get("product"),
+                product_query=product_query,
+                breakdown=True,
+                prior_spec=use_prior,
+            )
         return query_price(
             period=arguments.get("period") or _extract_period_phrase(user_text),
             date_from=arguments.get("date_from"),
@@ -3819,6 +3917,8 @@ def _dispatch_tool(
             product=arguments.get("product"),
             product_query=product_query,
             include_price_fetch=include_pf,
+            include_cost_factor=include_cf,
+            factor_breakdown=factor_bd,
             prior_spec=use_prior,
         )
     if name == "get_schema":
@@ -4285,6 +4385,10 @@ def resolve_forced_tool(
     if _looks_channel_growth_ask(text):
         return "query_sales"
 
+    # 2b2) Rate / Price Fetch / cost factor / packing cost / factor breakdown
+    if _looks_price_query(text):
+        return "query_price"
+
     # 2c) High-confidence advanced modes (city/client compares, etc.)
     if looks_advanced(text):
         adv = infer_advanced_from_text(text)
@@ -4337,7 +4441,10 @@ def resolve_forced_tool(
             or _looks_which_parties_ask(text)
             or _looks_sold_to_parties(text)
             or _looks_channel_growth_ask(text)
+            or _looks_price_query(text)
         ):
+            if _looks_price_query(text):
+                return "query_price"
             return "required"
         if (
             _looks_sales_matrix(text)
