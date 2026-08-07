@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -575,12 +576,13 @@ def page_chat() -> None:
         DEFAULT_MODEL,
         FOLLOWUP_MARKER,
         chat_completion,
+        export_chat_training_csv,
         resolve_api_key,
         sales_overview,
     )
 
     env_key = resolve_api_key()
-    c1, c2, c3 = st.columns([2, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     api_key_input = c1.text_input(
         "OpenAI API key",
         value="",
@@ -597,7 +599,27 @@ def page_chat() -> None:
         options=model_options,
         index=default_idx,
     )
-    if c3.button("Clear chat", key="chat_clear"):
+    chat_msgs = st.session_state.get("eva_chat_messages") or []
+    has_chat_turns = any(m.get("role") == "user" for m in chat_msgs)
+    if has_chat_turns:
+        csv_blob = export_chat_training_csv(chat_msgs, model=model or DEFAULT_MODEL)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        c3.download_button(
+            "Download chat CSV",
+            data=csv_blob,
+            file_name=f"eva_chat_training_{stamp}.csv",
+            mime="text/csv",
+            key="chat_download_csv",
+            help="Export Q&A turns with blank comment/rating columns for training notes.",
+        )
+    else:
+        c3.button(
+            "Download chat CSV",
+            key="chat_download_csv_disabled",
+            disabled=True,
+            help="Ask at least one question first.",
+        )
+    if c4.button("Clear chat", key="chat_clear"):
         st.session_state.pop("eva_chat_messages", None)
         st.session_state.pop("eva_reply_to", None)
         st.rerun()

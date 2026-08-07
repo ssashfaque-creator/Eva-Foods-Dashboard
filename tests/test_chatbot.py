@@ -104,3 +104,67 @@ def test_followup_and_include_routing_helpers() -> None:
     assert "_eva_followup" not in clean
     assert clean["content"] == "hello"
     assert clean["tool_calls"]
+
+
+def test_export_chat_training_csv_pairs_turns() -> None:
+    from eva_dashboard.chatbot import FOLLOWUP_MARKER, export_chat_training_csv
+
+    messages = [
+        {"role": "user", "content": "Show me Lahore sales"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "query_sales", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "1",
+            "name": "query_sales",
+            "content": '{"ok": true}',
+        },
+        {
+            "role": "assistant",
+            "content": '<table class="eva-mtx"><tr><td>42</td></tr></table>\n### Analysis\n- Strong.',
+            "_eva_followup": {
+                "table_spec": {
+                    "filters": {"city": "Lahore"},
+                    "column_dimension": "month",
+                    "months_back": 6,
+                }
+            },
+        },
+        {
+            "role": "user",
+            "content": f"{FOLLOWUP_MARKER}\n\ngroup by city",
+        },
+        {
+            "role": "assistant",
+            "content": "City breakdown table",
+            "_eva_followup": {
+                "table_spec": {
+                    "filters": {"city": None},
+                    "column_dimension": "month",
+                    "row_dimension": "city",
+                }
+            },
+        },
+    ]
+    csv_text = export_chat_training_csv(messages, model="gpt-4o-mini")
+    assert "user_question" in csv_text
+    assert "comment" in csv_text
+    assert "rating_1_to_5" in csv_text
+    assert "expected_answer_notes" in csv_text
+    assert "Show me Lahore sales" in csv_text
+    assert "group by city" in csv_text
+    assert "query_sales" in csv_text
+    assert "yes" in csv_text  # follow-up flag
+    assert "42" in csv_text
+    assert "<table" not in csv_text.split("\n")[2] or "assistant_answer_plain" in csv_text
+    # plain column should strip tags
+    assert "Strong." in csv_text

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -3344,6 +3347,179 @@ def _attach_followup_meta(
             if meta:
                 m["_eva_followup"] = meta
             return
+
+
+def _strip_html_for_csv(text: str) -> str:
+    """Flatten HTML/markdown tables into readable plain text for CSV cells."""
+    t = text or ""
+    t = re.sub(r"(?is)<br\s*/?>", "\n", t)
+    t = re.sub(r"(?is)</tr\s*>", "\n", t)
+    t = re.sub(r"(?is)</(p|div|h[1-6]|li)\s*>", "\n", t)
+    t = re.sub(r"(?is)<[^>]+>", " ", t)
+    t = t.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def _tools_used_between(
+    messages: list[dict[str, Any]],
+    *,
+    after_idx: int,
+    before_idx: int,
+) -> list[str]:
+    names: list[str] = []
+    for m in messages[after_idx + 1 : before_idx + 1]:
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name") if isinstance(tc, dict) else None
+            if fn:
+                names.append(str(fn))
+        if m.get("role") == "tool" and m.get("name"):
+            # tool result rows — skip; names come from tool_calls
+            pass
+    # unique preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _followup_summary(meta: dict[str, Any] | None) -> str:
+    if not meta:
+        return ""
+    bits: list[str] = []
+    for key in ("table_spec", "party_spec", "price_spec"):
+        spec = meta.get(key) or {}
+        if not isinstance(spec, dict) or not spec:
+            continue
+        filters = spec.get("filters") or {}
+        parts = [f"{k}={v}" for k, v in filters.items() if v]
+        if spec.get("column_dimension"):
+            parts.append(f"columns={spec.get('column_dimension')}")
+        if spec.get("row_dimension"):
+            parts.append(f"rows={spec.get('row_dimension')}")
+        if spec.get("months_back"):
+            parts.append(f"months_back={spec.get('months_back')}")
+        if spec.get("period_phrase"):
+            parts.append(f"period={spec.get('period_phrase')}")
+        elif (spec.get("period") or {}).get("label"):
+            parts.append(f"period={(spec.get('period') or {}).get('label')}")
+        if parts:
+            bits.append(f"{key}: " + "; ".join(parts))
+    return " | ".join(bits)
+
+
+def export_chat_training_csv(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+) -> str:
+    """Build a CSV of user↔assistant turns with blank comment columns for training.
+
+    Columns:
+      turn_id, exported_at, model, is_followup, user_question, assistant_answer,
+      assistant_answer_plain, tools_used, forced_tool_hint, filters_summary,
+      comment, rating_1_to_5, expected_answer_notes, preferred_tool
+    """
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fieldnames = [
+        "turn_id",
+        "exported_at",
+        "model",
+        "is_followup",
+        "user_question",
+        "assistant_answer",
+        "assistant_answer_plain",
+        "tools_used",
+        "forced_tool_hint",
+        "filters_summary",
+        "comment",
+        "rating_1_to_5",
+        "expected_answer_notes",
+        "preferred_tool",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+
+    turn_id = 0
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") != "user":
+            i += 1
+            continue
+        raw_q = str(msg.get("content") or "")
+        is_followup = _is_explicit_followup(raw_q)
+        question = raw_q
+        if is_followup and "\n\n" in raw_q:
+            question = raw_q.split("\n\n", 1)[1]
+        question = question.strip()
+
+        # Find next assistant message with content
+        j = i + 1
+        assistant_idx = None
+        while j < len(messages):
+            if messages[j].get("role") == "assistant" and (
+                messages[j].get("content") or ""
+            ).strip():
+                assistant_idx = j
+                break
+            if messages[j].get("role") == "user":
+                break
+            j += 1
+
+        answer = ""
+        meta: dict[str, Any] = {}
+        tools: list[str] = []
+        if assistant_idx is not None:
+            answer = str(messages[assistant_idx].get("content") or "")
+            meta = dict(messages[assistant_idx].get("_eva_followup") or {})
+            tools = _tools_used_between(
+                messages, after_idx=i, before_idx=assistant_idx
+            )
+
+        forced_hint = ""
+        if question:
+            try:
+                forced_hint = resolve_forced_tool(
+                    (
+                        f"{FOLLOWUP_MARKER}\n\n{question}"
+                        if is_followup
+                        else question
+                    ),
+                    prior_table_spec=meta.get("table_spec"),
+                    prior_party_spec=meta.get("party_spec"),
+                    explicit_followup=is_followup,
+                )
+            except Exception:
+                forced_hint = ""
+
+        turn_id += 1
+        writer.writerow(
+            {
+                "turn_id": turn_id,
+                "exported_at": exported_at,
+                "model": model or DEFAULT_MODEL,
+                "is_followup": "yes" if is_followup else "no",
+                "user_question": question,
+                "assistant_answer": answer,
+                "assistant_answer_plain": _strip_html_for_csv(answer),
+                "tools_used": "|".join(tools),
+                "forced_tool_hint": forced_hint,
+                "filters_summary": _followup_summary(meta),
+                "comment": "",
+                "rating_1_to_5": "",
+                "expected_answer_notes": "",
+                "preferred_tool": "",
+            }
+        )
+        i = (assistant_idx + 1) if assistant_idx is not None else i + 1
+
+    return buf.getvalue()
 
 
 def resolve_forced_tool(

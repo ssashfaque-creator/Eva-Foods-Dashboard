@@ -75,7 +75,7 @@ eva-dashboard update
 eva-dashboard app
 ```
 
-Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.3.28**).
+Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.3.29**).
 
 **First time only** (if `eva-dashboard update` is not available yet):
 
@@ -124,6 +124,8 @@ eva-dashboard app
 - Understands **team product language** (e.g. "VTF bulk", "canola standup") and resolves to exact SKUs.
 - Returns **markdown tables** for numeric answers.
 - Uses **OpenAI GPT-4o-mini** by default with read-only tools.
+- **Download chat CSV** exports Q&A turns with blank `comment` / `rating_1_to_5` /
+  `expected_answer_notes` columns for training feedback.
 - Set `OPENAI_API_KEY` in the environment, or paste a key in the tab (session only).
 
 ```bash
