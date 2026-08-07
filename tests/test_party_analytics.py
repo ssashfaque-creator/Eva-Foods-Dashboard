@@ -268,7 +268,21 @@ def test_named_party_sales_resolves_and_not_found() -> None:
             assert out["filters"].get("party") == "Rubina Shaheen (LHR)"
             assert out["filters"].get("city") is None
             assert out["filters"].get("client_type") is None
-            assert out["period"]["date_from"].startswith("2026-07")
+            # Default party sales = last N months + AMS (not a single July MTD slice)
+            assert out["column_dimension"] == "month"
+            assert "AMS (3 months)" in (out.get("matrix") or {}).get("columns", [])
+            assert out["period"]["date_from"] <= "2026-07-01"
+            assert out["period"]["date_to"].startswith("2026-")
+
+            # Explicit "July only" keeps a single-period party matrix
+            july_only = _dispatch_tool(
+                "lookup_party",
+                {},
+                user_text="Show me Rubina Shaheen sales for July only",
+            )
+            assert july_only["ok"] is True
+            assert july_only["party"] == "Rubina Shaheen (LHR)"
+            assert july_only["period"]["date_from"].startswith("2026-07")
 
             miss = party_sales(query="No Such Client ZZZ", period="July")
             assert miss["mode"] == "party_not_found"
@@ -639,7 +653,10 @@ def test_distributor_sales_routes_to_matrix_not_list() -> None:
             assert out["ok"] is True
             assert out["filters"]["client_type"] == "Eva Distributors"
             assert out["filters"]["city"] == "Karachi"
-            assert out["period"]["date_from"].startswith("2026-07")
+            # Scoped "distributor sales" defaults to month grid + AMS
+            assert out["column_dimension"] == "month"
+            assert "AMS (3 months)" in (out.get("matrix") or {}).get("columns", [])
+            assert out["period"]["date_from"] <= "2026-07-01"
             # Matrix grain (BU / packing), not a party list
             assert out.get("matrix") or out.get("row_dimension")
             assert "party_spec" not in out or out.get("mode") != "list_clients"

@@ -247,12 +247,16 @@ CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit in
   • Distributor / Distributors / Eva distributors → client_type='Eva Distributors'
   • Mentions of Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, North/Central LMT, etc.
     → exact client_type from live data
-  Example: "Average sale for Imtiaz store last 6 months"
+  Example: "Show me Imtiaz sales" / "Average sale for Imtiaz store last 6 months"
     → client_type='Imtiaz Store', columns='month', months_back=6
-      (NO business_unit unless the user named one)
-  Example: "Distributor sales in Karachi for July"
-    → query_sales client_type='Eva Distributors', city='Karachi', period='July'
-      (product/packing matrix — NOT list_clients)
+      (+ AMS (3 months) and AMS (6 months) columns; NO business_unit unless named)
+  Example: "Show me distributor sales" / "Distributor sales in Karachi"
+    → query_sales client_type='Eva Distributors', city=…, columns='month'
+      (month × BU matrix with AMS — NOT list_clients)
+  Example: "Show me Lahore sales"
+    → city='Lahore', columns='month', months_back=6 (+ AMS columns)
+  Example: "Show me Alpha Dist sales" / "sales for Rubina Shaheen"
+    → lookup_party / party_sales: columns='month', months_back=6 (+ AMS)
   Example: "Who are my distributors in Lahore?"
     → list_clients city='Lahore', client_type='Eva Distributors'
 
@@ -266,11 +270,16 @@ Row drill-down:
   • "Show by product" → Packing Category under Business Unit hierarchy
   • "Show by SKU" → SKU under Business Unit → Packing hierarchy, with packing
     and BU subtotals
-Columns: client_type (default) | city | month. Every table has row Total + column Totals.
-  • month-wise / last N months → columns='month', months_back=6 (+ Average column)
-  • When client_type is filtered, columns auto-switch from client_type → city
+Columns: client_type | city | month. Every table has row Total + column Totals.
+  • DEFAULT for "show me X sales" when X is a party, client type, or city:
+    columns='month', months_back=6 with AMS (3 months) + AMS (6 months)
+  • month-wise / last N months → same month grid + AMS
+  • "July only" / "just August" → single-period matrix (not month grid)
+  • When client_type is filtered on a non-month grid, columns auto-switch → city
 
 Examples:
+  "Show me Lahore sales" / "Show me Imtiaz sales" / "Show me Alpha Dist sales"
+    → columns='month', months_back=6 (+ AMS 3 months + AMS 6 months)
   "What were Eva Consumer sales in Lahore last month?"
     → business_unit='Eva Consumer', city='Lahore'  # Packing × client_type
   "Month-wise breakdown of Eva Consumer sales"
@@ -1251,6 +1260,35 @@ def _looks_month_wise(text: str) -> bool:
             t,
         )
     )
+
+
+def _looks_single_month_only(text: str) -> bool:
+    """True for 'July only' / 'just August' — keep a single-period matrix."""
+    t = (text or "").lower()
+    if re.search(r"\b(only|just)\b", t) and _extract_period_phrase(text):
+        return True
+    return False
+
+
+def _looks_scoped_entity_sales(text: str) -> bool:
+    """True for 'show me X sales' where X is party / client type / city.
+
+    These default to a month-wise matrix with AMS columns.
+    """
+    t = (text or "").lower()
+    if _looks_analytical(t) or _looks_party_analytics(t) or _looks_client_list(t):
+        return False
+    if _looks_party_breakdown(t) or _looks_party_mix_query(t):
+        return False
+    if not re.search(r"\b(sales?|volume|mt)\b", t):
+        return False
+    if _looks_named_party_sales(text):
+        return True
+    if extract_client_type_from_text(text):
+        return True
+    if extract_city_from_text(text):
+        return True
+    return False
 
 
 FOLLOWUP_MARKER = "[FOLLOW-UP on the answer you just gave]"
@@ -2706,7 +2744,19 @@ def _dispatch_tool(
     if _looks_named_party_sales(user_text):
         pq = _extract_named_party_query(user_text) or user_text
         period = _extract_period_phrase(user_text)
-        return party_sales(query=pq, period=period)
+        # Default: last 6 months + AMS. Single-month only when user says "July only".
+        if _looks_single_month_only(user_text) and period:
+            return party_sales(
+                query=pq, period=period, columns="city", mode="matrix"
+            )
+        months_back = _months_back_from_text(user_text, 6)
+        return party_sales(
+            query=pq,
+            period=None if not _looks_single_month_only(user_text) else period,
+            columns="month",
+            months_back=months_back,
+            mode="matrix",
+        )
 
     # Period-only follow-up on a party/distributor list → stay on that view
     if prior_party_spec and _looks_period_only_followup(user_text):
@@ -2758,7 +2808,27 @@ def _dispatch_tool(
 
         columns = arguments.get("columns") or "client_type"
         months_back = int(arguments.get("months_back") or 6)
-        if _looks_month_wise(user_text):
+        # Default "show me X sales" (city / client type / party-like) → months + AMS
+        if (
+            not prior_spec
+            and mode != "analytical"
+            and not _looks_single_month_only(user_text)
+            and (
+                _looks_month_wise(user_text)
+                or _looks_scoped_entity_sales(user_text)
+                or (
+                    (
+                        extract_client_type_from_text(user_text)
+                        or extract_city_from_text(user_text)
+                    )
+                    and re.search(r"\b(sales?|volume|mt|show|give)\b", user_text.lower())
+                )
+            )
+        ):
+            columns = "month"
+            months_back = _months_back_from_text(user_text, months_back)
+            mode = "matrix"
+        elif _looks_month_wise(user_text):
             columns = "month"
             months_back = _months_back_from_text(user_text, months_back)
             mode = "matrix"

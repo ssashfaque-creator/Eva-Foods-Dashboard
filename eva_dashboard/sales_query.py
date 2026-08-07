@@ -19,12 +19,16 @@ from eva_dashboard.data import (
     CATEGORY1_ORDER,
     LTR_TO_KG,
     MAUND_FACTOR_PRICE_FETCH,
+    _prior_n_month_ranges,
     _prior_three_month_ranges,
     cost_factor_per_kg,
     pct_change,
     price_fetch_per_maund,
     weighted_avg,
 )
+
+AMS_3_COL = "AMS (3 months)"
+AMS_6_COL = "AMS (6 months)"
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round, mt_str
 
@@ -631,9 +635,9 @@ def _pivot_months(
     row_dim: str,
     month_labels: list[str],
 ) -> dict[str, Any]:
-    """Rows × calendar months + Average column + Total footer."""
+    """Rows × calendar months + Total footer (AMS columns attached later)."""
     if frame.empty:
-        cols = list(month_labels) + ["Average", "Total"]
+        cols = list(month_labels) + ["Total"]
         return {
             "row_dimension": row_dim,
             "column_dimension": "month",
@@ -672,10 +676,8 @@ def _pivot_months(
         pivot = pivot.sort_values("_sum", ascending=False)
     pivot = pivot.drop(columns=["_sum"])
 
-    n = max(len(month_labels), 1)
-    pivot["Average"] = pivot[month_labels].sum(axis=1) / n
     pivot["Total"] = pivot[month_labels].sum(axis=1)
-    columns = list(month_labels) + ["Average", "Total"]
+    columns = list(month_labels) + ["Total"]
 
     rows = []
     for idx, row in pivot.iterrows():
@@ -690,12 +692,7 @@ def _pivot_months(
     for entry in rows:
         for c in columns:
             col_tot_map[c] = float(col_tot_map[c]) + float(entry.get(c) or 0)
-    n = max(len(month_labels), 1)
-    if month_labels:
-        col_tot_map["Average"] = round(
-            sum(col_tot_map[c] for c in month_labels) / n, 3
-        )
-    col_tot_map = {k: mt_round(v) if k != "Average" else round(v, 3) for k, v in col_tot_map.items()}
+    col_tot_map = {k: mt_round(v) for k, v in col_tot_map.items()}
     total_row: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
     for c in columns:
         total_row[c] = col_tot_map[c]
@@ -710,7 +707,7 @@ def _pivot_months(
         "grand_total_mt": col_tot_map["Total"],
         "month_labels": month_labels,
         "markdown_hint": (
-            f"Month-wise MT: rows={row_dim}, columns=months + Average + Total, "
+            f"Month-wise MT: rows={row_dim}, columns=months + AMS + Total, "
             "with column totals footer; zero-volume rows omitted."
         ),
     }
@@ -771,9 +768,6 @@ def _value_cells(
     for c in ordered_cols:
         cells[str(c)] = float(subset.loc[subset["__col"] == c, "mt"].sum()) if not subset.empty else 0.0
     total = sum(cells.values())
-    if month_mode:
-        n = max(len(ordered_cols), 1)
-        cells["Average"] = total / n
     cells["Total"] = total
     return {k: mt_round(v) for k, v in cells.items()}
 
@@ -802,7 +796,7 @@ def _pivot_hierarchy(
     month_mode = month_labels is not None
     display_cols: list[str]
     if month_mode:
-        display_cols = list(month_labels or []) + ["Average", "Total"]
+        display_cols = list(month_labels or []) + ["Total"]
     else:
         display_cols = []
 
@@ -886,8 +880,6 @@ def _pivot_hierarchy(
                 grouped.loc[mask & (grouped["__col"] == c), "mt"].sum()
             )
         total = sum(cells.values())
-        if month_mode:
-            cells["Average"] = total / max(len(ordered_cols), 1)
         cells["Total"] = total
         return {k: mt_round(v) for k, v in cells.items()}
 
@@ -933,8 +925,6 @@ def _pivot_hierarchy(
     for c in ordered_cols:
         grand_cells[str(c)] = float(grouped.loc[grouped["__col"] == c, "mt"].sum())
     grand_tot = sum(grand_cells.values())
-    if month_mode:
-        grand_cells["Average"] = grand_tot / max(len(ordered_cols), 1)
     grand_cells["Total"] = grand_tot
     total_row: dict[str, Any] = {
         levels[0]: "Total",
@@ -1015,9 +1005,12 @@ def _ams_by_row(
     oil_type: str | None,
     packing_category: str | None,
     client_type: str | None = None,
+    party: str | None = None,
+    n_months: int = 3,
 ) -> dict[str, float]:
-    """Mean of the three prior full calendar months' MT by row dimension."""
-    ranges = _prior_three_month_ranges(as_of)
+    """Mean of the N prior full calendar months' MT by row dimension."""
+    n = max(1, int(n_months))
+    ranges = _prior_n_month_ranges(as_of, n)
     monthly: list[dict[str, float]] = []
     keys: set[str] = set()
     for start, end in ranges:
@@ -1030,8 +1023,12 @@ def _ams_by_row(
             oil_type=oil_type,
             packing_category=packing_category,
             client_type=client_type,
+            party=party,
         )
         if frame.empty:
+            monthly.append({})
+            continue
+        if row_dim not in frame.columns:
             monthly.append({})
             continue
         grouped = frame.groupby(row_dim)["mt"].sum()
@@ -1039,8 +1036,184 @@ def _ams_by_row(
         keys.update(totals)
         monthly.append(totals)
     return {
-        key: sum(m.get(key, 0.0) for m in monthly) / 3.0 for key in keys
+        key: sum(m.get(key, 0.0) for m in monthly) / float(n) for key in keys
     }
+
+
+def _ams_total(
+    *,
+    as_of: date,
+    n_months: int,
+    city: str | None = None,
+    business_unit: str | None = None,
+    business_units: list[str] | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    party: str | None = None,
+) -> float:
+    """Overall AMS (mean of N prior full months) for the same filter scope."""
+    n = max(1, int(n_months))
+    ranges = _prior_n_month_ranges(as_of, n)
+    totals: list[float] = []
+    for start, end in ranges:
+        frame = _fetch_lines(
+            date_from=start.isoformat(),
+            date_to=end.isoformat(),
+            city=city,
+            business_unit=business_unit,
+            business_units=business_units,
+            oil_type=oil_type,
+            packing_category=packing_category,
+            client_type=client_type,
+            party=party,
+        )
+        totals.append(float(frame["mt"].sum()) if not frame.empty else 0.0)
+    return sum(totals) / float(n)
+
+
+def _month_header_label(col: str) -> str:
+    """Pretty month headers: 2026-03 → Mar 2026."""
+    m = re.fullmatch(r"(20\d{2})-(\d{2})", str(col))
+    if not m:
+        return str(col)
+    year, month = int(m.group(1)), int(m.group(2))
+    try:
+        return f"{calendar.month_abbr[month]} {year}"
+    except (IndexError, KeyError):
+        return str(col)
+
+
+def _enrich_month_matrix_with_ams(
+    matrix: dict[str, Any],
+    *,
+    as_of: date,
+    months_back: int,
+    city: str | None = None,
+    business_unit: str | None = None,
+    business_units: list[str] | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    party: str | None = None,
+) -> dict[str, Any]:
+    """Insert AMS (3 months) / AMS (6 months) before Total on a month matrix."""
+    columns = list(matrix.get("columns") or [])
+    rows = list(matrix.get("rows") or [])
+    if not columns or "Total" not in columns:
+        return matrix
+
+    # Drop legacy Average if present
+    columns = [c for c in columns if c != "Average"]
+    ams_cols: list[str] = [AMS_3_COL]
+    if int(months_back) >= 6:
+        ams_cols.append(AMS_6_COL)
+
+    ams_as_of = as_of.replace(day=1)
+    row_dim = str(matrix.get("row_dimension") or "business_unit")
+    headers = list(matrix.get("row_headers") or [])
+    leaf_dim = headers[-1] if headers else row_dim
+
+    ams_maps: dict[str, dict[str, float]] = {}
+    for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
+        if label not in ams_cols:
+            continue
+        ams_maps[label] = _ams_by_row(
+            row_dim=leaf_dim,
+            as_of=ams_as_of,
+            city=city,
+            business_unit=business_unit,
+            business_units=business_units,
+            oil_type=oil_type,
+            packing_category=packing_category,
+            client_type=client_type,
+            party=party,
+            n_months=n,
+        )
+
+    totals_ams = {
+        label: _ams_total(
+            as_of=ams_as_of,
+            n_months=3 if label == AMS_3_COL else 6,
+            city=city,
+            business_unit=business_unit,
+            business_units=business_units,
+            oil_type=oil_type,
+            packing_category=packing_category,
+            client_type=client_type,
+            party=party,
+        )
+        for label in ams_cols
+    }
+
+    # Parent-level AMS maps for hierarchical subtotals
+    parent_maps: dict[str, dict[str, dict[str, float]]] = {}
+    for lv in headers[:-1] if headers else []:
+        parent_maps[lv] = {}
+        for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
+            if label not in ams_cols:
+                continue
+            parent_maps[lv][label] = _ams_by_row(
+                row_dim=lv,
+                as_of=ams_as_of,
+                city=city,
+                business_unit=business_unit,
+                business_units=business_units,
+                oil_type=oil_type,
+                packing_category=packing_category,
+                client_type=client_type,
+                party=party,
+                n_months=n,
+            )
+
+    new_columns: list[str] = []
+    for c in columns:
+        if c == "Average":
+            continue
+        if c == "Total":
+            new_columns.extend(ams_cols)
+        new_columns.append(c)
+
+    for row in rows:
+        kind = str(row.get("row_kind") or "leaf")
+        for label in ams_cols:
+            if kind == "total":
+                row[label] = mt_round(totals_ams[label])
+                continue
+            key = None
+            if kind.startswith("subtotal_") and headers:
+                lv = kind.replace("subtotal_", "", 1)
+                raw = str(row.get(lv) or "")
+                key = raw.replace(" Total", "").strip() if raw else None
+                val = float((parent_maps.get(lv) or {}).get(label, {}).get(key or "", 0.0))
+                row[label] = mt_round(val)
+                continue
+            # leaf / flat
+            raw = str(row.get(leaf_dim) or row.get(row_dim) or "").strip()
+            if not raw:
+                # hierarchical blank parent cell — find last non-empty header
+                for h in reversed(headers or [row_dim]):
+                    cand = str(row.get(h) or "").strip()
+                    if cand:
+                        raw = cand
+                        break
+            row[label] = mt_round(float(ams_maps[label].get(raw, 0.0)))
+        row.pop("Average", None)
+
+    col_tot = dict(matrix.get("column_totals") or {})
+    col_tot.pop("Average", None)
+    for label in ams_cols:
+        col_tot[label] = mt_round(totals_ams[label])
+    matrix["columns"] = new_columns
+    matrix["rows"] = rows
+    matrix["column_totals"] = col_tot
+    matrix["ams_columns"] = ams_cols
+    matrix["markdown_hint"] = (
+        f"Month-wise MT: rows={leaf_dim}, columns=months + "
+        + " + ".join(ams_cols)
+        + " + Total; AMS = mean of prior full calendar months for the same filters."
+    )
+    return matrix
 
 
 def _trend_table(
@@ -1390,7 +1563,7 @@ def query_sales(
     When set, prior city/client_type filters are not inherited.
 
     columns: client_type | city | month
-      month → last ``months_back`` months as columns + Average
+      month → last ``months_back`` months as columns + AMS (3/6 months)
 
     client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
 
@@ -1588,6 +1761,19 @@ def query_sales(
     if col == "month":
         primary = _build_pivot(
             frame, row_dim, "month", month_labels=labels, row_groups=groups or None
+        )
+        as_of_ams = date.fromisoformat(d1)
+        primary = _enrich_month_matrix_with_ams(
+            primary,
+            as_of=as_of_ams,
+            months_back=mb,
+            city=city_f,
+            business_unit=bu,
+            business_units=units if len(units) > 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype,
+            party=party_f,
         )
     else:
         primary = _build_pivot(frame, row_dim, col, row_groups=groups or None)
@@ -2057,8 +2243,13 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
         for lab in head_labels:
             lines.append(f"<th>{_html_escape(lab)}</th>")
         for c in columns:
-            cls = ' class="num total-col"' if c == "Total" else ' class="num"'
-            lines.append(f"<th{cls}>{_html_escape(c)}</th>")
+            if c == "Total":
+                cls = ' class="num total-col"'
+            elif str(c).startswith("AMS"):
+                cls = ' class="num ams-col"'
+            else:
+                cls = ' class="num"'
+            lines.append(f"<th{cls}>{_html_escape(_month_header_label(c))}</th>")
         lines.append("</tr></thead><tbody>")
         for i, row in enumerate(rows):
             css = _matrix_row_css_class(row, row_key)
@@ -2079,7 +2270,12 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
                     text = mt_str(val)
                 else:
                     text = _html_escape(val)
-                cls = "num total-col" if key == "Total" else "num"
+                if key == "Total":
+                    cls = "num total-col"
+                elif str(key).startswith("AMS"):
+                    cls = "num ams-col"
+                else:
+                    cls = "num"
                 lines.append(f'<td class="{cls}">{text}</td>')
             lines.append("</tr>")
         lines.append("</tbody></table></div>")
@@ -2093,8 +2289,13 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
         f"<th>{_html_escape(label_h)}</th>",
     ]
     for c in columns:
-        cls = ' class="num total-col"' if c == "Total" else ' class="num"'
-        lines.append(f"<th{cls}>{_html_escape(c)}</th>")
+        if c == "Total":
+            cls = ' class="num total-col"'
+        elif str(c).startswith("AMS"):
+            cls = ' class="num ams-col"'
+        else:
+            cls = ' class="num"'
+        lines.append(f"<th{cls}>{_html_escape(_month_header_label(c))}</th>")
     lines.append("</tr></thead><tbody>")
     for row in rows:
         css = _matrix_row_css_class(row, row_key)
@@ -2109,7 +2310,12 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
                 text = "—"
             else:
                 text = _html_escape(val)
-            cls = "num total-col" if key == "Total" else "num"
+            if key == "Total":
+                cls = "num total-col"
+            elif str(key).startswith("AMS"):
+                cls = "num ams-col"
+            else:
+                cls = "num"
             lines.append(f'<td class="{cls}">{text}</td>')
         lines.append("</tr>")
     lines.append("</tbody></table></div>")

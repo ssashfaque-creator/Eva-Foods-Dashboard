@@ -700,11 +700,11 @@ def _category1_sort_key(name: str) -> tuple[int, str]:
         return (len(CATEGORY1_ORDER), text)
 
 
-def _prior_three_month_ranges(current: date) -> list[tuple[date, date]]:
+def _prior_n_month_ranges(current: date, n: int = 3) -> list[tuple[date, date]]:
     """Full calendar months immediately before the report month (oldest → newest)."""
     year, month = current.year, current.month
     ranges: list[tuple[date, date]] = []
-    for _ in range(3):
+    for _ in range(max(1, int(n))):
         month -= 1
         if month == 0:
             month = 12
@@ -714,6 +714,11 @@ def _prior_three_month_ranges(current: date) -> list[tuple[date, date]]:
         ranges.append((start, end))
     ranges.reverse()
     return ranges
+
+
+def _prior_three_month_ranges(current: date) -> list[tuple[date, date]]:
+    """Full calendar months immediately before the report month (oldest → newest)."""
+    return _prior_n_month_ranges(current, 3)
 
 
 def pct_change(current: float, baseline: float) -> float | None:

@@ -1623,11 +1623,13 @@ def party_sales(
     period: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    columns: str = "city",
+    columns: str = "month",
+    months_back: int = 6,
     mode: str = "matrix",
 ) -> dict[str, Any]:
     """Resolve a named client/party then show their sales for a period.
 
+    Default view: last N months as columns + AMS (3/6 months).
     Does not inherit city/client_type from chat context — only the named party
     (plus optional period). Zero matches → clear not-found + ask to elaborate.
     """
@@ -1716,7 +1718,8 @@ def party_sales(
         date_from=date_from,
         date_to=date_to,
         party=name,
-        columns=columns or "city",
+        columns=columns or "month",
+        months_back=int(months_back or 6),
         mode=mode or "matrix",
         prior_spec=None,
     )

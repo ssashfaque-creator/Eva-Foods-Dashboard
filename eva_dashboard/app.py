@@ -138,6 +138,14 @@ def _inject_styles() -> None:
             white-space: nowrap;
         }
         .eva-mtx td.total-col { font-weight: 700; }
+        .eva-mtx th.ams-col, .eva-mtx td.ams-col {
+            font-weight: 700;
+            background: rgba(23, 74, 56, 0.08);
+        }
+        .eva-mtx th {
+            max-width: 7.5rem;
+            white-space: normal;
+        }
         .eva-mtx tr.eva-subtotal td {
             font-weight: 700;
             background: rgba(128, 128, 128, 0.16);

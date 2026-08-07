@@ -188,7 +188,10 @@ def test_month_wise_and_add_followup() -> None:
             assert first["ok"] is True
             assert first["column_dimension"] == "month"
             assert first["row_dimension"] == "packing_category"
-            assert "Average" in first["matrix"]["columns"]
+            cols = first["matrix"]["columns"]
+            assert "AMS (3 months)" in cols
+            assert "AMS (6 months)" in cols
+            assert "Average" not in cols
             assert first.get("table_spec")
 
             follow = _dispatch_tool(
