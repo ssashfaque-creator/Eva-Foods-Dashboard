@@ -648,6 +648,12 @@ def test_hierarchical_packing_and_sku_tables() -> None:
             assert "eva-mtx" in md
             assert "eva-subtotal" in md or "Total" in md
             assert "rowspan=" in md
+            zero_leaves = [
+                r
+                for r in m["rows"]
+                if r.get("row_kind") == "leaf" and float(r.get("Total") or 0) == 0
+            ]
+            assert not zero_leaves
 
             # By SKU: BU | Packing | SKU + packing + BU totals
             sku = query_sales(

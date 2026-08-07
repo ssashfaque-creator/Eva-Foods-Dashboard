@@ -19,7 +19,7 @@ from eva_dashboard.party_analytics import (
     infer_party_analytics_from_text,
     list_clients,
 )
-from eva_dashboard.sales_query import resolve_period
+from eva_dashboard.sales_query import query_sales, resolve_period
 
 
 def _env(tmp: str) -> None:
@@ -192,6 +192,51 @@ def test_list_distributors_in_lahore() -> None:
             assert "Other Guy" not in names
             assert "Gamma Dist" not in names
             assert all(c["client_type"] == "Eva Distributors" for c in out["clients"])
+            assert all(float(c["mt"]) > 0 for c in out["clients"])
+            assert out.get("party_spec", {}).get("kind") == "list_clients"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_individual_distributors_inherit_period_and_july_only() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            sales = query_sales(
+                period="July",
+                city="Lahore",
+                client_type="Eva Distributors",
+                columns="client_type",
+                mode="matrix",
+            )
+            prior = sales["table_spec"]
+            dist = _dispatch_tool(
+                "list_clients",
+                {},
+                user_text="Can you show this By individual distributors",
+                prior_spec=prior,
+            )
+            assert dist["ok"] is True
+            assert dist["mode"] == "list_clients"
+            assert dist["period"]["date_from"].startswith("2026-07")
+            assert all(float(c["mt"]) > 0 for c in dist["clients"])
+            assert dist["party_spec"]["kind"] == "list_clients"
+
+            again = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="show July only",
+                prior_spec=prior,
+                prior_party_spec=dist["party_spec"],
+            )
+            assert again["mode"] == "list_clients"
+            assert again["period"]["date_from"].startswith("2026-07")
+            assert all(float(c["mt"]) > 0 for c in again["clients"])
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

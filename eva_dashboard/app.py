@@ -708,6 +708,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
 
     forced_prior = None
     forced_price = None
+    forced_party = None
     prompt_for_model = prompt
     reply_idx = st.session_state.get("eva_reply_to")
     if reply_idx is not None:
@@ -716,6 +717,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             meta = (msgs[reply_idx].get("_eva_followup") or {})
             forced_prior = meta.get("table_spec")
             forced_price = meta.get("price_spec")
+            forced_party = meta.get("party_spec")
         prompt_for_model = f"{FOLLOWUP_MARKER}\n\n{prompt}"
         st.session_state.pop("eva_reply_to", None)
 
@@ -732,6 +734,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             on_status=lambda s: status.caption(s),
             forced_prior_spec=forced_prior,
             forced_prior_price_spec=forced_price,
+            forced_prior_party_spec=forced_party,
         )
         status.empty()
         # Keep only user/assistant visible turns + latest tool transcript for continuity

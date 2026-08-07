@@ -332,6 +332,10 @@ Examples:
     → filter_entities metric='volume' op='gt' threshold=10
   "More sales this month than last month"
     → filter_entities metric='mom' op='grown' threshold=0
+  "Show this by individual distributors" (follow-up after a July sales table)
+    → list_clients with SAME city/client_type/period (July), zeros omitted
+  "Show July only" (follow-up after individual distributors)
+    → re-run that distributor list for July — do NOT switch back to BU matrix
 
 MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
@@ -1866,6 +1870,8 @@ def _looks_party_lookup(text: str) -> bool:
 
 def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
+    if _looks_party_breakdown(t):
+        return True
     if re.search(
         r"\b("
         r"top\s+\d|top\s+(distributors?|parties|clients|imtiaz)|"
@@ -1907,7 +1913,8 @@ def _looks_context_followup(text: str) -> bool:
             r"above|these sales|those sales|in the above|from the above|"
             r"same (period|filters?|scope|table)|for this|"
             r"combine the tables|merge the tables|add bulk|include bulk|"
-            r"city[- ]?wise|group by|as columns|remove |exclude |without "
+            r"city[- ]?wise|group by|as columns|remove |exclude |without |"
+            r"show this|this by"
             r")\b",
             t,
         )
@@ -1915,6 +1922,8 @@ def _looks_context_followup(text: str) -> bool:
         or _looks_combine_tables(t)
         or _looks_regroup(t)
         or _looks_remove(t)
+        or _looks_party_breakdown(t)
+        or _looks_period_only_followup(t)
     )
 
 
@@ -1998,8 +2007,14 @@ def _party_filters_from_prior(
     prior_spec: dict[str, Any] | None,
     user_text: str,
 ) -> dict[str, Any]:
-    """Carry city / BU / period / etc. from the last sales table when user says 'in this'."""
-    if not prior_spec or not _looks_context_followup(user_text):
+    """Carry city / BU / period / etc. from the last sales table on follow-ups."""
+    if not prior_spec:
+        return {}
+    if not (
+        _looks_context_followup(user_text)
+        or _looks_party_breakdown(user_text)
+        or _looks_period_only_followup(user_text)
+    ):
         return {}
     pf = prior_spec.get("filters") or {}
     out: dict[str, Any] = {}
@@ -2027,6 +2042,149 @@ def _party_filters_from_prior(
             out["date_to"] = p["date_to"]
             out["period"] = None
     return out
+
+
+def _looks_party_breakdown(text: str) -> bool:
+    """True for 'by individual distributors' / distributor-wise breakdown of prior table."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"individual\s+distributors?|"
+            r"by\s+(individual\s+)?(distributors?|parties|clients?|party)|"
+            r"(distributors?|parties|clients?)[- ]wise|"
+            r"break(\s*down|down)?\s+by\s+(distributors?|parties|clients?)"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _extract_period_phrase(text: str) -> str | None:
+    """Pull a resolvable period phrase (e.g. 'July', 'July 2026', 'this month')."""
+    from eva_dashboard.sales_query import MONTH_NAMES
+    import calendar as _cal
+
+    t = (text or "").lower()
+    for phrase in (
+        "this month",
+        "last month",
+        "this week",
+        "last week",
+        "so far",
+        "mtd",
+    ):
+        if phrase in t:
+            return phrase
+    year_m = re.search(r"(20\d{2})", t)
+    year = year_m.group(1) if year_m else None
+    month_num = None
+    for name, num in MONTH_NAMES.items():
+        if re.search(rf"\b{re.escape(name)}\b", t):
+            month_num = num
+            break
+    if month_num is None:
+        return None
+    nice = _cal.month_name[month_num]
+    return f"{nice} {year}" if year else nice
+
+
+def _looks_period_only_followup(text: str) -> bool:
+    """True when the user only changes the period (e.g. 'show July only')."""
+    t = (text or "").lower().strip()
+    if not _extract_period_phrase(text):
+        return False
+    if _looks_regroup(t) or _looks_remove(t) or _looks_include_check(t):
+        return False
+    if _looks_combine_tables(t):
+        return False
+    if re.search(
+        r"\b(by |wise|remove |exclude |group by|sku|packing|product break|"
+        r"add |compare|yoy|vs last year)\b",
+        t,
+    ):
+        return False
+    if re.search(r"\b(only|just)\b", t):
+        return True
+    cleaned = t
+    for phrase in (
+        "show", "give me", "for", "in", "please", "can you", "sales", "sale",
+        "the", "a", "me",
+    ):
+        cleaned = re.sub(rf"\b{phrase}\b", " ", cleaned)
+    period = _extract_period_phrase(text)
+    if period:
+        for tok in period.lower().split():
+            cleaned = re.sub(rf"\b{re.escape(tok)}\b", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
+    return len(cleaned.split()) == 0
+
+
+def _last_party_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Find the most recent list_clients / analyze_parties party_spec in tool results."""
+    for m in reversed(messages):
+        if m.get("role") != "tool":
+            continue
+        raw = m.get("content") or ""
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("party_spec"):
+            return payload["party_spec"]
+        if isinstance(payload, dict) and payload.get("mode") == "list_clients":
+            return {
+                "kind": "list_clients",
+                "filters": payload.get("filters") or {},
+                "period": payload.get("period"),
+                "period_phrase": None,
+                "limit": payload.get("count") or 200,
+            }
+    return None
+
+
+def _replay_party_spec(
+    party_spec: dict[str, Any],
+    *,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """Re-run list_clients / analyze_parties with an optional new period."""
+    filters = dict(party_spec.get("filters") or {})
+    kind = party_spec.get("kind") or "list_clients"
+    p_phrase = period
+    d0 = date_from
+    d1 = date_to
+    if not p_phrase and not d0:
+        if party_spec.get("period_phrase"):
+            p_phrase = party_spec["period_phrase"]
+        else:
+            p = party_spec.get("period") or {}
+            d0, d1 = p.get("date_from"), p.get("date_to")
+    if kind == "analyze_parties":
+        return analyze_parties(
+            period=p_phrase,
+            date_from=d0,
+            date_to=d1,
+            city=filters.get("city"),
+            client_type=filters.get("client_type"),
+            business_unit=filters.get("business_unit"),
+            oil_type=filters.get("oil_type"),
+            packing_category=filters.get("packing_category"),
+            metric=party_spec.get("metric") or "volume",
+            limit=int(party_spec.get("limit") or 100),
+            group_by=party_spec.get("group_by") or "party",
+        )
+    return list_clients(
+        city=filters.get("city"),
+        client_type=filters.get("client_type"),
+        period=p_phrase,
+        date_from=d0,
+        date_to=d1,
+        limit=int(party_spec.get("limit") or 200),
+        include_zero=bool(party_spec.get("include_zero")),
+    )
 
 
 def _looks_price_query(text: str) -> bool:
@@ -2292,7 +2450,38 @@ def _dispatch_tool(
     user_text: str = "",
     prior_spec: dict[str, Any] | None = None,
     prior_price_spec: dict[str, Any] | None = None,
+    prior_party_spec: dict[str, Any] | None = None,
 ) -> Any:
+    # Period-only follow-up on a party/distributor list → stay on that view
+    if prior_party_spec and _looks_period_only_followup(user_text):
+        new_period = _extract_period_phrase(user_text)
+        return _replay_party_spec(prior_party_spec, period=new_period)
+
+    # "By individual distributors" after a sales table → list those parties for same period
+    if (
+        name in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
+        and prior_spec
+        and _looks_party_breakdown(user_text)
+    ):
+        prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+        ctype = normalize_client_type(
+            arguments.get("client_type")
+            or prior_ctx.get("client_type")
+            or (
+                "Eva Distributors"
+                if re.search(r"\bdistributors?\b", (user_text or "").lower())
+                else None
+            )
+        )
+        return list_clients(
+            city=arguments.get("city") or prior_ctx.get("city"),
+            client_type=ctype,
+            period=arguments.get("period") or prior_ctx.get("period"),
+            date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
+            date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
+            limit=int(arguments.get("limit") or 200),
+        )
+
     if name == "query_sales":
         # "Does this include bulk?" — show Bulk-only for prior scope
         if _looks_include_check(user_text) and prior_spec:
@@ -2513,14 +2702,41 @@ def _dispatch_tool(
         )
     if name == "list_clients":
         inferred = infer_party_analytics_from_text(user_text)
+        prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+        # Period-only on a prior party list (when tool still chosen as list_clients)
+        if prior_party_spec and _looks_period_only_followup(user_text):
+            return _replay_party_spec(
+                prior_party_spec, period=_extract_period_phrase(user_text)
+            )
+        city = (
+            arguments.get("city")
+            or inferred.get("city")
+            or prior_ctx.get("city")
+        )
+        ctype = normalize_client_type(
+            arguments.get("client_type")
+            or inferred.get("client_type")
+            or prior_ctx.get("client_type")
+            or (
+                "Eva Distributors"
+                if re.search(r"\bdistributors?\b", (user_text or "").lower())
+                else None
+            )
+        )
+        period = (
+            _extract_period_phrase(user_text)
+            if _looks_period_only_followup(user_text)
+            else None
+        )
         return list_clients(
-            city=arguments.get("city") or inferred.get("city"),
-            client_type=normalize_client_type(
-                arguments.get("client_type") or inferred.get("client_type")
-            ),
-            period=arguments.get("period") or inferred.get("period"),
-            date_from=arguments.get("date_from"),
-            date_to=arguments.get("date_to"),
+            city=city,
+            client_type=ctype,
+            period=period
+            or arguments.get("period")
+            or inferred.get("period")
+            or prior_ctx.get("period"),
+            date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
+            date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             limit=int(arguments.get("limit") or inferred.get("limit") or 200),
         )
     if name == "advanced_query":
@@ -2717,6 +2933,7 @@ def _attach_followup_meta(
     *,
     table_spec: dict[str, Any] | None = None,
     price_spec: dict[str, Any] | None = None,
+    party_spec: dict[str, Any] | None = None,
 ) -> None:
     """Stamp the last assistant turn so the Reply button can pin prior filters."""
     for m in reversed(messages):
@@ -2726,6 +2943,8 @@ def _attach_followup_meta(
                 meta["table_spec"] = table_spec
             if price_spec:
                 meta["price_spec"] = price_spec
+            if party_spec:
+                meta["party_spec"] = party_spec
             if meta:
                 m["_eva_followup"] = meta
             return
@@ -2739,6 +2958,7 @@ def chat_completion(
     on_status: Callable[[str], None] | None = None,
     forced_prior_spec: dict[str, Any] | None = None,
     forced_prior_price_spec: dict[str, Any] | None = None,
+    forced_prior_party_spec: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run a chat turn with tools. System prompt is refreshed with live DB state every turn.
 
@@ -2774,7 +2994,25 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if (
+            prior_party_guess = forced_prior_party_spec or _last_party_spec(working)
+            if prior_party_guess and _looks_period_only_followup(last_user):
+                kind = prior_party_guess.get("kind") or "list_clients"
+                tool_choice = {
+                    "type": "function",
+                    "function": {
+                        "name": (
+                            "analyze_parties"
+                            if kind == "analyze_parties"
+                            else "list_clients"
+                        )
+                    },
+                }
+            elif _looks_party_breakdown(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "list_clients"},
+                }
+            elif (
                 _looks_include_check(last_user)
                 or _looks_combine_tables(last_user)
                 or _looks_regroup(last_user)
@@ -2872,12 +3110,14 @@ def chat_completion(
                 working,
                 table_spec=forced_prior_spec or _last_table_spec(working),
                 price_spec=forced_prior_price_spec or _last_price_spec(working),
+                party_spec=forced_prior_party_spec or _last_party_spec(working),
             )
             return text, working
 
         sales_markdown: str | None = None
         last_table_spec: dict[str, Any] | None = None
         last_price_spec: dict[str, Any] | None = None
+        last_party_spec: dict[str, Any] | None = None
         for tc in tool_calls:
             name = tc.function.name
             if on_status:
@@ -2889,12 +3129,14 @@ def chat_completion(
             try:
                 prior = forced_prior_spec or _last_table_spec(working)
                 prior_price = forced_prior_price_spec or _last_price_spec(working)
+                prior_party = forced_prior_party_spec or _last_party_spec(working)
                 result = _dispatch_tool(
                     name,
                     args,
                     user_text=last_user,
                     prior_spec=prior,
                     prior_price_spec=prior_price,
+                    prior_party_spec=prior_party,
                 )
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
@@ -2915,6 +3157,8 @@ def chat_completion(
                 and result.get("answer_markdown")
             ):
                 sales_markdown = str(result["answer_markdown"])
+                if result.get("party_spec"):
+                    last_party_spec = result["party_spec"]
                 if name == "query_sales":
                     if result.get("table_spec"):
                         last_table_spec = result["table_spec"]
@@ -2962,6 +3206,7 @@ def chat_completion(
                         "clients": result.get("clients"),
                         "parties": result.get("parties"),
                         "count": result.get("count"),
+                        "party_spec": result.get("party_spec"),
                         "answer_markdown": sales_markdown,
                         "response_instructions": (
                             "Use answer_markdown verbatim as the reply."
@@ -2983,6 +3228,7 @@ def chat_completion(
                 working,
                 table_spec=last_table_spec or forced_prior_spec or _last_table_spec(working),
                 price_spec=last_price_spec or forced_prior_price_spec or _last_price_spec(working),
+                party_spec=last_party_spec or forced_prior_party_spec or _last_party_spec(working),
             )
             return sales_markdown, working
 

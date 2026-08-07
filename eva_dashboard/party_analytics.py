@@ -235,6 +235,7 @@ def list_clients(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 200,
+    include_zero: bool = False,
 ) -> dict[str, Any]:
     """List clients matching city (City-Filter) and/or client type — not fuzzy name search."""
     city_f = (city or "").strip() or None
@@ -305,6 +306,9 @@ def list_clients(
     rows: list[dict[str, Any]] = []
     for _, r in clients.iterrows():
         name = str(r["client"])
+        mt = round(mt_map.get(name, 0.0), 3)
+        if not include_zero and mt <= 0:
+            continue
         rows.append(
             {
                 "client": name,
@@ -312,7 +316,7 @@ def list_clients(
                 "city_filter": r["city_filter"] or None,
                 "city": r["city"] or None,
                 "inactive": r["inactive"] or None,
-                "mt": round(mt_map.get(name, 0.0), 3),
+                "mt": mt,
             }
         )
     rows.sort(key=lambda x: (-float(x["mt"]), str(x["client"]).lower()))
@@ -328,23 +332,58 @@ def list_clients(
     scope = " · ".join(scope_bits) or "clients"
     period_label = (period_info or {}).get("label") or "all time"
 
+    # Omit constant filter columns when every row shares the same value
+    show_type = not (ctype and all(str(r["client_type"]) == ctype for r in rows))
+    show_cf = not (
+        city_f
+        and all(str(r.get("city_filter") or "") == city_f for r in rows)
+    )
+    show_city = not (
+        city_f
+        and all(str(r.get("city") or "") in {city_f, ""} for r in rows)
+        and all(str(r.get("city_filter") or "") == city_f for r in rows)
+    )
+
+    headers = ["#", "Client"]
+    if show_type:
+        headers.append("Client Type")
+    if show_cf:
+        headers.append("City-Filter")
+    if show_city:
+        headers.append("City")
+    headers.append("MT")
+
     lines = [
         f"**{len(rows)}** clients — {scope} · volume period: {period_label}.\n",
-        "| # | Client | Client Type | City-Filter | City | MT |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
     for i, r in enumerate(rows, 1):
-        lines.append(
-            "| {i} | {c} | {t} | {cf} | {city} | {mt} |".format(
-                i=i,
-                c=str(r["client"]).replace("|", "/"),
-                t=str(r["client_type"]).replace("|", "/"),
-                cf=str(r["city_filter"] or "—").replace("|", "/"),
-                city=str(r["city"] or "—").replace("|", "/"),
-                mt=r["mt"],
-            )
-        )
-    lines.append(f"\n_Listed MT total: **{total_mt}**._")
+        cells = [str(i), str(r["client"]).replace("|", "/")]
+        if show_type:
+            cells.append(str(r["client_type"]).replace("|", "/"))
+        if show_cf:
+            cells.append(str(r["city_filter"] or "—").replace("|", "/"))
+        if show_city:
+            cells.append(str(r["city"] or "—").replace("|", "/"))
+        cells.append(str(r["mt"]))
+        lines.append("| " + " | ".join(cells) + " |")
+    lines.append(f"\n_Listed MT total: **{total_mt}**"
+                 + (" (zero-volume clients omitted)." if not include_zero else ".")
+                 + "_")
+
+    party_spec = {
+        "kind": "list_clients",
+        "filters": {"city": city_f, "client_type": ctype},
+        "period_phrase": period,
+        "period": {
+            "date_from": (period_info or {}).get("date_from"),
+            "date_to": (period_info or {}).get("date_to"),
+            "label": (period_info or {}).get("label"),
+        },
+        "limit": lim,
+        "include_zero": include_zero,
+    }
 
     return {
         "ok": True,
@@ -354,6 +393,7 @@ def list_clients(
         "count": len(rows),
         "total_mt": total_mt,
         "clients": rows,
+        "party_spec": party_spec,
         "answer_markdown": "\n".join(lines) + "\n",
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }
@@ -1133,6 +1173,7 @@ def analyze_parties(
     else:
         rows.sort(key=lambda r: sk(r["volume_mt"], 0))
         score_key, score_label = "volume_mt", "Volume (MT)"
+        rows = [r for r in rows if (r.get("volume_mt") or 0) > 0]
 
     rows = rows[:lim]
     for r in rows:
@@ -1343,13 +1384,6 @@ def _append_analysis(lines: list[str], tips: list[str]) -> list[str]:
     out.append("### Analysis")
     out.extend(f"- {t}" for t in tips)
     return out
-    part = frame[frame["party"] == party]
-    if part.empty:
-        return {"client_type": None, "city": None}
-    return {
-        "client_type": str(part["client_type"].iloc[0]) if "client_type" in part else None,
-        "city": str(part["city"].iloc[0]) if "city" in part else None,
-    }
 
 
 def _scope_blurb(filters: dict[str, Any], period: dict[str, Any]) -> str:
@@ -1463,6 +1497,25 @@ def _party_table_result(
         "compare_period": compare_period,
         "filters": filters,
         "parties": rows,
+        "party_spec": {
+            "kind": "analyze_parties",
+            "filters": {
+                "city": filters.get("city"),
+                "client_type": filters.get("client_type"),
+                "business_unit": filters.get("business_unit"),
+                "oil_type": filters.get("oil_type"),
+                "packing_category": filters.get("packing_category"),
+            },
+            "period_phrase": None,
+            "period": {
+                "date_from": period_info.get("date_from"),
+                "date_to": period_info.get("date_to"),
+                "label": period_info.get("label"),
+            },
+            "metric": metric,
+            "limit": len(rows) if rows else 10,
+            "group_by": entity_key if entity_key in {"party", "city"} else "party",
+        },
         "answer_markdown": "\n".join(lines).strip() + "\n",
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }
@@ -1548,7 +1601,9 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
 
     # List mode
     if re.search(
-        r"\b(who are|list|show( me)?)\b.+\b(distributors?|clients?|parties|imtiaz)\b",
+        r"\b(who are|list|show( me)?)\b.+\b(distributors?|clients?|parties|imtiaz)\b|"
+        r"\b(individual\s+distributors?|by\s+(individual\s+)?"
+        r"(distributors?|parties|clients?)|(distributors?|parties)[- ]wise)\b",
         t,
     ) and not re.search(
         r"\b(top|highest|grow|doing well|poor|behind|share|percent|%|ams|average|"
@@ -1557,6 +1612,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     ):
         out["mode"] = "list"
         out["limit"] = 200
+        out["metric"] = "volume"
 
     # Metrics (order matters)
     context_ref = bool(

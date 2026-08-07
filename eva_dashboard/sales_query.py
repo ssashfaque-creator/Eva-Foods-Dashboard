@@ -572,14 +572,19 @@ def _pivot_mt(
     columns = [c for c in pivot.columns if c != "Total"] + ["Total"]
     rows = []
     for idx, row in pivot.iterrows():
+        if float(mt_round(row["Total"])) == 0:
+            continue
         entry: dict[str, Any] = {row_dim: str(idx)}
         for c in columns:
             entry[str(c)] = mt_round(row[c])
         rows.append(entry)
 
-    # Column totals footer row
-    col_tot_map = {str(c): mt_round(col_totals.get(c, 0.0)) for c in col_totals.index}
-    col_tot_map["Total"] = mt_round(pivot["Total"].sum())
+    # Column totals footer row (from remaining rows only)
+    col_tot_map: dict[str, float] = {str(c): 0.0 for c in columns}
+    for entry in rows:
+        for c in columns:
+            col_tot_map[str(c)] = float(col_tot_map[str(c)]) + float(entry.get(str(c)) or 0)
+    col_tot_map = {k: mt_round(v) for k, v in col_tot_map.items()}
     total_row: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
     for c in columns:
         total_row[str(c)] = col_tot_map.get(str(c), 0.0)
@@ -591,10 +596,11 @@ def _pivot_mt(
         "columns": [str(c) for c in columns],
         "rows": rows,
         "column_totals": col_tot_map,
-        "grand_total_mt": col_tot_map["Total"],
+        "grand_total_mt": col_tot_map.get("Total", 0.0),
         "markdown_hint": (
             f"HTML table: rows = {row_dim}, columns = {col_dim} "
-            "(highest column totals first), row Total + column Total footer."
+            "(highest column totals first), row Total + column Total footer; "
+            "zero-volume rows omitted."
         ),
     }
 
@@ -666,16 +672,23 @@ def _pivot_months(
 
     rows = []
     for idx, row in pivot.iterrows():
+        if float(mt_round(row["Total"])) == 0:
+            continue
         entry: dict[str, Any] = {row_dim: str(idx)}
         for c in columns:
             entry[str(c)] = mt_round(row[c])
         rows.append(entry)
 
-    col_tot_map: dict[str, float] = {}
-    for c in month_labels:
-        col_tot_map[c] = mt_round(pivot[c].sum())
-    col_tot_map["Average"] = round(sum(col_tot_map[c] for c in month_labels) / n, 3)
-    col_tot_map["Total"] = mt_round(pivot["Total"].sum())
+    col_tot_map: dict[str, float] = {c: 0.0 for c in columns}
+    for entry in rows:
+        for c in columns:
+            col_tot_map[c] = float(col_tot_map[c]) + float(entry.get(c) or 0)
+    n = max(len(month_labels), 1)
+    if month_labels:
+        col_tot_map["Average"] = round(
+            sum(col_tot_map[c] for c in month_labels) / n, 3
+        )
+    col_tot_map = {k: mt_round(v) if k != "Average" else round(v, 3) for k, v in col_tot_map.items()}
     total_row: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
     for c in columns:
         total_row[c] = col_tot_map[c]
@@ -691,7 +704,7 @@ def _pivot_months(
         "month_labels": month_labels,
         "markdown_hint": (
             f"Month-wise MT: rows={row_dim}, columns=months + Average + Total, "
-            "with column totals footer."
+            "with column totals footer; zero-volume rows omitted."
         ),
     }
 
@@ -844,6 +857,16 @@ def _pivot_hierarchy(
         return out
 
     leaves = _ordered_leaves([], 0)
+    # Drop leaf combos with zero volume so tables never show empty rows
+    nonzero_leaves: list[tuple[str, ...]] = []
+    leaf_cells: dict[tuple[str, ...], dict[str, Any]] = {}
+    for key in leaves:
+        cells = _value_cells(grouped, levels, key, ordered_cols, month_mode=month_mode)
+        if float(cells.get("Total") or 0) == 0:
+            continue
+        nonzero_leaves.append(key)
+        leaf_cells[key] = cells
+    leaves = nonzero_leaves
     rows_out: list[dict[str, Any]] = []
 
     def _prefix_cells(prefix: tuple[str, ...]) -> dict[str, float]:
@@ -867,6 +890,8 @@ def _pivot_hierarchy(
             return
         prefix = prev_key[: depth + 1]
         cells = _prefix_cells(prefix)
+        if float(cells.get("Total") or 0) == 0:
+            return
         entry: dict[str, Any] = {lv: "" for lv in levels}
         entry[levels[depth]] = f"{prefix[depth]} Total"
         entry["row_kind"] = f"subtotal_{levels[depth]}"
@@ -884,7 +909,7 @@ def _pivot_hierarchy(
                 for close_d in range(len(levels) - 2, diff_d - 1, -1):
                     _emit_subtotal(prev, close_d)
 
-        cells = _value_cells(grouped, levels, key, ordered_cols, month_mode=month_mode)
+        cells = leaf_cells[key]
         entry = {lv: "" for lv in levels}
         for d, lv in enumerate(levels):
             show = i == 0 or key[: d + 1] != leaves[i - 1][: d + 1]
