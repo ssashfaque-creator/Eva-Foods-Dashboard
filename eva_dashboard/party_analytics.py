@@ -20,8 +20,9 @@ from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round
 from eva_dashboard.sales_query import (
-    _PARTY_JOIN,
+    _attach_client_dims,
     _normalize_business_unit,
+    _parties_matching,
     _sales_date_bounds,
     query_sales,
     resolve_period,
@@ -38,16 +39,6 @@ CASE
   ELSE 0
 END
 """
-
-_CLIENT_TYPE_EXPR = """
-COALESCE(
-  NULLIF(trim(cl.type), ''),
-  NULLIF(trim(s.client_type), ''),
-  'Unmapped'
-)
-"""
-
-_CITY_EXPR = "COALESCE(NULLIF(trim(cl.city_filter), ''), 'Unmapped')"
 
 
 def list_known_cities() -> list[str]:
@@ -107,16 +98,52 @@ def _fetch_party_lines(
     packing_category: str | None = None,
     brand_prefix: str | None = None,
 ) -> pd.DataFrame:
-    """Line-level MT with party + taxonomy for analytics."""
+    """Line-level MT with party + taxonomy for analytics.
+
+    Fast path: sales ↔ category in SQL, city/client_type from in-memory clients
+    map — same approach as ``sales_query._fetch_lines`` (avoids O(sales×clients)
+    expression JOIN that hung list_clients / analyze_parties on live DBs).
+    """
     init_db()
     params: list[Any] = [date_from, date_to]
     where = ["s.date >= ?", "s.date <= ?", "s.party IS NOT NULL", "trim(s.party) != ''"]
-    if city:
-        where.append(f"lower(trim({_CITY_EXPR})) = lower(trim(?))")
-        params.append(city)
-    if client_type:
-        where.append(f"lower(trim({_CLIENT_TYPE_EXPR})) = lower(trim(?))")
-        params.append(client_type)
+
+    if city or client_type:
+        matched = _parties_matching(city=city, client_type=client_type) or []
+        if client_type and not city:
+            where.append(
+                "("
+                + (
+                    f"s.party IN ({','.join('?' for _ in matched)}) OR "
+                    if matched
+                    else "0 OR "
+                )
+                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + ")"
+            )
+            if matched:
+                params.extend(matched)
+            params.append(client_type)
+        elif matched:
+            placeholders = ",".join("?" for _ in matched)
+            where.append(f"s.party IN ({placeholders})")
+            params.extend(matched)
+        else:
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "party",
+                    "inv_no",
+                    "product",
+                    "client_type",
+                    "city",
+                    "business_unit",
+                    "oil_type",
+                    "packing_category",
+                    "mt",
+                ]
+            )
+
     if business_unit:
         where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
         params.append(business_unit)
@@ -136,18 +163,25 @@ def _fetch_party_lines(
       s.party,
       s.inv_no,
       s.product,
-      {_CLIENT_TYPE_EXPR} AS client_type,
-      {_CITY_EXPR} AS city,
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
       COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
       COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
+      COALESCE(NULLIF(trim(s.client_type), ''), '') AS sales_client_type,
       {_MT_EXPR} AS mt
     FROM sales s
-    {_PARTY_JOIN}
+    LEFT JOIN category c ON c.product = s.product
     WHERE {' AND '.join(where)}
     """
     with connect() as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+        frame = pd.read_sql_query(sql, conn, params=params)
+    frame = _attach_client_dims(frame)
+    if city:
+        ck = city.strip().lower()
+        frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    if client_type:
+        tk = client_type.strip().lower()
+        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+    return frame.reset_index(drop=True)
 
 
 def _first_sale_dates(
@@ -160,37 +194,28 @@ def _first_sale_dates(
     brand_prefix: str | None = None,
 ) -> dict[str, str]:
     """Earliest sale date per party (optional filters)."""
-    init_db()
-    params: list[Any] = []
-    where = ["s.party IS NOT NULL", "trim(s.party) != ''", "s.date IS NOT NULL"]
-    if city:
-        where.append(f"lower(trim({_CITY_EXPR})) = lower(trim(?))")
-        params.append(city)
-    if client_type:
-        where.append(f"lower(trim({_CLIENT_TYPE_EXPR})) = lower(trim(?))")
-        params.append(client_type)
-    if business_unit:
-        where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
-        params.append(business_unit)
-    if brand_prefix:
-        where.append("lower(trim(COALESCE(c.category_1, ''))) LIKE lower(?)")
-        params.append(f"{brand_prefix}%")
-    if oil_type:
-        where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
-        params.append(oil_type)
-    if packing_category:
-        where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
-        params.append(packing_category)
-    sql = f"""
-    SELECT s.party, MIN(s.date) AS first_sale
-    FROM sales s
-    {_PARTY_JOIN}
-    WHERE {' AND '.join(where)}
-    GROUP BY s.party
-    """
-    with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return {str(r["party"]): str(r["first_sale"])[:10] for r in rows}
+    # Reuse the fast party-line fetch over the full sales range, then min(date)
+    min_d, max_d = _sales_date_bounds()
+    if not min_d or not max_d:
+        return {}
+    frame = _fetch_party_lines(
+        date_from=min_d.isoformat(),
+        date_to=max_d.isoformat(),
+        city=city,
+        client_type=client_type,
+        business_unit=business_unit,
+        oil_type=oil_type,
+        packing_category=packing_category,
+        brand_prefix=brand_prefix,
+    )
+    if frame.empty:
+        return {}
+    firsts = frame.groupby("party", as_index=False)["date"].min()
+    return {
+        str(r["party"]): str(r["date"])[:10]
+        for _, r in firsts.iterrows()
+        if r.get("party") is not None and r.get("date") is not None
+    }
 
 
 def _ams_by_party(

@@ -27,8 +27,9 @@ from eva_dashboard.party_analytics import (
     extract_city_from_text,
 )
 from eva_dashboard.sales_query import (
-    _PARTY_JOIN,
+    _attach_client_dims,
     _normalize_business_unit,
+    _parties_matching,
     _sales_date_bounds,
     resolve_period,
 )
@@ -44,15 +45,6 @@ CASE
   ELSE 0
 END
 """
-
-_CLIENT_TYPE_EXPR = """
-COALESCE(
-  NULLIF(trim(cl.type), ''),
-  NULLIF(trim(s.client_type), ''),
-  'Unmapped'
-)
-"""
-_CITY_EXPR = "COALESCE(NULLIF(trim(cl.city_filter), ''), 'Unmapped')"
 
 
 def _fetch_filtered_mt(
@@ -101,15 +93,47 @@ def _fetch_filtered_lines(
     exclude_client_types: list[str] | None = None,
     exclude_cities: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Sales lines with taxonomy + geography (fast in-memory client map)."""
     init_db()
     params: list[Any] = [date_from, date_to]
     where = ["s.date >= ?", "s.date <= ?"]
-    if city:
-        where.append(f"lower(trim({_CITY_EXPR})) = lower(trim(?))")
-        params.append(city)
-    if client_type:
-        where.append(f"lower(trim({_CLIENT_TYPE_EXPR})) = lower(trim(?))")
-        params.append(client_type)
+
+    if city or client_type:
+        matched = _parties_matching(city=city, client_type=client_type) or []
+        if client_type and not city:
+            where.append(
+                "("
+                + (
+                    f"s.party IN ({','.join('?' for _ in matched)}) OR "
+                    if matched
+                    else "0 OR "
+                )
+                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + ")"
+            )
+            if matched:
+                params.extend(matched)
+            params.append(client_type)
+        elif matched:
+            placeholders = ",".join("?" for _ in matched)
+            where.append(f"s.party IN ({placeholders})")
+            params.extend(matched)
+        else:
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "party",
+                    "inv_no",
+                    "product",
+                    "client_type",
+                    "city",
+                    "business_unit",
+                    "oil_type",
+                    "packing_category",
+                    "mt",
+                ]
+            )
+
     if business_unit:
         where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
         params.append(business_unit)
@@ -125,28 +149,37 @@ def _fetch_filtered_lines(
     if product:
         where.append("lower(trim(s.product)) = lower(trim(?))")
         params.append(product)
-    for ex in exclude_client_types or []:
-        where.append(f"lower(trim({_CLIENT_TYPE_EXPR})) != lower(trim(?))")
-        params.append(ex)
-    for ex in exclude_cities or []:
-        where.append(f"lower(trim({_CITY_EXPR})) != lower(trim(?))")
-        params.append(ex)
 
     sql = f"""
     SELECT
       s.date, s.party, s.inv_no, s.product,
-      {_CLIENT_TYPE_EXPR} AS client_type,
-      {_CITY_EXPR} AS city,
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
       COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
       COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
+      COALESCE(NULLIF(trim(s.client_type), ''), '') AS sales_client_type,
       {_MT_SQL} AS mt
     FROM sales s
-    {_PARTY_JOIN}
+    LEFT JOIN category c ON c.product = s.product
     WHERE {' AND '.join(where)}
     """
     with connect() as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+        frame = pd.read_sql_query(sql, conn, params=params)
+    frame = _attach_client_dims(frame)
+    if city:
+        ck = city.strip().lower()
+        frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    if client_type:
+        tk = client_type.strip().lower()
+        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+    if exclude_client_types:
+        ex = {str(x).strip().lower() for x in exclude_client_types if x}
+        frame = frame[
+            ~frame["client_type"].astype(str).str.strip().str.lower().isin(ex)
+        ]
+    if exclude_cities:
+        ex = {str(x).strip().lower() for x in exclude_cities if x}
+        frame = frame[~frame["city"].astype(str).str.strip().str.lower().isin(ex)]
+    return frame.reset_index(drop=True)
 
 
 def _analysis(lines: list[str], tips: list[str]) -> str:

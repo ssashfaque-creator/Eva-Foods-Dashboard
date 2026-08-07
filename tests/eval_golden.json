@@ -161,13 +161,13 @@
     {
       "id": "price-rate",
       "q": "What is the average rate for Eva Canola in Lahore July?",
-      "expected_forced": "required",
+      "expected_forced": "query_price",
       "preferred_tool": "query_price"
     },
     {
       "id": "price-fetch",
       "q": "Price Fetch for Eva Consumer last month",
-      "expected_forced": "required",
+      "expected_forced": "query_price",
       "preferred_tool": "query_price"
     },
     {

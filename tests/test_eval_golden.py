@@ -64,7 +64,9 @@ def test_v040_forces_only_high_confidence() -> None:
         "advanced_query"
     )
     assert resolve_forced_tool("what Food Panda are active") == "list_clients"
-    assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == "required"
+    assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == (
+        "query_price"
+    )
     # High-confidence party / named-party asks stay forced
     assert resolve_forced_tool("Who are the distributors in Lahore?") == "list_clients"
     assert resolve_forced_tool("which distributor is selling maan") == "list_clients"
