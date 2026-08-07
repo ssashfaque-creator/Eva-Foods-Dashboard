@@ -25,14 +25,14 @@ def extract_exclude_client_types(text: str) -> list[str]:
     )
     blob = m.group(2) if m else ""
     if "online" in t and re.search(r"\b(exclude|except|without|excluding)\b.+\bonline\b", t):
-        out.append("Online Customers")
+        out.append("Online Customer")
     if "metro" in blob or re.search(r"\b(exclude|except|without)\b.+\bmetro\b", t):
         ct = normalize_client_type("metro")
         if ct:
             out.append(ct)
-    # also "exclude Online Customers"
+    # also "exclude Online Customer(s)"
     for alias, canon in (
-        ("online", "Online Customers"),
+        ("online", "Online Customer"),
         ("canteen", "Canteen Store Department"),
         ("hashoo", "HASHOO GROUP"),
     ):
@@ -152,7 +152,11 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
         return out
 
     # Reactivated
-    if re.search(r"\b(reactivat|came back|silent last quarter.{0,40}buy|buying now)\b", t):
+    if re.search(
+        r"\b(reactivated?|reactivation|came back|"
+        r"silent last quarter.{0,40}buy|buying now)\b",
+        t,
+    ):
         out["mode"] = "reactivated"
         return out
 

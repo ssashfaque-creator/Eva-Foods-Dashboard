@@ -114,7 +114,14 @@ def test_routing_client_list_vs_name_lookup() -> None:
     assert not _looks_party_lookup("Who are my distributors in Lahore")
     assert _looks_party_lookup("Who is Al Bari?")
     assert _looks_party_analytics("Top 10 parties by AMS in Karachi")
-    assert _looks_party_analytics("Which distributors grew VTF vs July last year")
+    # Growth/decline condition queries are advanced filter_entities, not rankings
+    from eva_dashboard.advanced_routing import looks_advanced
+    from eva_dashboard.chatbot import resolve_forced_tool
+
+    grew = "Which distributors grew VTF vs July last year"
+    assert looks_advanced(grew)
+    assert resolve_forced_tool(grew) == "advanced_query"
+    assert not _looks_party_analytics(grew)
     assert _looks_party_analytics("Who were the top distributors in this")
 
 

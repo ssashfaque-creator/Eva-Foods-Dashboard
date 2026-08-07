@@ -1871,26 +1871,39 @@ def _extract_named_party_query(text: str) -> str | None:
     """Extract a free-text client/party name from a sales question."""
     from eva_dashboard.sales_query import MONTH_NAMES
     from eva_dashboard.categories import BUSINESS_UNIT_ALIASES
-    from eva_dashboard.client_language import (
-        extract_client_type_from_text,
-        normalize_client_type,
-    )
 
     raw = (text or "").strip()
     if not raw:
         return None
     t = re.sub(r"(?i)^(can you|could you|please|pls)\s+", "", raw).strip()
 
+    _month_tail = (
+        r"(?:\s+(?:in|for|of)\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
+        r"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?|this\s+month|last\s+month|this\s+week|"
+        r"last\s+week|last\s+\d+\s+months?|so\s+far|mtd|20\d{2}).*)?$"
+    )
     patterns = [
+        # "sales for the client Rubina Shaheen in July"
         r"(?i)(?:sales?|volume|mt)\s+for\s+(?:the\s+)?"
-        r"(?:client|party|distributor|customer)\s+(.+?)"
-        r"(?:\s+in\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"(?:client|party|distributor|customer)\s+(.+?)" + _month_tail,
+        # "sales for Alpha Dist in July" / "sales of Gamma Dist this month"
+        # Negative lookahead avoids "sales for the last 6 months" / "sales for July"
+        r"(?i)(?:sales?|volume|mt)\s+(?:for|of)\s+"
+        r"(?!(?:the\s+)?(?:last|this|next)\b)"
+        r"(?!(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
-        r"dec(?:ember)?|this\s+month|last\s+month|20\d{2}).*)?$",
+        r"dec(?:ember)?|mtd|so\s+far)\b)"
+        r"(.+?)" + _month_tail,
+        # "client Alpha Dist sales"
         r"(?i)(?:client|party|distributor|customer)\s+(.+?)\s+"
         r"(?:sales?|volume|mt)\b",
+        # "show me Alpha Dist sales in July"
         r"(?i)(?:show|give)(?:\s+me)?\s+(.+?)\s+sales?"
-        r"(?:\s+in\s+\w+.*)?$",
+        r"(?:\s+(?:in|for|of)\s+\w+.*)?$",
+        # "what were Rubina Shaheen sales last month"
+        r"(?i)(?:what\s+)?(?:were|was|are|is)\s+(.+?)\s+sales?"
+        r"(?:\s+(?:in|for|of|last|this)\b.*)?$",
     ]
     name = None
     for pat in patterns:
@@ -1902,9 +1915,10 @@ def _extract_named_party_query(text: str) -> str | None:
         return None
 
     name = re.sub(
-        r"(?i)\s+in\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+        r"(?i)\s+(?:in|for|of)\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
         r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
-        r"nov(?:ember)?|dec(?:ember)?|this\s+month|last\s+month|20\d{2})\s*$",
+        r"nov(?:ember)?|dec(?:ember)?|this\s+month|last\s+month|this\s+week|"
+        r"last\s+week|so\s+far|mtd|20\d{2})\s*$",
         "",
         name,
     ).strip(" ?.,\"'")
@@ -1914,34 +1928,49 @@ def _extract_named_party_query(text: str) -> str | None:
         name,
     ).strip()
     name = re.sub(r"(?i)\s+last\s+\d+\s+months?\s*$", "", name).strip()
+    name = re.sub(
+        r"(?i)\s+(?:this|last)\s+(?:month|week)\s*$",
+        "",
+        name,
+    ).strip()
 
     low = name.lower()
     if not name or len(name) < 3 or not re.search(r"[a-zA-Z]", name):
+        return None
+    if low in {"a", "an", "the"}:
+        return None
+    # Reject bare period phrases mistaken for party names
+    if re.fullmatch(
+        r"(the\s+)?(last|this|next)(\s+\d+)?(\s+(months?|weeks?|years?|quarters?))?",
+        low,
+    ):
         return None
     if re.search(
         r"\b("
         r"break\s*down|month|wise|average|avg|compare|versus|\bvs\b|"
         r"include|combine|merge|group|remove|exclude|packing|product|sku|"
-        r"city|cities|total|all sales|so far|mtd"
+        r"city|cities|total|all sales|so far|mtd|"
+        r"expected|forecast|projected|dumping|excessive|our|your|my|"
+        r"total|overall|company|national"
         r")\b",
         low,
     ):
         return None
-    if re.match(r"^(a|an|the)\s+", low):
+    if re.match(r"^(a|an|the|our|your|my)\s+", low):
         return None
-    # Reject when the whole phrase is a known Client Type (Imtiaz Store, …)
-    if extract_client_type_from_text(name):
+    if low in {"our", "your", "my"}:
         return None
-    known_ct = normalize_client_type(name)
-    if known_ct and known_ct.lower() != name.lower():
-        # Mapped via alias → it's a type, not a party
-        return None
-    if known_ct and known_ct.lower() == name.lower():
-        # Exact live client-type label
-        from eva_dashboard.client_language import list_known_client_types
+    # Reject only when the *entire* name is a client-type alias/label.
+    # Party names like "Alpha Dist" contain "dist" but are not types.
+    from eva_dashboard.client_language import CLIENT_TYPE_ALIASES, _norm as _ct_norm
 
-        if any(known_ct.lower() == k.lower() for k in list_known_client_types()):
-            return None
+    name_key = _ct_norm(name)
+    if name_key in CLIENT_TYPE_ALIASES:
+        return None
+    from eva_dashboard.client_language import list_known_client_types
+
+    if any(_ct_norm(k) == name_key for k in list_known_client_types()):
+        return None
     if low in {
         "eva distributors",
         "distributors",
@@ -2018,6 +2047,8 @@ def _looks_named_party_sales(text: str) -> bool:
         return _extract_named_party_query(text) is not None
     if re.search(r"\bsales?\s+(?:for|of)\b", t):
         return _extract_named_party_query(text) is not None
+    if re.search(r"\b(were|was|are|is)\b.+\bsales?\b", t):
+        return _extract_named_party_query(text) is not None
     return False
 
 
@@ -2042,6 +2073,8 @@ def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
     if _looks_named_party_sales(text):
         return False
+    if looks_advanced(text):
+        return False
     if _looks_party_mix_query(t):
         return False
     if _looks_party_breakdown(t):
@@ -2056,7 +2089,8 @@ def _looks_client_list(text: str) -> bool:
         r"lost\s+(parties|clients|distributors)|silent|"
         r"product mix|packing mix|product break|sku[- ]?wise|breakdown|"
         r"invoice|frequency|city league|by volume|vs\s*ams|"
-        r"in this|from this|this table"
+        r"in this|from this|this table|"
+        r"reactivated?|reactivation"
         r")\b",
         t,
     ):
@@ -2158,6 +2192,12 @@ def _looks_party_analytics(text: str) -> bool:
     t = (text or "").lower()
     # Sales-table YoY compare is query_sales, not party ranking
     if _looks_sales_yoy_compare(t):
+        return False
+    # Advanced analytics (compare / filter / days-since / …) wins over rankings
+    if looks_advanced(text):
+        return False
+    # Distributor-wise break of a prior table is list_clients, not rankings
+    if _looks_party_breakdown(t):
         return False
     # Row drill-downs ("show by product" / "SKU wise" alone) stay on query_sales
     if _looks_row_drilldown(t) and not _looks_party_mix_query(t):
@@ -2837,6 +2877,21 @@ def _dispatch_tool(
         city_arg = arguments.get("city") or extract_city_from_text(user_text)
         period_arg = arguments.get("period") or _extract_period_phrase(user_text)
 
+        # Standalone "exclude online / without metro" → client_type excludes
+        from eva_dashboard.advanced_routing import extract_exclude_client_types
+
+        excl_types = list(arguments.get("exclude_client_types") or [])
+        excl_types.extend(extract_exclude_client_types(user_text) or [])
+        if excl_types:
+            excludes = dict(excludes or {})
+            cur = list(excludes.get("client_type") or [])
+            for ct in excl_types:
+                canon = normalize_client_type(ct) or ct
+                if canon and canon not in cur:
+                    cur.append(canon)
+            if cur:
+                excludes["client_type"] = cur
+
         # YoY of "these sales": do not invent a client type (e.g. Eva Distributors)
         if is_yoy and use_prior:
             ctype = None
@@ -3178,6 +3233,9 @@ def _looks_factual(text: str) -> bool:
         "who is", "who's", "who are", "rate", "al bari", "party", "share",
         "percent", "grow", "quarter", "bulk", "include", "combine", "merge",
         "follow-up", "follow up",
+        "reactivat", "declin", "invoice", "dump", "silent", "group by",
+        "oil type", "packing", "expected", "forecast", "yoy", "wow",
+        "week over", "exclude", "without", "remove", "city wise", "sku wise",
     )
     return any(k in t for k in keys)
 
@@ -3216,6 +3274,60 @@ def _attach_followup_meta(
             if meta:
                 m["_eva_followup"] = meta
             return
+
+
+def resolve_forced_tool(
+    user_text: str,
+    *,
+    prior_table_spec: dict[str, Any] | None = None,
+    prior_party_spec: dict[str, Any] | None = None,
+    explicit_followup: bool | None = None,
+) -> str:
+    """Return the forced primary tool name for a user question (round 0).
+
+    Used by chat_completion and by routing regression tests. Values:
+    ``lookup_party``, ``list_clients``, ``analyze_parties``, ``advanced_query``,
+    ``query_price``, ``query_sales``, ``required``, or ``auto``.
+    """
+    text = user_text or ""
+    if not _looks_factual(text):
+        return "auto"
+
+    is_followup = (
+        bool(explicit_followup)
+        if explicit_followup is not None
+        else _is_explicit_followup(text)
+    )
+    has_table_prior = bool(prior_table_spec or prior_party_spec)
+    table_followup = (
+        _looks_include_check(text)
+        or _looks_combine_tables(text)
+        or _looks_regroup(text)
+        or _looks_remove(text)
+    ) and (has_table_prior or is_followup)
+
+    if _looks_named_party_sales(text):
+        return "lookup_party"
+    if prior_party_spec and _looks_period_only_followup(text):
+        kind = prior_party_spec.get("kind") or "list_clients"
+        return "analyze_parties" if kind == "analyze_parties" else "list_clients"
+    if looks_advanced(text):
+        return "advanced_query"
+    if _looks_party_breakdown(text):
+        return "list_clients"
+    if _looks_party_mix_query(text) or _looks_party_analytics(text):
+        return "analyze_parties"
+    if table_followup:
+        return "query_sales"
+    if _looks_client_list(text):
+        return "list_clients"
+    if _looks_party_lookup(text):
+        return "lookup_party"
+    if _looks_price_query(text):
+        return "query_price"
+    if _looks_sales_yoy_compare(text) or _looks_sales_matrix(text):
+        return "query_sales"
+    return "required"
 
 
 def chat_completion(
@@ -3263,75 +3375,22 @@ def chat_completion(
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
             prior_party_guess = forced_prior_party_spec or _last_party_spec(working)
-            if _looks_named_party_sales(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "lookup_party"},
-                }
-            elif prior_party_guess and _looks_period_only_followup(last_user):
-                kind = prior_party_guess.get("kind") or "list_clients"
-                tool_choice = {
-                    "type": "function",
-                    "function": {
-                        "name": (
-                            "analyze_parties"
-                            if kind == "analyze_parties"
-                            else "list_clients"
-                        )
-                    },
-                }
-            elif _looks_party_mix_query(last_user) or _looks_party_analytics(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "analyze_parties"},
-                }
-            elif _looks_party_breakdown(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "list_clients"},
-                }
-            elif (
-                _looks_include_check(last_user)
-                or _looks_combine_tables(last_user)
-                or _looks_regroup(last_user)
-                or _looks_remove(last_user)
-            ):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "query_sales"},
-                }
-            elif looks_advanced(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "advanced_query"},
-                }
-            elif _looks_client_list(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "list_clients"},
-                }
-            elif _looks_party_analytics(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "analyze_parties"},
-                }
-            elif _looks_party_lookup(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "lookup_party"},
-                }
-            elif _looks_price_query(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "query_price"},
-                }
-            elif _looks_sales_yoy_compare(last_user) or _looks_sales_matrix(last_user):
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": "query_sales"},
-                }
-            else:
+            prior_table_guess = forced_prior_spec or _last_table_spec(working)
+            forced_name = resolve_forced_tool(
+                last_user,
+                prior_table_spec=prior_table_guess,
+                prior_party_spec=prior_party_guess,
+                explicit_followup=_is_explicit_followup(last_user),
+            )
+            if forced_name == "required":
                 tool_choice = "required"
+            elif forced_name == "auto":
+                tool_choice = "auto"
+            else:
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": forced_name},
+                }
 
         api_messages = [_api_history_message(m) for m in working]
         response = client.chat.completions.create(
