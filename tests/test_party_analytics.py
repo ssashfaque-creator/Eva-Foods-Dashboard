@@ -120,7 +120,11 @@ def test_routing_client_list_vs_name_lookup() -> None:
 
     grew = "Which distributors grew VTF vs July last year"
     assert looks_advanced(grew)
-    assert resolve_forced_tool(grew) == "advanced_query"
+    # v0.4.0: advanced asks are not hard-forced; model chooses under required
+    assert resolve_forced_tool(grew) == "required"
+    from eva_dashboard.chatbot import suggest_preferred_tool
+
+    assert suggest_preferred_tool(grew) == "advanced_query"
     assert not _looks_party_analytics(grew)
     assert _looks_party_analytics("Who were the top distributors in this")
 

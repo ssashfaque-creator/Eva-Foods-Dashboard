@@ -1,4 +1,4 @@
-"""Question-bank routing coverage — forced tool choice + named-party extraction."""
+"""Question-bank routing coverage — v0.4.0 slim forced + preferred hints."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from eva_dashboard.chatbot import (
     _extract_named_party_query,
     _looks_named_party_sales,
     resolve_forced_tool,
+    suggest_preferred_tool,
 )
 from eva_dashboard.db import connect, init_db
 
@@ -20,8 +21,8 @@ def _env(tmp: str) -> None:
     os.environ["EVA_DATA_DIR"] = str(Path(tmp) / "data")
 
 
-# (question, expected_tool)
-ROUTING_CASES: list[tuple[str, str]] = [
+# (question, preferred_tool) — model should pick these when forced is "required"
+PREFERRED_CASES: list[tuple[str, str]] = [
     # Sales matrices
     ("What were Eva Consumer sales in Lahore last month?", "query_sales"),
     ("Show distributor sales in Karachi for July", "query_sales"),
@@ -82,14 +83,35 @@ ROUTING_CASES: list[tuple[str, str]] = [
     ("Exclude online customers from Lahore sales last month", "query_sales"),
 ]
 
+# Only named-party / who-is stay forced; everything else factual → required
+FORCED_EXCEPTIONS: dict[str, str] = {
+    "Show sales for Alpha Dist in July": "lookup_party",
+    "What were Rubina Shaheen sales last month?": "lookup_party",
+    "Sales of Gamma Dist this month": "lookup_party",
+    "Who is Al Bari?": "lookup_party",
+    "show me Alpha Dist sales in July": "lookup_party",
+}
 
-def test_question_bank_forced_tool_routing() -> None:
+
+def test_question_bank_forced_tool_routing_v040() -> None:
+    """v0.4.0: force only high-confidence named-party; else require a tool."""
     failures: list[str] = []
-    for question, expected in ROUTING_CASES:
+    for question, _preferred in PREFERRED_CASES:
+        expected = FORCED_EXCEPTIONS.get(question, "required")
         got = resolve_forced_tool(question)
         if got != expected:
             failures.append(f"{got!r} != {expected!r}: {question}")
-    assert not failures, "Routing mismatches:\n" + "\n".join(failures)
+    assert not failures, "Forced routing mismatches:\n" + "\n".join(failures)
+
+
+def test_question_bank_preferred_tool_hints() -> None:
+    """Preferred-tool hints stay available for CSV / golden eval."""
+    failures: list[str] = []
+    for question, expected in PREFERRED_CASES:
+        got = suggest_preferred_tool(question)
+        if got != expected:
+            failures.append(f"{got!r} != {expected!r}: {question}")
+    assert not failures, "Preferred-tool mismatches:\n" + "\n".join(failures)
 
 
 def test_table_followups_require_prior_spec() -> None:
@@ -123,10 +145,11 @@ def test_named_party_natural_phrasing() -> None:
     for q, name in cases.items():
         assert _extract_named_party_query(q) == name, q
         assert _looks_named_party_sales(q), q
-    # Client-type sales stay on the matrix path
+    # Client-type sales stay on the matrix path (not forced lookup_party)
     assert _extract_named_party_query("Show Imtiaz sales for July") is None
     assert not _looks_named_party_sales("Show Imtiaz sales for July")
-    assert resolve_forced_tool("Show Imtiaz sales for July") == "query_sales"
+    assert resolve_forced_tool("Show Imtiaz sales for July") == "required"
+    assert suggest_preferred_tool("Show Imtiaz sales for July") == "query_sales"
 
 
 def test_advanced_modes_not_stolen_by_party_analytics() -> None:

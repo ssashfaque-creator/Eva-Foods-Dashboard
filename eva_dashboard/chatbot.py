@@ -228,22 +228,22 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES:
-1. For almost all SALES volume questions, call **query_sales ONCE** with structured filters
-   (including **client_type** when the user names a client type).
-   Do NOT write multi-step SQL. Do NOT call get_schema / run_sql first for sales pivots.
-2. Interpret the user question → fill parameters → use returned markdown tables.
-   One tool round is the goal.
+SPEED & TOOL RULES (v0.4.0):
+1. You MUST call a tool before giving any numbers. Prefer ONE primary tool call.
+2. Choose the tool yourself from the catalog below — do not invent SQL first.
+   Do NOT call get_schema / run_sql for normal sales pivots.
 3. NEVER invent numbers or cite an OpenAI knowledge cutoff.
 4. Geography = City-Filter (`city` parameter). Always state the period label from the tool.
 5. Read-only only.
-6. Client **name** questions ("who is Al Bari?") → **lookup_party**.
+6. Client **name** sales / "who is Al Bari?" → **lookup_party**.
 7. Client **lists** ("who are my distributors in Lahore?") → **list_clients**
    (City-Filter + Client Type — NOT fuzzy name search on the city word).
    Lists are for who/list/individual/by-distributor — NOT for "distributor sales".
 8. Party rankings / AMS / share / YoY ("top 10 parties…", "which distributors
    doing well…", "% of VTF in Lahore") → **analyze_parties**.
 9. Rate / price / Price Fetch → **query_price**.
+10. Compares / dumping / expected month / filter-by-growth → **advanced_query**.
+11. Default sales volume pivots → **query_sales**.
 
 CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit instead):
   • Imtiaz / Imtiaz store(s) / store → client_type='Imtiaz Store'
@@ -3435,6 +3435,7 @@ def export_chat_training_csv(
         "assistant_answer_plain",
         "tools_used",
         "forced_tool_hint",
+        "suggested_tool",
         "filters_summary",
         "comment",
         "rating_1_to_5",
@@ -3482,21 +3483,28 @@ def export_chat_training_csv(
                 messages, after_idx=i, before_idx=assistant_idx
             )
 
+        q_for_router = (
+            f"{FOLLOWUP_MARKER}\n\n{question}" if is_followup else question
+        )
         forced_hint = ""
+        suggested = ""
         if question:
             try:
                 forced_hint = resolve_forced_tool(
-                    (
-                        f"{FOLLOWUP_MARKER}\n\n{question}"
-                        if is_followup
-                        else question
-                    ),
+                    q_for_router,
+                    prior_table_spec=meta.get("table_spec"),
+                    prior_party_spec=meta.get("party_spec"),
+                    explicit_followup=is_followup,
+                )
+                suggested = suggest_preferred_tool(
+                    q_for_router,
                     prior_table_spec=meta.get("table_spec"),
                     prior_party_spec=meta.get("party_spec"),
                     explicit_followup=is_followup,
                 )
             except Exception:
                 forced_hint = ""
+                suggested = ""
 
         turn_id += 1
         writer.writerow(
@@ -3510,6 +3518,7 @@ def export_chat_training_csv(
                 "assistant_answer_plain": _strip_html_for_csv(answer),
                 "tools_used": "|".join(tools),
                 "forced_tool_hint": forced_hint,
+                "suggested_tool": suggested,
                 "filters_summary": _followup_summary(meta),
                 "comment": "",
                 "rating_1_to_5": "",
@@ -3522,18 +3531,17 @@ def export_chat_training_csv(
     return buf.getvalue()
 
 
-def resolve_forced_tool(
+def suggest_preferred_tool(
     user_text: str,
     *,
     prior_table_spec: dict[str, Any] | None = None,
     prior_party_spec: dict[str, Any] | None = None,
     explicit_followup: bool | None = None,
 ) -> str:
-    """Return the forced primary tool name for a user question (round 0).
+    """Heuristic preferred tool for eval / CSV hints (does NOT force the API).
 
-    Used by chat_completion and by routing regression tests. Values:
-    ``lookup_party``, ``list_clients``, ``analyze_parties``, ``advanced_query``,
-    ``query_price``, ``query_sales``, ``required``, or ``auto``.
+    Richer than ``resolve_forced_tool`` — used for golden-set preferred labels
+    and training feedback, not for OpenAI tool_choice.
     """
     text = user_text or ""
     if not _looks_factual(text):
@@ -3573,6 +3581,67 @@ def resolve_forced_tool(
         return "query_price"
     if _looks_sales_yoy_compare(text) or _looks_sales_matrix(text):
         return "query_sales"
+    return "required"
+
+
+def resolve_forced_tool(
+    user_text: str,
+    *,
+    prior_table_spec: dict[str, Any] | None = None,
+    prior_party_spec: dict[str, Any] | None = None,
+    explicit_followup: bool | None = None,
+) -> str:
+    """Return the forced OpenAI tool_choice for round 0 (v0.4.0 slim router).
+
+    Force only high-confidence cases; otherwise require a tool and let the model
+    choose. Values: ``lookup_party``, ``list_clients``, ``analyze_parties``,
+    ``query_sales``, ``required``, or ``auto``.
+    """
+    text = user_text or ""
+    if not _looks_factual(text):
+        return "auto"
+
+    is_followup = (
+        bool(explicit_followup)
+        if explicit_followup is not None
+        else _is_explicit_followup(text)
+    )
+    has_table_prior = bool(prior_table_spec or prior_party_spec)
+    has_party_prior = bool(prior_party_spec)
+
+    # 1) Named party sales / who-is lookup — high confidence, keep forced
+    if _looks_named_party_sales(text) or _looks_party_lookup(text):
+        return "lookup_party"
+
+    # 2) Period-only follow-up on a prior party/distributor list
+    if has_party_prior and _looks_period_only_followup(text):
+        kind = (prior_party_spec or {}).get("kind") or "list_clients"
+        return "analyze_parties" if kind == "analyze_parties" else "list_clients"
+
+    # 3) Reply / pinned-table follow-ups that must stay on the sales table
+    table_ops = (
+        _looks_include_check(text)
+        or _looks_combine_tables(text)
+        or _looks_regroup(text)
+        or _looks_remove(text)
+        or _looks_row_drilldown(text)
+        or _looks_sales_yoy_compare(text)
+    )
+    if (has_table_prior or is_followup) and table_ops:
+        return "query_sales"
+
+    # 4) "By individual distributors" after a sales table → list those parties
+    if (has_table_prior or is_followup) and _looks_party_breakdown(text):
+        return "list_clients"
+
+    # 5) Explicit Reply follow-up with a pinned sales table, otherwise stay flexible
+    if is_followup and has_table_prior and not has_party_prior:
+        # Mix / ranking follow-ups on a prior table → let model pick, but require tool
+        if _looks_party_mix_query(text) or _looks_party_analytics(text):
+            return "required"
+        return "query_sales"
+
+    # Default factual ask: require a tool; model chooses which one
     return "required"
 
 
@@ -3617,7 +3686,8 @@ def chat_completion(
         if on_status:
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
-        # First round: require tools; force the right primary tool when possible.
+        # v0.4.0: require a tool on factual asks; force a name only for
+        # named-party / Reply follow-ups (see resolve_forced_tool).
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
             prior_party_guess = forced_prior_party_spec or _last_party_spec(working)

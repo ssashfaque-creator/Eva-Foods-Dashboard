@@ -160,6 +160,8 @@ def test_export_chat_training_csv_pairs_turns() -> None:
     assert "comment" in csv_text
     assert "rating_1_to_5" in csv_text
     assert "expected_answer_notes" in csv_text
+    assert "suggested_tool" in csv_text
+    assert "forced_tool_hint" in csv_text
     assert "Show me Lahore sales" in csv_text
     assert "group by city" in csv_text
     assert "query_sales" in csv_text
