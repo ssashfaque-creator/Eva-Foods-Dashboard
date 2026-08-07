@@ -6,7 +6,7 @@
 #   bash scripts/update.sh ~/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203
 #
 # One-liner (use commit/raw URL so GitHub CDN cannot serve a stale script):
-#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/dcade349a73ef218b6431aaa9ccf585e204b6df2/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
+#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/2d2e5c742b357fa8f8f94f342d39082a7c202aa9/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 
 set -euo pipefail
 
