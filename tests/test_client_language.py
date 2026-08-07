@@ -284,9 +284,28 @@ def test_row_drilldown_bu_to_packing_to_sku() -> None:
             products = [
                 r["product"]
                 for r in sku["matrix"]["rows"]
-                if r.get("product") != "Total"
+                if r.get("product")
+                and r.get("row_kind", "leaf") == "leaf"
             ]
             assert products  # at least one SKU row
+            assert sku["matrix"].get("hierarchical") is True
+            assert sku["matrix"].get("row_headers") == [
+                "business_unit",
+                "packing_category",
+                "product",
+            ]
+            assert any(
+                r.get("row_kind") == "subtotal_packing" for r in sku["matrix"]["rows"]
+            )
+            assert any(
+                r.get("row_kind") == "subtotal_business_unit"
+                for r in sku["matrix"]["rows"]
+            )
+            assert packing["matrix"].get("hierarchical") is True
+            assert packing["matrix"].get("row_headers") == [
+                "business_unit",
+                "packing_category",
+            ]
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

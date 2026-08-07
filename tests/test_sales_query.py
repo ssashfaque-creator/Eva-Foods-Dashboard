@@ -148,10 +148,23 @@ def test_eva_consumer_rows_are_packing() -> None:
             assert out["mode"] == "matrix"
             assert out["row_dimension"] == "packing_category"
             assert out["required_table_count"] == 1
-            packs = {r["packing_category"] for r in out["matrix"]["rows"]}
+            assert out["matrix"].get("hierarchical") is True
+            packs = {
+                r["packing_category"]
+                for r in out["matrix"]["rows"]
+                if r.get("row_kind") == "leaf"
+            }
             assert "Stand up" in packs or "Pouch" in packs
-            # Column totals footer present
-            assert any(r.get("packing_category") == "Total" for r in out["matrix"]["rows"])
+            # Column totals footer present (BU hierarchy: Total on first header col)
+            assert any(
+                r.get("row_kind") == "total"
+                or r.get("business_unit") == "Total"
+                or r.get("packing_category") == "Total"
+                for r in out["matrix"]["rows"]
+            )
+            assert any(
+                r.get("row_kind") == "subtotal_business_unit" for r in out["matrix"]["rows"]
+            )
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
@@ -602,6 +615,63 @@ def test_include_bulk_short_phrase_combine() -> None:
             units = set(follow.get("business_units") or [])
             assert "Eva Consumer" in units and "Eva Bulk" in units
             assert follow["filters"]["city"] == "Lahore"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_hierarchical_packing_and_sku_tables() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            # By packing (product category): BU | Packing + BU totals
+            pack = query_sales(
+                period="July",
+                city="Lahore",
+                row_dimension="packing_category",
+                columns="client_type",
+            )
+            assert pack["ok"] is True
+            m = pack["matrix"]
+            assert m.get("hierarchical") is True
+            assert m["row_headers"] == ["business_unit", "packing_category"]
+            kinds = [r.get("row_kind") for r in m["rows"]]
+            assert "leaf" in kinds
+            assert "subtotal_business_unit" in kinds
+            assert "total" in kinds
+            md = pack["answer_markdown"]
+            assert "Business Unit" in md and "Packing" in md
+            assert "Total" in md
+
+            # By SKU: BU | Packing | SKU + packing + BU totals
+            sku = query_sales(
+                period="July",
+                city="Lahore",
+                row_dimension="product",
+                columns="client_type",
+            )
+            assert sku["ok"] is True
+            sm = sku["matrix"]
+            assert sm["row_headers"] == [
+                "business_unit",
+                "packing_category",
+                "product",
+            ]
+            assert any(r.get("row_kind") == "subtotal_packing" for r in sm["rows"])
+            assert any(
+                r.get("row_kind") == "subtotal_business_unit" for r in sm["rows"]
+            )
+            # Parent "merge": after first leaf in a BU, business_unit cell is blank
+            leaves = [r for r in sm["rows"] if r.get("row_kind") == "leaf"]
+            assert leaves
+            # Markdown shows SKU header and a packing total label
+            smd = sku["answer_markdown"]
+            assert "| SKU |" in smd or "SKU |" in smd
+            assert "Total" in smd
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

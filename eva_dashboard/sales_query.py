@@ -653,6 +653,280 @@ def _pivot_months(
     }
 
 
+# Leaf row dim → parent layers shown as leading columns (markdown "merge" via blanks)
+_ROW_HIERARCHY: dict[str, list[str]] = {
+    "packing_category": ["business_unit", "packing_category"],
+    "product": ["business_unit", "packing_category", "product"],
+}
+
+_ROW_HEADER_LABELS = {
+    "business_unit": "Business Unit",
+    "packing_category": "Packing",
+    "product": "SKU",
+    "oil_type": "Oil Type",
+    "city": "City",
+    "client_type": "Client Type",
+}
+
+
+def _row_hierarchy(row_dim: str) -> list[str] | None:
+    levels = _ROW_HIERARCHY.get(row_dim)
+    return list(levels) if levels else None
+
+
+def _bu_order_key(name: str, total: float) -> tuple:
+    try:
+        return (0, CATEGORY1_ORDER.index(name), -float(total))
+    except ValueError:
+        return (1, 0, -float(total))
+
+
+def _ensure_level_cols(frame: pd.DataFrame, levels: list[str]) -> pd.DataFrame:
+    work = frame.copy()
+    for lv in levels:
+        if lv not in work.columns:
+            work[lv] = "(unmapped)"
+        work[lv] = work[lv].fillna("(unmapped)").astype(str)
+        work.loc[work[lv].str.strip() == "", lv] = "(unmapped)"
+    return work
+
+
+def _value_cells(
+    grouped: pd.DataFrame,
+    levels: list[str],
+    key: tuple,
+    ordered_cols: list[str],
+    *,
+    month_mode: bool,
+) -> dict[str, float]:
+    """Sum MT into display columns for one level-key combination."""
+    mask = pd.Series(True, index=grouped.index)
+    for lv, val in zip(levels, key):
+        mask &= grouped[lv] == val
+    subset = grouped.loc[mask]
+    cells: dict[str, float] = {}
+    for c in ordered_cols:
+        cells[str(c)] = float(subset.loc[subset["__col"] == c, "mt"].sum()) if not subset.empty else 0.0
+    total = sum(cells.values())
+    if month_mode:
+        n = max(len(ordered_cols), 1)
+        cells["Average"] = total / n
+    cells["Total"] = total
+    return {k: mt_round(v) for k, v in cells.items()}
+
+
+def _pivot_hierarchy(
+    frame: pd.DataFrame,
+    levels: list[str],
+    *,
+    col_dim: str,
+    month_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Pivot with parent layers as leading columns + group subtotals.
+
+    Markdown cannot rowspan, so parent labels appear once then blank cells
+    (visual merge). Subtotal rows after each packing group and each BU.
+    """
+    leaf = levels[-1]
+    month_mode = month_labels is not None
+    display_cols: list[str]
+    if month_mode:
+        display_cols = list(month_labels or []) + ["Average", "Total"]
+    else:
+        display_cols = []  # filled after we know columns
+
+    empty = {
+        "row_dimension": leaf,
+        "row_headers": levels,
+        "hierarchical": True,
+        "column_dimension": "month" if month_mode else col_dim,
+        "columns": display_cols,
+        "rows": [],
+        "column_totals": {c: 0.0 for c in display_cols},
+        "grand_total_mt": 0.0,
+        "month_labels": month_labels,
+        "markdown_hint": (
+            f"Hierarchical MT: {' → '.join(levels)} × "
+            f"{'month' if month_mode else col_dim}, with packing/BU subtotals."
+        ),
+    }
+    if frame.empty or not levels:
+        return empty
+
+    work = _ensure_level_cols(frame, levels)
+    if month_mode:
+        work["__col"] = work["date"].astype(str).str.slice(0, 7)
+        work = work[work["__col"].isin(month_labels or [])]
+        ordered_cols = list(month_labels or [])
+    else:
+        work["__col"] = work[col_dim].fillna("Unmapped").astype(str)
+        ordered_cols = list(
+            work.groupby("__col")["mt"].sum().sort_values(ascending=False).index
+        )
+        display_cols = ordered_cols + ["Total"]
+        empty["columns"] = display_cols
+
+    if work.empty:
+        empty["columns"] = display_cols
+        return empty
+
+    grouped = work.groupby(levels + ["__col"], as_index=False)["mt"].sum()
+    combo = (
+        grouped.groupby(levels, as_index=False)["mt"]
+        .sum()
+        .rename(columns={"mt": "_tot"})
+    )
+
+    rows_out: list[dict[str, Any]] = []
+    # Business units ordered like CATEGORY1_ORDER then by volume
+    bu_totals = combo.groupby("business_unit")["_tot"].sum()
+    bus = sorted(bu_totals.index, key=lambda b: _bu_order_key(str(b), float(bu_totals[b])))
+
+    for bu in bus:
+        bu_slice = combo[combo["business_unit"] == bu]
+        bu_first = True
+
+        if leaf == "packing_category":
+            packs = bu_slice.sort_values("_tot", ascending=False)
+            for _, crow in packs.iterrows():
+                pack = str(crow["packing_category"])
+                key = (str(bu), pack)
+                cells = _value_cells(
+                    grouped, levels, key, ordered_cols, month_mode=month_mode
+                )
+                entry: dict[str, Any] = {
+                    "business_unit": str(bu) if bu_first else "",
+                    "packing_category": pack,
+                    "row_kind": "leaf",
+                    **cells,
+                }
+                rows_out.append(entry)
+                bu_first = False
+        else:
+            # product leaf: group by packing within BU
+            pack_order = (
+                bu_slice.groupby("packing_category")["_tot"]
+                .sum()
+                .sort_values(ascending=False)
+            )
+            for pack in pack_order.index:
+                pack_s = str(pack)
+                pack_slice = bu_slice[bu_slice["packing_category"] == pack].sort_values(
+                    "_tot", ascending=False
+                )
+                pack_first = True
+                for _, crow in pack_slice.iterrows():
+                    product = str(crow["product"])
+                    key = (str(bu), pack_s, product)
+                    cells = _value_cells(
+                        grouped, levels, key, ordered_cols, month_mode=month_mode
+                    )
+                    entry = {
+                        "business_unit": str(bu) if bu_first else "",
+                        "packing_category": pack_s if pack_first else "",
+                        "product": product,
+                        "row_kind": "leaf",
+                        **cells,
+                    }
+                    rows_out.append(entry)
+                    bu_first = False
+                    pack_first = False
+                # Packing subtotal
+                pack_key_mask = (grouped["business_unit"] == bu) & (
+                    grouped["packing_category"] == pack_s
+                )
+                pack_cells: dict[str, float] = {}
+                for c in ordered_cols:
+                    pack_cells[str(c)] = float(
+                        grouped.loc[pack_key_mask & (grouped["__col"] == c), "mt"].sum()
+                    )
+                pack_tot = sum(pack_cells.values())
+                if month_mode:
+                    pack_cells["Average"] = pack_tot / max(len(ordered_cols), 1)
+                pack_cells["Total"] = pack_tot
+                rows_out.append(
+                    {
+                        "business_unit": "",
+                        "packing_category": f"{pack_s} Total",
+                        "product": "",
+                        "row_kind": "subtotal_packing",
+                        **{k: mt_round(v) for k, v in pack_cells.items()},
+                    }
+                )
+
+        # BU subtotal
+        bu_mask = grouped["business_unit"] == bu
+        bu_cells: dict[str, float] = {}
+        for c in ordered_cols:
+            bu_cells[str(c)] = float(
+                grouped.loc[bu_mask & (grouped["__col"] == c), "mt"].sum()
+            )
+        bu_tot = sum(bu_cells.values())
+        if month_mode:
+            bu_cells["Average"] = bu_tot / max(len(ordered_cols), 1)
+        bu_cells["Total"] = bu_tot
+        bu_entry: dict[str, Any] = {
+            "business_unit": f"{bu} Total",
+            "row_kind": "subtotal_business_unit",
+            **{k: mt_round(v) for k, v in bu_cells.items()},
+        }
+        for lv in levels[1:]:
+            bu_entry[lv] = ""
+        rows_out.append(bu_entry)
+
+    # Grand total footer
+    grand_cells: dict[str, float] = {}
+    for c in ordered_cols:
+        grand_cells[str(c)] = float(grouped.loc[grouped["__col"] == c, "mt"].sum())
+    grand_tot = sum(grand_cells.values())
+    if month_mode:
+        grand_cells["Average"] = grand_tot / max(len(ordered_cols), 1)
+    grand_cells["Total"] = grand_tot
+    total_row: dict[str, Any] = {
+        levels[0]: "Total",
+        "row_kind": "total",
+        **{k: mt_round(v) for k, v in grand_cells.items()},
+    }
+    for lv in levels[1:]:
+        total_row[lv] = ""
+    rows_out.append(total_row)
+
+    col_tot_map = {k: mt_round(v) for k, v in grand_cells.items()}
+    return {
+        "row_dimension": leaf,
+        "row_headers": levels,
+        "hierarchical": True,
+        "column_dimension": "month" if month_mode else col_dim,
+        "columns": display_cols if month_mode else (ordered_cols + ["Total"]),
+        "rows": rows_out,
+        "column_totals": col_tot_map,
+        "grand_total_mt": mt_round(grand_tot),
+        "month_labels": month_labels,
+        "markdown_hint": (
+            f"Hierarchical MT: {' → '.join(levels)}; parent cells blank after first "
+            "row of each group; packing + Business Unit subtotals."
+        ),
+    }
+
+
+def _build_pivot(
+    frame: pd.DataFrame,
+    row_dim: str,
+    col_dim: str,
+    *,
+    month_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Flat or hierarchical pivot depending on leaf row dimension."""
+    levels = _row_hierarchy(row_dim)
+    if levels and len(levels) > 1:
+        return _pivot_hierarchy(
+            frame, levels, col_dim=col_dim, month_labels=month_labels
+        )
+    if month_labels is not None:
+        return _pivot_months(frame, row_dim, month_labels)
+    return _pivot_mt(frame, row_dim, col_dim)
+
+
 def _ams_by_row(
     *,
     row_dim: str,
@@ -829,12 +1103,32 @@ def _yoy_period_from(period_info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_matrix_leaf_row(row: dict[str, Any], row_key: str) -> bool:
+    kind = row.get("row_kind")
+    if kind:
+        return kind == "leaf"
+    label = str(row.get(row_key) or "").strip().lower()
+    return bool(label) and label != "total"
+
+
+def _is_matrix_bold_row(row: dict[str, Any], row_key: str) -> bool:
+    kind = str(row.get("row_kind") or "")
+    if kind in {"subtotal_packing", "subtotal_business_unit", "total"}:
+        return True
+    return str(row.get(row_key) or "").strip().lower() == "total"
+
+
 def _matrix_total_mt(matrix: dict[str, Any]) -> float:
     if "grand_total_mt" in matrix and matrix["grand_total_mt"] is not None:
         return float(matrix["grand_total_mt"])
     row_key = str(matrix.get("row_dimension") or "")
+    headers = list(matrix.get("row_headers") or [])
     for row in matrix.get("rows") or []:
+        if row.get("row_kind") == "total":
+            return float(row.get("Total") or 0.0)
         if str(row.get(row_key) or "").strip().lower() == "total":
+            return float(row.get("Total") or 0.0)
+        if headers and str(row.get(headers[0]) or "").strip().lower() == "total":
             return float(row.get("Total") or 0.0)
     return 0.0
 
@@ -861,8 +1155,10 @@ def _yoy_breakdown_table(
         pri_map: dict[str, float] = {}
         for src, dest in ((current, cur_map), (prior, pri_map)):
             for row in src.get("rows") or []:
+                if not _is_matrix_leaf_row(row, row_key):
+                    continue
                 label = str(row.get(row_key) or "").strip()
-                if not label or label.lower() == "total":
+                if not label:
                     continue
                 dest[label] = float(row.get("Total") or 0.0)
         labels = list(dict.fromkeys([*cur_map.keys(), *pri_map.keys()]))
@@ -903,14 +1199,19 @@ def _yoy_breakdown_table(
     labels = list(dict.fromkeys([*cur_cols, *pri_cols]))
 
     def _col_total(matrix: dict[str, Any], col: str) -> float:
+        headers = list(matrix.get("row_headers") or [])
         for row in matrix.get("rows") or []:
+            if row.get("row_kind") == "total":
+                return float(row.get(col) or 0.0)
             lab = str(row.get(row_key) or "").strip().lower()
             if lab == "total":
+                return float(row.get(col) or 0.0)
+            if headers and str(row.get(headers[0]) or "").strip().lower() == "total":
                 return float(row.get(col) or 0.0)
         return sum(
             float(r.get(col) or 0.0)
             for r in (matrix.get("rows") or [])
-            if str(r.get(row_key) or "").strip().lower() != "total"
+            if _is_matrix_leaf_row(r, row_key)
         )
 
     rows = []
@@ -1123,9 +1424,9 @@ def query_sales(
     )
 
     if col == "month":
-        primary = _pivot_months(frame, row_dim, labels)
+        primary = _build_pivot(frame, row_dim, "month", month_labels=labels)
     else:
-        primary = _pivot_mt(frame, row_dim, col)
+        primary = _build_pivot(frame, row_dim, col)
 
     mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"auto", "default"}:
@@ -1197,12 +1498,12 @@ def query_sales(
         )
         if col == "month":
             # Collapse to row totals vs prior-year same span (not month columns)
-            prior_primary = _pivot_mt(prior_frame, row_dim, "client_type")
+            prior_primary = _build_pivot(prior_frame, row_dim, "client_type")
             # Rebuild current as client_type for apples-to-apples when month was requested
-            current_cmp = _pivot_mt(frame, row_dim, "client_type")
+            current_cmp = _build_pivot(frame, row_dim, "client_type")
             col_cmp = "client_type"
         else:
-            prior_primary = _pivot_mt(prior_frame, row_dim, col)
+            prior_primary = _build_pivot(prior_frame, row_dim, col)
             current_cmp = primary
             col_cmp = col
 
@@ -1262,7 +1563,7 @@ def query_sales(
         return result
 
     if mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
-        city_matrix = _pivot_mt(frame, row_dim, "city")
+        city_matrix = _build_pivot(frame, row_dim, "city")
         trend = _trend_table(
             frame,
             row_dim=row_dim,
@@ -1292,7 +1593,7 @@ def query_sales(
         ]
         if ctype:
             # Already filtered to one client type — show packing breakdown by city
-            pack_matrix = _pivot_mt(frame, "packing_category", "city")
+            pack_matrix = _build_pivot(frame, "packing_category", "city")
             result["client_matrix"] = pack_matrix
             tables.append(
                 {
@@ -1303,7 +1604,7 @@ def query_sales(
                 }
             )
         else:
-            client_matrix = _pivot_mt(frame, row_dim, "client_type")
+            client_matrix = _build_pivot(frame, row_dim, "client_type")
             result["client_matrix"] = client_matrix
             tables.append(
                 {
@@ -1492,11 +1793,40 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
     rows = list(matrix.get("rows") or [])
     if not columns:
         return "_No data._\n"
+
+    headers = list(matrix.get("row_headers") or [])
+    if matrix.get("hierarchical") and headers:
+        head_labels = [
+            _ROW_HEADER_LABELS.get(h, h.replace("_", " ").title()) for h in headers
+        ]
+        header = "| " + " | ".join(
+            [_md_escape(c) for c in head_labels + columns]
+        ) + " |"
+        sep = "| " + " | ".join(["---"] * (len(headers) + len(columns))) + " |"
+        lines = [header, sep]
+        for row in rows:
+            bold = _is_matrix_bold_row(row, row_key)
+            cells: list[str] = []
+            for h in headers:
+                text = _md_escape(row.get(h, "") or "")
+                cells.append(f"**{text}**" if bold and text else (text if text else ""))
+            for key in columns:
+                val = row.get(key, 0)
+                if val is None or val == "":
+                    text = "—" if not bold else ""
+                elif isinstance(val, (int, float)):
+                    text = mt_str(val)
+                else:
+                    text = _md_escape(val)
+                cells.append(f"**{text}**" if bold else text)
+            lines.append("| " + " | ".join(cells) + " |")
+        return "\n".join(lines) + "\n"
+
     header = "| " + " | ".join([row_key] + [_md_escape(c) for c in columns]) + " |"
     sep = "| " + " | ".join(["---"] * (len(columns) + 1)) + " |"
     lines = [header, sep]
     for row in rows:
-        is_total = str(row.get(row_key, "")).strip().lower() == "total"
+        is_total = _is_matrix_bold_row(row, row_key)
         cells = []
         for i, key in enumerate([row_key] + columns):
             if i == 0:
@@ -1683,7 +2013,7 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
     mrows = [
         r
         for r in (matrix.get("rows") or [])
-        if str(r.get(matrix.get("row_dimension") or row_dim) or "").lower() != "total"
+        if _is_matrix_leaf_row(r, str(matrix.get("row_dimension") or row_dim))
     ]
     grand = float(matrix.get("grand_total_mt") or 0)
     if not grand and mrows:
@@ -1698,14 +2028,17 @@ def _auto_insights(result: dict[str, Any]) -> list[str]:
             f"**{top_name}** is {share:.0f}% of this view ({mt_round(top_mt)} of {mt_round(grand)} MT) "
             + ("— concentration risk if it slips." if share >= 50 else "— still the lead line.")
         )
-        cols = [c for c in (matrix.get("columns") or []) if c != "Total"]
+        cols = [c for c in (matrix.get("columns") or []) if c not in {"Total", "Average"}]
         if cols and not filters.get("client_type"):
             # Column share of grand total from footer
+            headers = list(matrix.get("row_headers") or [])
             footer = next(
                 (
                     r
                     for r in (matrix.get("rows") or [])
-                    if str(r.get(top_key) or "").lower() == "total"
+                    if r.get("row_kind") == "total"
+                    or str(r.get(top_key) or "").lower() == "total"
+                    or (headers and str(r.get(headers[0]) or "").lower() == "total")
                 ),
                 None,
             )
@@ -1803,8 +2136,20 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
             parts.append("")
     else:
         col = str(result.get("column_dimension") or "column")
-        parts.append(f"### {row_dim.replace('_', ' ').title()} × {col.replace('_', ' ').title()}\n")
-        parts.append(_matrix_to_markdown(result.get("matrix") or {}, row_dim))
+        matrix = result.get("matrix") or {}
+        if matrix.get("hierarchical") and matrix.get("row_headers"):
+            chain = " → ".join(
+                _ROW_HEADER_LABELS.get(h, h.replace("_", " ").title())
+                for h in matrix["row_headers"]
+            )
+            parts.append(
+                f"### {chain} × {col.replace('_', ' ').title()}\n"
+            )
+        else:
+            parts.append(
+                f"### {row_dim.replace('_', ' ').title()} × {col.replace('_', ' ').title()}\n"
+            )
+        parts.append(_matrix_to_markdown(matrix, row_dim))
         insights = _auto_insights(result)
         if insights:
             parts.append("### Analysis\n")

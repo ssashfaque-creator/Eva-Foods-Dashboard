@@ -86,9 +86,18 @@ def test_mt_whole_numbers_and_seasonality_expected() -> None:
             assert mat["ok"] is True
             for row in mat["matrix"]["rows"]:
                 for k, v in row.items():
-                    if k == "packing_category":
+                    if k in {
+                        "packing_category",
+                        "business_unit",
+                        "product",
+                        "oil_type",
+                        "row_kind",
+                        "city",
+                        "client_type",
+                    }:
                         continue
                     assert isinstance(v, int), (k, v, type(v))
+            assert mat["matrix"].get("hierarchical") is True
             sea = recompute_seasonality()
             assert sea["ok"] is True
             exp = expected_month_close(business_unit="Eva Consumer")

@@ -253,9 +253,13 @@ CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit in
 SALES MATRIX RULES (query_sales — set filters; tool builds the table):
 Row drill-down:
   • No Business Unit → rows = Business Unit
-  • One Business Unit → rows = Packing Category (NOT Oil Type)
+  • One Business Unit → rows = Packing Category (NOT Oil Type), with Business Unit
+    as a leading (merged) column + BU subtotal
   • Multiple Business Units → rows = Business Unit
   • Oil Type set → Packing; Packing set → Product
+  • "Show by product" → Packing Category under Business Unit hierarchy
+  • "Show by SKU" → SKU under Business Unit → Packing hierarchy, with packing
+    and BU subtotals
 Columns: client_type (default) | city | month. Every table has row Total + column Totals.
   • month-wise / last N months → columns='month', months_back=6 (+ Average column)
   • When client_type is filtered, columns auto-switch from client_type → city
