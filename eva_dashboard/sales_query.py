@@ -1349,6 +1349,139 @@ def query_sales(
     return result
 
 
+def prior_business_units(prior_spec: dict[str, Any] | None) -> list[str]:
+    """Business units active on a previous sales table (empty = all BUs)."""
+    if not prior_spec:
+        return []
+    units: list[str] = []
+    for u in prior_spec.get("business_units") or []:
+        nu = _normalize_business_unit(u)
+        if nu and nu not in units:
+            units.append(nu)
+    pf = prior_spec.get("filters") or {}
+    one = _normalize_business_unit(pf.get("business_unit"))
+    if one and one not in units:
+        units.append(one)
+    return units
+
+
+def check_segment_inclusion(
+    *,
+    prior_spec: dict[str, Any],
+    segment: str,
+    mode: str = "matrix",
+) -> dict[str, Any]:
+    """Answer 'does this include Bulk?' against the previous sales table.
+
+    - If ``segment`` was already in the prior BU filter (or prior had no BU
+      filter = all BUs), show that segment alone and say it **was included**.
+    - Otherwise show the same city/client/period scope for ``segment`` and say
+      it **was excluded** (so the user can then combine / include it).
+    """
+    target = _normalize_business_unit(segment)
+    if not target:
+        return {"ok": False, "error": "Could not resolve which segment to check"}
+
+    prior_units = prior_business_units(prior_spec)
+    # Empty prior BU list means the previous table covered all business units
+    included = (not prior_units) or (target in prior_units)
+
+    pf = prior_spec.get("filters") or {}
+    col = prior_spec.get("column_dimension") or "client_type"
+    mb = int(prior_spec.get("months_back") or 6)
+    period = prior_spec.get("period_phrase")
+    date_from = None
+    date_to = None
+    if not period and prior_spec.get("period"):
+        date_from = (prior_spec["period"] or {}).get("date_from")
+        date_to = (prior_spec["period"] or {}).get("date_to")
+
+    sliced = query_sales(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        city=pf.get("city"),
+        business_unit=target,
+        oil_type=pf.get("oil_type"),
+        packing_category=pf.get("packing_category"),
+        client_type=pf.get("client_type"),
+        columns=col,
+        months_back=mb,
+        mode=mode if mode in {"matrix", "analytical"} else "matrix",
+    )
+    if not sliced.get("ok"):
+        return sliced
+
+    total = mt_round(_matrix_total_mt(sliced.get("matrix") or {}))
+    prior_label = (prior_spec.get("period") or {}).get("label") or period or "prior table"
+    prior_desc = ", ".join(
+        p
+        for p in [
+            ", ".join(prior_units) if prior_units else "all business units",
+            pf.get("client_type"),
+            pf.get("city"),
+            prior_label,
+        ]
+        if p
+    )
+
+    if included:
+        headline = (
+            f"**Yes — {target} is included** in the previous answer "
+            f"({prior_desc}).\n\n"
+            f"Here is **{target} only** from that same scope "
+            f"(**{total} MT** total):\n"
+        )
+        tip = (
+            f"Say **combine / include {target}** if you want it merged with "
+            "other units in one table."
+        )
+    else:
+        headline = (
+            f"**No — {target} was not included** in the previous answer "
+            f"({prior_desc}).\n\n"
+            f"Here are **{target}** sales for the **same filters** that were "
+            f"excluded (**{total} MT** total):\n"
+        )
+        tip = (
+            f"Say **combine the tables**, **add {target}**, or **include bulk** "
+            "to merge this with the previous table."
+        )
+
+    body = sliced.get("answer_markdown") or ""
+    # Drop the original one-liner context if present; keep tables + analysis
+    lines = [headline, body.strip(), "", "### Next step", f"- {tip}", ""]
+    out = dict(sliced)
+    out["mode"] = "include_check"
+    out["included"] = included
+    out["checked_segment"] = target
+    out["prior_business_units"] = prior_units
+    out["answer_markdown"] = "\n".join(lines)
+    # Keep a table_spec pointing at the *checked* segment so a later
+    # "combine" can merge prior units + this segment.
+    spec = dict(out.get("table_spec") or {})
+    spec["include_check"] = {
+        "included": included,
+        "segment": target,
+        "prior_business_units": prior_units,
+        "prior_spec": {
+            "period_phrase": prior_spec.get("period_phrase"),
+            "period": prior_spec.get("period"),
+            "filters": pf,
+            "business_units": prior_units,
+            "column_dimension": col,
+            "row_dimension": prior_spec.get("row_dimension"),
+            "months_back": prior_spec.get("months_back"),
+        },
+    }
+    out["table_spec"] = spec
+    out["response_instructions"] = (
+        "REQUIRED: Use answer_markdown verbatim. "
+        "If the user then says combine / add / include, merge prior + segment."
+    )
+    return out
+
+
 def _md_escape(value: Any) -> str:
     text = str(value if value is not None else "")
     return text.replace("|", "\\|").replace("\n", " ")

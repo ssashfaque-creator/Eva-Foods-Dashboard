@@ -32,7 +32,11 @@ from eva_dashboard.product_language import (
     product_sales,
     resolve_product_language,
 )
-from eva_dashboard.sales_query import query_price, query_sales
+from eva_dashboard.sales_query import (
+    check_segment_inclusion,
+    query_price,
+    query_sales,
+)
 from eva_dashboard.seasonality import expected_month_close
 
 DEFAULT_MODEL = "gpt-4o"
@@ -264,6 +268,11 @@ Examples:
   "Add Eva Bulk to this table" (follow-up)
     → business_units=['Eva Consumer','Eva Bulk'], columns='month', months_back=6,
       prior_spec from previous answer — SAME table, extra BU row(s)
+  "Does this include bulk?" (follow-up after Eva / Eva Consumer table)
+    → inclusion check for Eva Bulk with SAME city/client/period; show Bulk-only
+      table (included slice OR excluded sales). Then user may say:
+  "Combine the tables" / "add bulk sales" / "include bulk"
+    → merge prior BUs + Eva Bulk into one table (prior_spec)
   "How were Eva Consumer sales in July?"
     → analytical (city + client + AMS); rows = Packing Category
   "What's the Average sale for Imtiaz store last 6 months"
@@ -303,9 +312,12 @@ Examples:
 MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
 - how were / how are / evaluate / assess / performance / doing / trend → analytical
-- add / also include / plus → merge into previous table via prior_spec
+- add / also include / plus / combine tables / include bulk → merge via prior_spec
+- does this include bulk? → inclusion check (Bulk table for same filters)
 - show by product / product category / packing → rows = Packing Category (keep prior)
 - dissect further / SKU / sku-wise → rows = Product SKU (keep prior)
+- Messages starting with [FOLLOW-UP …] are replies to the previous answer —
+  always reuse that answer's filters/table_spec.
 
 SKU / product language questions (single product):
 - resolve_product_language then product_sales (or query with packing/oil filters).
@@ -1172,17 +1184,149 @@ def _looks_month_wise(text: str) -> bool:
     )
 
 
-def _looks_table_followup(text: str) -> bool:
+FOLLOWUP_MARKER = "[FOLLOW-UP on the answer you just gave]"
+
+
+def _is_explicit_followup(text: str) -> bool:
+    """True when the UI Reply button prefixed the user message."""
+    t = (text or "").lstrip()
+    return t.startswith("[FOLLOW-UP") or t.startswith(FOLLOWUP_MARKER)
+
+
+def _looks_include_check(text: str) -> bool:
+    """True for 'does this include bulk?' / 'was Eva Bulk included?'."""
+    t = (text or "").lower()
+    if re.search(
+        r"\b("
+        r"does (this|it|that) include|"
+        r"is .{0,30} included|"
+        r"was .{0,30} included|"
+        r"are .{0,30} included|"
+        r"included in (this|the|that|previous)|"
+        r"any .{0,20} (in|included in) (this|the|that)"
+        r")\b",
+        t,
+    ):
+        return True
+    if re.search(
+        r"\b(include[sd]?|including)\b.+\b(bulk|consumer|eva|maan)\b",
+        t,
+    ) and re.search(r"\b(this|that|previous|table|above)\b", t):
+        return True
+    return False
+
+
+def _looks_combine_tables(text: str) -> bool:
     t = (text or "").lower()
     return bool(
         re.search(
-            r"\b(add|also include|include|plus|with|append)\b.+\b"
-            r"(eva|maan|bulk|consumer|cusine|cuisine|shortening|meal|byproduct)",
+            r"\b(combine|merge)\b.+\b(table|tables|them|both|sales|together)\b",
             t,
         )
-        or re.search(r"\badd\b.+\bto (this|the|that) table\b", t)
-        or _looks_row_drilldown(t)
+        or re.search(r"\b(combine|merge)\s+(the\s+)?(tables?|them|both)\b", t)
+        or re.search(
+            r"\b(add|include|also include|plus|append)\b.+\b"
+            r"(bulk|consumer)\s*(sales?)?\b",
+            t,
+        )
     )
+
+
+def _looks_table_followup(text: str) -> bool:
+    t = (text or "").lower()
+    if re.search(
+        r"\b(add|also include|include|plus|with|append)\b.+\b"
+        r"(eva|maan|bulk|consumer|cusine|cuisine|shortening|meal|byproduct)",
+        t,
+    ):
+        return True
+    if re.search(r"\badd\b.+\bto (this|the|that) table\b", t):
+        return True
+    if _looks_combine_tables(t):
+        return True
+    if _looks_row_drilldown(t):
+        return True
+    if _is_explicit_followup(t) and re.search(
+        r"\b(add|include|combine|merge|bulk|consumer)\b", t
+    ):
+        return True
+    return False
+
+
+def _prior_units_list(prior_spec: dict[str, Any] | None) -> list[str]:
+    if not prior_spec:
+        return []
+    units: list[str] = []
+    for u in prior_spec.get("business_units") or []:
+        if u and u not in units:
+            units.append(str(u))
+    pf = prior_spec.get("filters") or {}
+    one = pf.get("business_unit")
+    if one and one not in units:
+        units.append(str(one))
+    # Nested prior from an include_check answer
+    ic = prior_spec.get("include_check") or {}
+    for u in ic.get("prior_business_units") or []:
+        if u and u not in units:
+            units.append(str(u))
+    return units
+
+
+def _companion_business_units(
+    text: str,
+    prior_spec: dict[str, Any] | None = None,
+) -> list[str]:
+    """Map bare 'bulk' / 'consumer' to the companion BU of the prior table."""
+    t = (text or "").lower()
+    prior_units = _prior_units_list(prior_spec)
+    prior_l = [u.lower() for u in prior_units]
+    out: list[str] = []
+
+    has_explicit_bulk = bool(re.search(r"\b(eva|maan)\s+bulk\b", t))
+    has_explicit_cons = bool(re.search(r"\b(eva|maan)\s+consumer\b", t))
+
+    if re.search(r"\bbulk\b", t) and not has_explicit_bulk:
+        if any("maan" in u and "consumer" in u for u in prior_l):
+            out.append("Maan Bulk")
+        elif any("maan" in u and "bulk" in u for u in prior_l):
+            out.append("Maan Bulk")
+        else:
+            out.append("Eva Bulk")
+
+    if re.search(r"\bconsumer\b", t) and not has_explicit_cons:
+        # Only when clearly asking about consumer relative to a bulk table /
+        # include-check — avoid hijacking "Eva Consumer" questions.
+        if any("bulk" in u for u in prior_l) or _looks_include_check(t) or _looks_combine_tables(t):
+            if any("maan" in u for u in prior_l):
+                out.append("Maan Consumer")
+            else:
+                out.append("Eva Consumer")
+
+    return out
+
+
+def _resolve_include_segment(
+    text: str,
+    prior_spec: dict[str, Any] | None,
+) -> str | None:
+    """Which BU the user is asking about in an include-check question."""
+    named = _extract_business_units_from_text(text)
+    if named:
+        return named[0]
+    comps = _companion_business_units(text, prior_spec)
+    if comps:
+        return comps[0]
+    # Default: if they said "include" without naming, assume Bulk vs Consumer prior
+    prior_units = _prior_units_list(prior_spec)
+    if any("consumer" in u.lower() for u in prior_units):
+        if any("maan" in u.lower() for u in prior_units):
+            return "Maan Bulk"
+        return "Eva Bulk"
+    if any("bulk" in u.lower() for u in prior_units):
+        if any("maan" in u.lower() for u in prior_units):
+            return "Maan Consumer"
+        return "Eva Consumer"
+    return "Eva Bulk"
 
 
 def _looks_row_drilldown(text: str) -> bool:
@@ -1310,16 +1454,21 @@ def _looks_client_list(text: str) -> bool:
 
 def _looks_context_followup(text: str) -> bool:
     """True when the user refers to the previous answer/table (in this / from that)."""
+    if _is_explicit_followup(text):
+        return True
     t = (text or "").lower()
     return bool(
         re.search(
             r"\b("
             r"in this|from this|in that|from that|this table|that table|"
             r"above|these sales|those sales|in the above|from the above|"
-            r"same (period|filters?|scope|table)|for this"
+            r"same (period|filters?|scope|table)|for this|"
+            r"combine the tables|merge the tables|add bulk|include bulk"
             r")\b",
             t,
         )
+        or _looks_include_check(t)
+        or _looks_combine_tables(t)
     )
 
 
@@ -1677,6 +1826,16 @@ def _dispatch_tool(
     prior_price_spec: dict[str, Any] | None = None,
 ) -> Any:
     if name == "query_sales":
+        # "Does this include bulk?" — show Bulk-only for prior scope
+        if _looks_include_check(user_text) and prior_spec:
+            segment = _resolve_include_segment(user_text, prior_spec)
+            mode_ic = "analytical" if _looks_analytical(user_text) else "matrix"
+            return check_segment_inclusion(
+                prior_spec=prior_spec,
+                segment=segment or "Eva Bulk",
+                mode=mode_ic,
+            )
+
         if _looks_analytical(user_text):
             mode = "analytical"
         else:
@@ -1701,13 +1860,31 @@ def _dispatch_tool(
 
         # Follow-up: merge mentioned BUs / keep prior table / change row grain / YoY
         is_yoy = _looks_sales_yoy_compare(user_text)
+        is_combine = _looks_combine_tables(user_text) or _looks_table_followup(user_text)
         use_prior = prior_spec if (
-            (_looks_table_followup(user_text) or is_drill or is_yoy) and prior_spec
+            (is_combine or is_drill or is_yoy or _is_explicit_followup(user_text))
+            and prior_spec
         ) else None
-        if use_prior or _looks_table_followup(user_text) or is_drill or is_yoy:
+        if use_prior or is_combine or is_drill or is_yoy:
             for u in _extract_business_units_from_text(user_text):
                 if u not in units:
                     units.append(u)
+            for u in _companion_business_units(user_text, prior_spec):
+                if u not in units:
+                    units.append(u)
+            # Combine after include_check: restore original prior units + segment
+            if prior_spec and (prior_spec.get("include_check") or is_combine):
+                ic = prior_spec.get("include_check") or {}
+                base = ic.get("prior_spec") or prior_spec
+                for u in _prior_units_list(base):
+                    if u not in units:
+                        units.insert(0, u)
+                seg = ic.get("segment")
+                if seg and seg not in units:
+                    units.append(seg)
+                # Prefer the original table's period/columns when combining
+                if ic.get("prior_spec"):
+                    use_prior = ic["prior_spec"]
             if prior_spec and not use_prior:
                 use_prior = prior_spec
             if use_prior and use_prior.get("column_dimension") == "month":
@@ -1738,12 +1915,15 @@ def _dispatch_tool(
 
         # If user asked about a client type but did not name a BU, do not keep a
         # model-invented Business Unit (e.g. Eva Consumer for "Imtiaz store").
-        mentioned_units = _extract_business_units_from_text(user_text)
+        mentioned_units = (
+            _extract_business_units_from_text(user_text)
+            + _companion_business_units(user_text, prior_spec)
+        )
         if (ctype and not mentioned_units) or (is_drill and use_prior and not mentioned_units):
             # Drill-downs keep prior BU filters via prior_spec, not model args
             if is_drill and use_prior and not mentioned_units:
                 uniq = []
-            elif ctype and not mentioned_units:
+            elif ctype and not mentioned_units and not is_combine:
                 uniq = []
 
         if len(uniq) == 1:
@@ -1972,9 +2152,43 @@ def _looks_factual(text: str) -> bool:
         "so far", "doing", "breakdown", "august", "april", "march",
         "evaluate", "assess", "performance", "imtiaz", "distributor", "store",
         "who is", "who's", "who are", "rate", "al bari", "party", "share",
-        "percent", "grow", "quarter",
+        "percent", "grow", "quarter", "bulk", "include", "combine", "merge",
+        "follow-up", "follow up",
     )
     return any(k in t for k in keys)
+
+
+def _api_history_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """Strip UI-only metadata before sending to the OpenAI API."""
+    out: dict[str, Any] = {"role": msg.get("role")}
+    if "content" in msg:
+        out["content"] = msg.get("content")
+    if msg.get("tool_calls"):
+        out["tool_calls"] = msg["tool_calls"]
+    if msg.get("tool_call_id"):
+        out["tool_call_id"] = msg["tool_call_id"]
+    if msg.get("name"):
+        out["name"] = msg["name"]
+    return out
+
+
+def _attach_followup_meta(
+    messages: list[dict[str, Any]],
+    *,
+    table_spec: dict[str, Any] | None = None,
+    price_spec: dict[str, Any] | None = None,
+) -> None:
+    """Stamp the last assistant turn so the Reply button can pin prior filters."""
+    for m in reversed(messages):
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            meta = dict(m.get("_eva_followup") or {})
+            if table_spec:
+                meta["table_spec"] = table_spec
+            if price_spec:
+                meta["price_spec"] = price_spec
+            if meta:
+                m["_eva_followup"] = meta
+            return
 
 
 def chat_completion(
@@ -1983,8 +2197,14 @@ def chat_completion(
     api_key: str,
     model: str = DEFAULT_MODEL,
     on_status: Callable[[str], None] | None = None,
+    forced_prior_spec: dict[str, Any] | None = None,
+    forced_prior_price_spec: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Run a chat turn with tools. System prompt is refreshed with live DB state every turn."""
+    """Run a chat turn with tools. System prompt is refreshed with live DB state every turn.
+
+    ``forced_prior_spec`` comes from the Reply button — pin follow-ups to that
+    answer's filters even when newer tables exist in the thread.
+    """
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -2014,7 +2234,12 @@ def chat_completion(
         # First round: require tools; force the right primary tool when possible.
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
-            if looks_advanced(last_user):
+            if _looks_include_check(last_user) or _looks_combine_tables(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "query_sales"},
+                }
+            elif looks_advanced(last_user):
                 tool_choice = {
                     "type": "function",
                     "function": {"name": "advanced_query"},
@@ -2047,9 +2272,10 @@ def chat_completion(
             else:
                 tool_choice = "required"
 
+        api_messages = [_api_history_message(m) for m in working]
         response = client.chat.completions.create(
             model=model,
-            messages=working,
+            messages=api_messages,
             tools=TOOLS,
             tool_choice=tool_choice,
             temperature=0.1,
@@ -2097,9 +2323,16 @@ def chat_completion(
                     }
                 )
                 continue
+            _attach_followup_meta(
+                working,
+                table_spec=forced_prior_spec or _last_table_spec(working),
+                price_spec=forced_prior_price_spec or _last_price_spec(working),
+            )
             return text, working
 
         sales_markdown: str | None = None
+        last_table_spec: dict[str, Any] | None = None
+        last_price_spec: dict[str, Any] | None = None
         for tc in tool_calls:
             name = tc.function.name
             if on_status:
@@ -2109,8 +2342,8 @@ def chat_completion(
             except json.JSONDecodeError:
                 args = {}
             try:
-                prior = _last_table_spec(working)
-                prior_price = _last_price_spec(working)
+                prior = forced_prior_spec or _last_table_spec(working)
+                prior_price = forced_prior_price_spec or _last_price_spec(working)
                 result = _dispatch_tool(
                     name,
                     args,
@@ -2138,6 +2371,8 @@ def chat_completion(
             ):
                 sales_markdown = str(result["answer_markdown"])
                 if name == "query_sales":
+                    if result.get("table_spec"):
+                        last_table_spec = result["table_spec"]
                     result = {
                         "ok": True,
                         "mode": result.get("mode"),
@@ -2154,6 +2389,8 @@ def chat_completion(
                         ),
                     }
                 elif name == "query_price":
+                    if result.get("price_spec"):
+                        last_price_spec = result["price_spec"]
                     result = {
                         "ok": True,
                         "period": result.get("period"),
@@ -2197,6 +2434,11 @@ def chat_completion(
         # Do not let the model drop tables — return formatted sales answer directly
         if sales_markdown and len(tool_calls) == 1:
             working.append({"role": "assistant", "content": sales_markdown})
+            _attach_followup_meta(
+                working,
+                table_spec=last_table_spec or forced_prior_spec or _last_table_spec(working),
+                price_spec=last_price_spec or forced_prior_price_spec or _last_price_spec(working),
+            )
             return sales_markdown, working
 
     return (

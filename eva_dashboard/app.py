@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -513,6 +514,7 @@ def page_chat() -> None:
 
     from eva_dashboard.chatbot import (
         DEFAULT_MODEL,
+        FOLLOWUP_MARKER,
         chat_completion,
         resolve_api_key,
         sales_overview,
@@ -534,6 +536,7 @@ def page_chat() -> None:
     )
     if c3.button("Clear chat", key="chat_clear"):
         st.session_state.pop("eva_chat_messages", None)
+        st.session_state.pop("eva_reply_to", None)
         st.rerun()
 
     api_key = resolve_api_key(api_key_input) or env_key
@@ -569,6 +572,7 @@ def page_chat() -> None:
 - Then: Show by product *(rows → Packing Category, same months)*
 - Then: SKU wise / dissect further *(rows → Product)*
 - Or: Add Eva Bulk to this table *(extends the same month table)*
+- Or: Does this include bulk? → then Combine the tables / include bulk
 
 **Analytical** — *how were / evaluate / assess*:
 - How are Eva Consumer sales doing in Karachi so far in August?
@@ -584,23 +588,55 @@ def page_chat() -> None:
 - Who is Al Bari?
 - Canola standup price for Distributors last week
 - What’s the Price Fetch? *(follow-up)*
+
+Use **↩ Reply** under any answer to mark your next question as a follow-up on that table.
             """
         )
 
     if "eva_chat_messages" not in st.session_state:
         st.session_state["eva_chat_messages"] = []
 
-    for msg in st.session_state["eva_chat_messages"]:
+    reply_to = st.session_state.get("eva_reply_to")
+    if reply_to is not None:
+        msgs = st.session_state["eva_chat_messages"]
+        target = msgs[reply_to] if 0 <= reply_to < len(msgs) else None
+        preview = ""
+        if target:
+            preview = re.sub(r"\s+", " ", (target.get("content") or "")[:140]).strip()
+        b1, b2 = st.columns([5, 1])
+        with b1:
+            st.info(
+                f"**Replying as follow-up** to that answer"
+                + (f": {preview}…" if preview else "")
+                + " — your next question reuses its filters/table."
+            )
+        with b2:
+            if st.button("Cancel", key="eva_reply_cancel"):
+                st.session_state.pop("eva_reply_to", None)
+                st.rerun()
+
+    for i, msg in enumerate(st.session_state["eva_chat_messages"]):
         role = msg.get("role")
         if role not in {"user", "assistant"}:
             continue
         content = msg.get("content") or ""
         if not content and msg.get("tool_calls"):
             continue
+        # Hide the internal follow-up marker from the displayed user bubble
+        display = content
+        if role == "user" and content.lstrip().startswith("[FOLLOW-UP"):
+            parts = content.split("\n\n", 1)
+            display = parts[1] if len(parts) > 1 else content
         with st.chat_message(role):
-            st.markdown(content)
+            st.markdown(display)
+            if role == "assistant" and content.strip():
+                if st.button("↩ Reply", key=f"eva_reply_btn_{i}", help="Ask a follow-up on this answer"):
+                    st.session_state["eva_reply_to"] = i
+                    st.rerun()
 
-    prompt = st.chat_input("Ask about Eva Foods data…")
+    prompt = st.chat_input(
+        "Ask about Eva Foods data… (or click ↩ Reply under an answer first)"
+    )
     if not prompt:
         return
 
@@ -610,7 +646,22 @@ def page_chat() -> None:
         )
         return
 
-    st.session_state["eva_chat_messages"].append({"role": "user", "content": prompt})
+    forced_prior = None
+    forced_price = None
+    prompt_for_model = prompt
+    reply_idx = st.session_state.get("eva_reply_to")
+    if reply_idx is not None:
+        msgs = st.session_state["eva_chat_messages"]
+        if 0 <= reply_idx < len(msgs):
+            meta = (msgs[reply_idx].get("_eva_followup") or {})
+            forced_prior = meta.get("table_spec")
+            forced_price = meta.get("price_spec")
+        prompt_for_model = f"{FOLLOWUP_MARKER}\n\n{prompt}"
+        st.session_state.pop("eva_reply_to", None)
+
+    st.session_state["eva_chat_messages"].append(
+        {"role": "user", "content": prompt_for_model}
+    )
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -622,6 +673,8 @@ def page_chat() -> None:
                 api_key=api_key,
                 model=model or DEFAULT_MODEL,
                 on_status=lambda s: status.caption(s),
+                forced_prior_spec=forced_prior,
+                forced_prior_price_spec=forced_price,
             )
             status.empty()
             st.markdown(answer or "_(No response)_")

@@ -60,3 +60,47 @@ def test_system_prompt_includes_live_briefing() -> None:
                 os.environ.pop("EVA_DATA_DIR", None)
             else:
                 os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_followup_and_include_routing_helpers() -> None:
+    from eva_dashboard.chatbot import (
+        FOLLOWUP_MARKER,
+        _companion_business_units,
+        _is_explicit_followup,
+        _looks_combine_tables,
+        _looks_include_check,
+        _looks_table_followup,
+        _resolve_include_segment,
+        _api_history_message,
+    )
+
+    assert _looks_include_check("Does this include bulk?")
+    assert _looks_include_check("was Eva Bulk included in this?")
+    assert not _looks_include_check("include bulk")  # combine, not check
+
+    assert _looks_combine_tables("combine the tables")
+    assert _looks_combine_tables("add bulk sales")
+    assert _looks_combine_tables("include bulk")
+    assert _looks_table_followup("combine the tables")
+
+    prior = {
+        "business_units": ["Eva Consumer"],
+        "filters": {"business_unit": "Eva Consumer", "city": "Karachi"},
+    }
+    assert _companion_business_units("does this include bulk?", prior) == ["Eva Bulk"]
+    assert _resolve_include_segment("does this include bulk?", prior) == "Eva Bulk"
+
+    marked = f"{FOLLOWUP_MARKER}\n\ndoes this include bulk?"
+    assert _is_explicit_followup(marked)
+    assert _looks_include_check(marked)
+
+    raw = {
+        "role": "assistant",
+        "content": "hello",
+        "_eva_followup": {"table_spec": {"x": 1}},
+        "tool_calls": [{"id": "1"}],
+    }
+    clean = _api_history_message(raw)
+    assert "_eva_followup" not in clean
+    assert clean["content"] == "hello"
+    assert clean["tool_calls"]

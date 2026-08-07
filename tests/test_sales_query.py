@@ -490,3 +490,120 @@ def test_sales_yoy_compare_same_period_last_year() -> None:
                 os.environ.pop("EVA_DATA_DIR", None)
             else:
                 os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_include_check_bulk_excluded_then_combine() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            first = _dispatch_tool(
+                "query_sales",
+                {
+                    "period": "July",
+                    "city": "Karachi",
+                    "business_unit": "Eva Consumer",
+                    "client_type": "Eva Distributors",
+                },
+                user_text="What were Eva Consumer sales for distributors in Karachi in July?",
+            )
+            assert first["ok"] is True
+            prior = first["table_spec"]
+            assert prior["filters"]["business_unit"] == "Eva Consumer"
+
+            check = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Does this include bulk?",
+                prior_spec=prior,
+            )
+            assert check["ok"] is True
+            assert check["mode"] == "include_check"
+            assert check["included"] is False
+            assert check["checked_segment"] == "Eva Bulk"
+            assert check["filters"]["city"] == "Karachi"
+            assert check["filters"]["client_type"] == "Eva Distributors"
+            assert check["filters"]["business_unit"] == "Eva Bulk"
+            assert "not included" in check["answer_markdown"].lower()
+            assert "Eva Bulk" in check["answer_markdown"]
+
+            combine = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Combine the tables",
+                prior_spec=check["table_spec"],
+            )
+            assert combine["ok"] is True
+            units = set(combine.get("business_units") or [])
+            assert "Eva Consumer" in units and "Eva Bulk" in units
+            assert combine["filters"]["city"] == "Karachi"
+            assert combine["filters"]["client_type"] == "Eva Distributors"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_include_check_bulk_already_included() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            first = _dispatch_tool(
+                "query_sales",
+                {
+                    "period": "July",
+                    "business_units": ["Eva Consumer", "Eva Bulk"],
+                },
+                user_text="Show Eva Consumer and Eva Bulk sales in July",
+            )
+            check = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Does this include Eva Bulk?",
+                prior_spec=first["table_spec"],
+            )
+            assert check["included"] is True
+            assert "is included" in check["answer_markdown"].lower()
+            assert check["filters"]["business_unit"] == "Eva Bulk"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_include_bulk_short_phrase_combine() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.chatbot import _dispatch_tool
+
+            first = _dispatch_tool(
+                "query_sales",
+                {"period": "July", "business_unit": "Eva Consumer", "city": "Lahore"},
+                user_text="Eva Consumer sales in Lahore in July",
+            )
+            follow = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="include bulk",
+                prior_spec=first["table_spec"],
+            )
+            units = set(follow.get("business_units") or [])
+            assert "Eva Consumer" in units and "Eva Bulk" in units
+            assert follow["filters"]["city"] == "Lahore"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
