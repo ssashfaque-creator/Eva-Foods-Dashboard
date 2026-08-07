@@ -42,6 +42,37 @@ def test_looks_factual_detects_data_questions() -> None:
     assert not _looks_factual("Thanks!")
 
 
+def test_compose_tables_plus_gpt_analysis() -> None:
+    from eva_dashboard.chatbot import (
+        _compose_tables_plus_analysis,
+        _strip_analysis_section,
+    )
+
+    tool_md = (
+        "Sales for Jul 2026 · city **Lahore** (MT).\n\n"
+        "### Business Unit × Client Type\n"
+        '<table class="eva-mtx"><tr><td>42</td></tr></table>\n\n'
+        "### Analysis\n"
+        "- Canned insight from the tool.\n"
+    )
+    tables = _strip_analysis_section(tool_md)
+    assert "eva-mtx" in tables
+    assert "### Analysis" not in tables
+    assert "Canned" not in tables
+
+    composed = _compose_tables_plus_analysis(
+        tool_md,
+        "### Analysis\n- Lahore is led by distributors at 42 MT.\n- Watch AMS vs July volume.\n",
+    )
+    assert '<table class="eva-mtx">' in composed
+    assert "### Analysis" in composed
+    assert "Lahore is led by distributors" in composed
+    assert "Canned insight" not in composed
+
+    fallback = _compose_tables_plus_analysis(tool_md, "Thanks!")
+    assert "Canned insight from the tool." in fallback
+
+
 def test_system_prompt_includes_live_briefing() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
