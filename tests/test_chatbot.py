@@ -55,6 +55,13 @@ def test_system_prompt_includes_live_briefing() -> None:
             assert "query_sales" in text
             assert "knowledge cutoff" in text.lower() or "OpenAI knowledge cutoff" in text
             assert "SPEED" in text or "TOOL RULES" in text
+            assert "DATA MODEL" in text
+            # v0.4.1: static rules stay short; live/glossary/catalog may be large
+            static_marker = "SPEED & TOOL RULES"
+            start = text.find(static_marker)
+            end = text.find("=== PRODUCT LANGUAGE")
+            assert start >= 0 and end > start
+            assert (end - start) < 4500, "static prompt rules grew too large"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
