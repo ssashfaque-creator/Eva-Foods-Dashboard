@@ -10,7 +10,10 @@ from eva_dashboard.chatbot import (
     _dispatch_tool,
     _looks_client_list,
     _looks_party_analytics,
+    _looks_party_breakdown,
     _looks_party_lookup,
+    _looks_party_mix_query,
+    _looks_per_party_mix,
     _looks_sales_matrix,
 )
 from eva_dashboard.db import connect, init_db
@@ -595,6 +598,135 @@ def test_underperformers_packing_mix_invoices_city_rank() -> None:
             assert top_vtf["metric"] == "ams"
             assert top_vtf["filters"]["client_type"] == "Eva Distributors"
             assert top_vtf["filters"]["oil_type"] == "Eva VTF"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_distributor_sales_routes_to_matrix_not_list() -> None:
+    """'Distributor sales in Karachi for July' → product/packing matrix, not client list."""
+    q = "Can you show me distributor sales in Karachi for july"
+    assert not _looks_client_list(q)
+    assert _looks_sales_matrix(q)
+    assert not _looks_party_analytics(q)
+    assert not _looks_party_mix_query(q)
+
+    # Individual / break-of distributors → list
+    assert _looks_party_breakdown("show by individual distributors")
+    assert _looks_client_list("show by individual distributors")
+    assert _looks_party_breakdown("show a break of the distributors")
+    assert _looks_client_list("Who are my distributors in Lahore")
+
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text=q,
+            )
+            assert out["ok"] is True
+            assert out["filters"]["client_type"] == "Eva Distributors"
+            assert out["filters"]["city"] == "Karachi"
+            assert out["period"]["date_from"].startswith("2026-07")
+            # Matrix grain (BU / packing), not a party list
+            assert out.get("matrix") or out.get("row_dimension")
+            assert "party_spec" not in out or out.get("mode") != "list_clients"
+            md = out.get("answer_markdown") or ""
+            assert "Gamma Dist" not in md or "Business Unit" in md or "Packing" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_product_breakdown_for_each_distributor() -> None:
+    """Product breakdown for each distributor → per-party packing mix, not volume tops."""
+    q = "Can you show me the product breakdown for each distributor"
+    assert _looks_party_mix_query(q)
+    assert _looks_per_party_mix(q)
+    assert _looks_party_analytics(q)
+    assert not _looks_client_list(q)
+    assert not _looks_party_breakdown(q)
+    assert not _looks_sales_matrix(q)
+
+    inferred = infer_party_analytics_from_text(q)
+    assert inferred["metric"] == "packing_mix"
+    assert inferred["per_party_mix"] is True
+    assert inferred["client_type"] == "Eva Distributors"
+
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            prior = {
+                "period_phrase": "July 2026",
+                "period": {
+                    "date_from": "2026-07-01",
+                    "date_to": "2026-07-31",
+                    "label": "Jul 2026",
+                },
+                "filters": {
+                    "city": "Karachi",
+                    "client_type": "Eva Distributors",
+                    "business_unit": None,
+                    "oil_type": None,
+                    "packing_category": None,
+                },
+                "business_units": [],
+                "column_dimension": "client_type",
+                "row_dimension": "business_unit",
+            }
+            # Model wrongly asks for volume — dispatch must force packing_mix
+            out = _dispatch_tool(
+                "analyze_parties",
+                {"metric": "volume"},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out["ok"] is True
+            assert out["metric"] == "packing_mix"
+            assert out.get("per_party_mix") is True
+            assert out["filters"]["city"] == "Karachi"
+            assert out["filters"]["client_type"] == "Eva Distributors"
+            assert out["period"]["date_from"].startswith("2026-07")
+            md = out.get("answer_markdown") or ""
+            assert "mix by party" in md.lower() or "###" in md
+            assert "Top parties by Volume" not in md
+            # Gamma is the Karachi distributor with July volume
+            assert "Gamma Dist" in md
+            assert "Share %" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_party_table_omits_constant_filter_columns() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            out = analyze_parties(
+                period="July 2026",
+                city="Lahore",
+                client_type="Eva Distributors",
+                metric="volume",
+                limit=5,
+            )
+            assert out["ok"] is True
+            md = out["answer_markdown"]
+            # Constant Client Type / City should not repeat on every row
+            assert "Client Type" not in md.split("\n")[1]
+            assert "| City |" not in md.split("\n")[1]
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

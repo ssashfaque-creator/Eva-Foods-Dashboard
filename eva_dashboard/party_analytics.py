@@ -419,6 +419,7 @@ def analyze_parties(
     mix_dimension: str | None = None,
     sort: str = "desc",
     limit: int = 10,
+    per_party_mix: bool = False,
 ) -> dict[str, Any]:
     """Rank / summarize parties or cities.
 
@@ -429,6 +430,7 @@ def analyze_parties(
 
     group_by: party (default) | city
     mix_dimension: packing_category | product (for mix metrics)
+    per_party_mix: when True with packing/product_mix, one mix table per party
     sort: desc (default) | asc  — underperformers force asc on % vs AMS
     Default ranking metric is AMS unless the user asks for volume/growth.
     """
@@ -640,6 +642,85 @@ def analyze_parties(
                 ),
                 "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
             }
+        label = {
+            "packing_category": "Packing Category",
+            "product": "Product (SKU)",
+            "oil_type": "Oil Type",
+            "business_unit": "Business Unit",
+        }.get(dim, dim)
+
+        # Per-distributor / per-party mix tables
+        if per_party_mix and "party" in frame.columns:
+            party_totals = (
+                frame.groupby("party", as_index=False)["mt"]
+                .sum()
+                .sort_values("mt", ascending=False)
+            )
+            party_totals = party_totals.head(lim)
+            lines = [
+                f"{label} mix by party — {_scope_blurb(filters, period_info)}.\n"
+            ]
+            all_rows: list[dict[str, Any]] = []
+            parties_out: list[dict[str, Any]] = []
+            for _, pt in party_totals.iterrows():
+                pname = str(pt["party"])
+                p_mt = float(pt["mt"])
+                part = frame[frame["party"] == pname]
+                grouped = (
+                    part.groupby(dim, as_index=False)["mt"]
+                    .sum()
+                    .sort_values("mt", ascending=False)
+                )
+                meta = _party_meta(frame, pname)
+                parties_out.append(
+                    {
+                        "party": pname,
+                        "volume_mt": mt_round(p_mt),
+                        "client_type": meta.get("client_type"),
+                        "city": meta.get("city"),
+                    }
+                )
+                lines.append(f"### {pname.replace('|', '/')} — {round(p_mt, 3)} MT\n")
+                lines.append(f"| {label} | Volume (MT) | Share % |")
+                lines.append("| --- | --- | --- |")
+                for _, r in grouped.iterrows():
+                    mt = float(r["mt"])
+                    share = round(mt / p_mt * 100.0, 1) if p_mt else None
+                    row = {
+                        "party": pname,
+                        dim: str(r[dim]),
+                        "volume_mt": mt_round(mt),
+                        "share_pct": share,
+                    }
+                    all_rows.append(row)
+                    lines.append(
+                        f"| {str(r[dim]).replace('|', '/')} | {mt_round(mt)} | "
+                        f"{share}% |"
+                    )
+                lines.append(f"| **Total** | **{round(p_mt, 3)}** | **100%** |")
+                lines.append("")
+            tips = _party_analysis_bullets(
+                rows=parties_out,
+                metric="volume",
+                filters=filters,
+                entity_key="party",
+            )
+            lines = _append_analysis(lines, tips)
+            return {
+                "ok": True,
+                "mode": metric_n,
+                "metric": metric_n,
+                "mix_dimension": dim,
+                "per_party_mix": True,
+                "period": period_info,
+                "filters": filters,
+                "total_mt": mt_round(float(party_totals["mt"].sum())),
+                "parties": parties_out,
+                "rows": all_rows,
+                "answer_markdown": "\n".join(lines).strip() + "\n",
+                "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+            }
+
         total = float(frame["mt"].sum())
         grouped = (
             frame.groupby(dim, as_index=False)["mt"]
@@ -657,13 +738,6 @@ def analyze_parties(
                 }
             )
         rows = rows[:lim]
-        # footer total
-        label = {
-            "packing_category": "Packing Category",
-            "product": "Product (SKU)",
-            "oil_type": "Oil Type",
-            "business_unit": "Business Unit",
-        }.get(dim, dim)
         lines = [
             f"{label} mix — {_scope_blurb(filters, period_info)}.\n",
             f"| {label} | Volume (MT) | Share % |",
@@ -1430,14 +1504,31 @@ def _party_table_result(
         "avg_invoice_mt": "Avg MT / invoice",
     }
     name_header = "City" if entity_key == "city" else "Party"
-    headers = ["#", name_header, "Client Type", "City"] + [
-        col_labels.get(c, c) for c in extra_cols
-    ]
-    # Drop duplicate City column when entity is city
+    # Omit constant filter columns (same value on every row / matches filter)
+    show_type = True
+    show_city = entity_key != "city"
+    if rows and entity_key != "city":
+        ftype = filters.get("client_type")
+        fcity = filters.get("city")
+        types = {str(r.get("client_type") or "") for r in rows}
+        cities = {str(r.get("city") or "") for r in rows}
+        if ftype and len(types) <= 1 and (not types or next(iter(types)) == ftype):
+            show_type = False
+        if fcity and len(cities) <= 1 and (
+            not cities or next(iter(cities)) in {fcity, ""}
+        ):
+            show_city = False
+    headers = ["#", name_header]
     if entity_key == "city":
-        headers = ["#", "City", "Client Type"] + [
-            col_labels.get(c, c) for c in extra_cols
-        ]
+        if show_type:
+            headers.append("Client Type")
+    else:
+        if show_type:
+            headers.append("Client Type")
+        if show_city:
+            headers.append("City")
+    headers = headers + [col_labels.get(c, c) for c in extra_cols]
+    # Drop duplicate City column when entity is city — already handled above
     if score_label and score_label not in headers:
         if not any(col_labels.get(c) == score_label or c == "score" for c in extra_cols):
             headers.append(score_label)
@@ -1454,15 +1545,18 @@ def _party_table_result(
             cells = [
                 str(i),
                 str(r.get("city") or r.get("party") or "").replace("|", "/"),
-                str(r.get("client_type") or "—").replace("|", "/"),
             ]
+            if show_type:
+                cells.append(str(r.get("client_type") or "—").replace("|", "/"))
         else:
             cells = [
                 str(i),
                 str(r.get("party") or "").replace("|", "/"),
-                str(r.get("client_type") or "—").replace("|", "/"),
-                str(r.get("city") or "—").replace("|", "/"),
             ]
+            if show_type:
+                cells.append(str(r.get("client_type") or "—").replace("|", "/"))
+            if show_city:
+                cells.append(str(r.get("city") or "—").replace("|", "/"))
         for c in extra_cols:
             val = r.get(c)
             if val is None:
@@ -1695,6 +1789,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         "group_by": "party",
         "mix_dimension": None,
         "sort": "desc",
+        "per_party_mix": False,
     }
 
     # Oil / VTF / packing from language
@@ -1799,16 +1894,32 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     ):
         out["metric"] = "product_mix"
         out["mix_dimension"] = "product"
+        if re.search(
+            r"\b(for\s+each|each\s+(distributor|party|client)|"
+            r"per\s+(distributor|party|client)|"
+            r"(distributors?|parties|clients?)[- ]wise)\b",
+            t,
+        ):
+            out["per_party_mix"] = True
+            out["limit"] = out.get("limit") or 16
     elif re.search(
         r"\b(product mix|product break|packing mix|pack(ing)? break|"
         r"pack mix|category mix|mix for)\b",
         t,
     ) or (
         re.search(r"\b(product|packing|pack)\s+break(\s*down|down)?\b", t)
-        and re.search(r"\b(imtiaz|distributors?|clients?)\b", t)
+        and re.search(r"\b(imtiaz|distributors?|clients?|each|per)\b", t)
     ):
         out["metric"] = "packing_mix"
         out["mix_dimension"] = "packing_category"
+        if re.search(
+            r"\b(for\s+each|each\s+(distributor|party|client)|"
+            r"per\s+(distributor|party|client)|"
+            r"(distributors?|parties|clients?)[- ]wise)\b",
+            t,
+        ):
+            out["per_party_mix"] = True
+            out["limit"] = out.get("limit") or 16
     elif re.search(
         r"\b(invoice frequency|most invoices|by invoices?|invoices?)\b", t
     ):

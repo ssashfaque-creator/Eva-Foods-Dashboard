@@ -237,6 +237,7 @@ SPEED & TOOL RULES:
 6. Client **name** questions ("who is Al Bari?") → **lookup_party**.
 7. Client **lists** ("who are my distributors in Lahore?") → **list_clients**
    (City-Filter + Client Type — NOT fuzzy name search on the city word).
+   Lists are for who/list/individual/by-distributor — NOT for "distributor sales".
 8. Party rankings / AMS / share / YoY ("top 10 parties…", "which distributors
    doing well…", "% of VTF in Lahore") → **analyze_parties**.
 9. Rate / price / Price Fetch → **query_price**.
@@ -249,6 +250,9 @@ CLIENT TYPE ALIASES (always set client_type — do NOT invent a Business Unit in
   Example: "Average sale for Imtiaz store last 6 months"
     → client_type='Imtiaz Store', columns='month', months_back=6
       (NO business_unit unless the user named one)
+  Example: "Distributor sales in Karachi for July"
+    → query_sales client_type='Eva Distributors', city='Karachi', period='July'
+      (product/packing matrix — NOT list_clients)
   Example: "Who are my distributors in Lahore?"
     → list_clients city='Lahore', client_type='Eva Distributors'
 
@@ -318,7 +322,11 @@ Examples:
   "New parties last 6 months" / "new distributors last month"
     → metric='new_parties', period='last 6 months'
   "Lost / silent parties this month" → metric='lost_parties'
-  "Product mix for Imtiaz" → packing_mix; "SKU wise" → product_mix
+  "Product mix for Imtiaz" → packing_mix (aggregate for that client type)
+  "Product breakdown for each distributor" (follow-up)
+    → analyze_parties metric='packing_mix', per_party_mix=true — SAME prior
+      city/client_type/period; one mix table per distributor (NOT volume tops)
+  "SKU wise for distributors" → product_mix
   "City league / top cities" → group_by='city'
   "Most invoices / invoice frequency" → metric='invoices'
   "Which distributors grew VTF most vs July last year?"
@@ -333,7 +341,8 @@ Examples:
     → filter_entities metric='volume' op='gt' threshold=10
   "More sales this month than last month"
     → filter_entities metric='mom' op='grown' threshold=0
-  "Show this by individual distributors" (follow-up after a July sales table)
+  "Show this by individual distributors" / "break of the distributors"
+    (follow-up after a July sales table)
     → list_clients with SAME city/client_type/period (July), zeros omitted
   "Show July only" (follow-up after individual distributors)
     → re-run that distributor list for July — do NOT switch back to BU matrix
@@ -2033,6 +2042,8 @@ def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
     if _looks_named_party_sales(text):
         return False
+    if _looks_party_mix_query(t):
+        return False
     if _looks_party_breakdown(t):
         return True
     if re.search(
@@ -2047,6 +2058,12 @@ def _looks_client_list(text: str) -> bool:
         r"invoice|frequency|city league|by volume|vs\s*ams|"
         r"in this|from this|this table"
         r")\b",
+        t,
+    ):
+        return False
+    # "distributor sales in Karachi" is a sales matrix, not a client list
+    if re.search(r"\b(sales?|volume|mt)\b", t) and not re.search(
+        r"\b(who are|list|individual|[- ]wise)\b",
         t,
     ):
         return False
@@ -2106,11 +2123,35 @@ def _looks_party_mix_query(text: str) -> bool:
     # "product breakdown for distributors/Imtiaz" — not plain BU packing breakdown
     if re.search(
         r"\b(product|packing|pack)\s+break(\s*down|down)?\b.+\b"
-        r"(imtiaz|distributors?|clients?)\b",
+        r"(imtiaz|distributors?|clients?|each|per)\b",
+        t,
+    ):
+        return True
+    if re.search(
+        r"\b(product|packing|pack)\s+break(\s*down|down)?\b.+\b"
+        r"for\s+(each|every|per)\b",
         t,
     ):
         return True
     return False
+
+
+def _looks_per_party_mix(text: str) -> bool:
+    """True when mix should be shown per distributor/party (not one aggregate)."""
+    t = (text or "").lower()
+    if not _looks_party_mix_query(t):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"for\s+each|each\s+(distributor|party|client)|"
+            r"per\s+(distributor|party|client)|"
+            r"every\s+(distributor|party|client)|"
+            r"(distributors?|parties|clients?)[- ]wise"
+            r")\b",
+            t,
+        )
+    )
 
 
 def _looks_party_analytics(text: str) -> bool:
@@ -2177,6 +2218,7 @@ def _party_filters_from_prior(
         _looks_context_followup(user_text)
         or _looks_party_breakdown(user_text)
         or _looks_period_only_followup(user_text)
+        or _looks_party_mix_query(user_text)
     ):
         return {}
     pf = prior_spec.get("filters") or {}
@@ -2210,13 +2252,18 @@ def _party_filters_from_prior(
 def _looks_party_breakdown(text: str) -> bool:
     """True for 'by individual distributors' / distributor-wise breakdown of prior table."""
     t = (text or "").lower()
+    # Product/packing mix for each distributor is analyze_parties, not a list
+    if _looks_party_mix_query(t):
+        return False
     return bool(
         re.search(
             r"\b("
             r"individual\s+distributors?|"
             r"by\s+(individual\s+)?(distributors?|parties|clients?|party)|"
             r"(distributors?|parties|clients?)[- ]wise|"
-            r"break(\s*down|down)?\s+by\s+(distributors?|parties|clients?)"
+            r"break(\s*down|down)?\s+(by|of)\s+(the\s+)?"
+            r"(distributors?|parties|clients?)|"
+            r"break\s+of\s+(the\s+)?(distributors?|parties|clients?)"
             r")\b",
             t,
         )
@@ -2787,7 +2834,8 @@ def _dispatch_tool(
         ctype = normalize_client_type(ctype) if ctype else None
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
-        city_arg = arguments.get("city")
+        city_arg = arguments.get("city") or extract_city_from_text(user_text)
+        period_arg = arguments.get("period") or _extract_period_phrase(user_text)
 
         # YoY of "these sales": do not invent a client type (e.g. Eva Distributors)
         if is_yoy and use_prior:
@@ -2835,7 +2883,7 @@ def _dispatch_tool(
             columns = str(use_prior["column_dimension"])
 
         return query_sales(
-            period=arguments.get("period"),
+            period=period_arg,
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
             city=city_arg,
@@ -2913,6 +2961,24 @@ def _dispatch_tool(
     if name == "analyze_parties":
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+        # Mix / ranking follow-up after a party list: inherit that list's filters
+        if (
+            not prior_ctx
+            and prior_party_spec
+            and (
+                _looks_party_mix_query(user_text)
+                or _looks_context_followup(user_text)
+            )
+        ):
+            prior_ctx = _party_filters_from_prior(
+                {
+                    "filters": dict(prior_party_spec.get("filters") or {}),
+                    "period_phrase": prior_party_spec.get("period_phrase"),
+                    "period": prior_party_spec.get("period"),
+                    "business_units": [],
+                },
+                user_text,
+            )
         # Context follow-up ("in this"): match the sales table numbers → volume
         metric = (
             arguments.get("metric")
@@ -2920,17 +2986,49 @@ def _dispatch_tool(
             or ("volume" if prior_ctx else None)
             or "ams"
         )
+        # Mix language always wins — never fall back to volume/AMS tops
+        if _looks_party_mix_query(user_text):
+            inferred_m = str(inferred.get("metric") or "").strip().lower()
+            arg_m = str(arguments.get("metric") or "").strip().lower()
+            if inferred_m in {"packing_mix", "product_mix"}:
+                metric = inferred_m
+            elif arg_m in {
+                "packing_mix",
+                "product_mix",
+                "product_breakdown",
+                "pack_mix",
+                "sku_mix",
+                "sku_breakdown",
+                "sku_wise",
+            }:
+                metric = (
+                    "product_mix"
+                    if arg_m in {"product_mix", "sku_mix", "sku_breakdown", "sku_wise"}
+                    else "packing_mix"
+                )
+            else:
+                metric = "packing_mix"
         if (
             prior_ctx
             and metric == "ams"
             and (inferred.get("metric") or "ams") == "ams"
             and not arguments.get("metric")
+            and not _looks_party_mix_query(user_text)
         ):
             if not re.search(
                 r"\b(ams|average (monthly )?sale|growth|yoy|vs\s*ams)\b",
                 (user_text or "").lower(),
             ):
                 metric = "volume"
+        per_party_mix = bool(
+            arguments.get("per_party_mix")
+            or inferred.get("per_party_mix")
+            or _looks_per_party_mix(user_text)
+        )
+        # Per-party mix: show enough distributors (not default top-10 AMS)
+        mix_limit = int(arguments.get("limit") or inferred.get("limit") or 10)
+        if per_party_mix and not arguments.get("limit") and not inferred.get("limit"):
+            mix_limit = 16
         return analyze_parties(
             period=arguments.get("period")
             or inferred.get("period")
@@ -2971,7 +3069,8 @@ def _dispatch_tool(
             mix_dimension=arguments.get("mix_dimension")
             or inferred.get("mix_dimension"),
             sort=arguments.get("sort") or inferred.get("sort") or "desc",
-            limit=int(arguments.get("limit") or inferred.get("limit") or 10),
+            limit=mix_limit,
+            per_party_mix=per_party_mix,
         )
     if name == "query_price":
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
@@ -3180,6 +3279,11 @@ def chat_completion(
                             else "list_clients"
                         )
                     },
+                }
+            elif _looks_party_mix_query(last_user) or _looks_party_analytics(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "analyze_parties"},
                 }
             elif _looks_party_breakdown(last_user):
                 tool_choice = {
