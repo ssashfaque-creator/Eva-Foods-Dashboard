@@ -580,7 +580,7 @@ def _pivot_mt(
     # Column totals footer row
     col_tot_map = {str(c): mt_round(col_totals.get(c, 0.0)) for c in col_totals.index}
     col_tot_map["Total"] = mt_round(pivot["Total"].sum())
-    total_row: dict[str, Any] = {row_dim: "Total"}
+    total_row: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
     for c in columns:
         total_row[str(c)] = col_tot_map.get(str(c), 0.0)
     rows.append(total_row)
@@ -593,7 +593,7 @@ def _pivot_mt(
         "column_totals": col_tot_map,
         "grand_total_mt": col_tot_map["Total"],
         "markdown_hint": (
-            f"Markdown table: rows = {row_dim}, columns = {col_dim} "
+            f"HTML table: rows = {row_dim}, columns = {col_dim} "
             "(highest column totals first), row Total + column Total footer."
         ),
     }
@@ -676,7 +676,7 @@ def _pivot_months(
         col_tot_map[c] = mt_round(pivot[c].sum())
     col_tot_map["Average"] = round(sum(col_tot_map[c] for c in month_labels) / n, 3)
     col_tot_map["Total"] = mt_round(pivot["Total"].sum())
-    total_row: dict[str, Any] = {row_dim: "Total"}
+    total_row: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
     for c in columns:
         total_row[c] = col_tot_map[c]
     rows.append(total_row)
@@ -1911,7 +1911,80 @@ def _md_escape(value: Any) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def _html_escape(value: object) -> str:
+    text = str(value if value is not None else "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _rowspan_map(
+    rows: list[dict[str, Any]], headers: list[str]
+) -> list[dict[str, int]]:
+    """rowspan per header cell; 0 means covered by a prior rowspan (omit <td>).
+
+    Subtotal/total rows break a span so parent merges never swallow summary rows.
+    """
+    n = len(rows)
+    spans: list[dict[str, int]] = [{h: 1 for h in headers} for _ in range(n)]
+
+    def _summary(row: dict[str, Any]) -> bool:
+        kind = str(row.get("row_kind") or "")
+        if kind == "total" or kind.startswith("subtotal_"):
+            return True
+        return False
+
+    for h in headers:
+        i = 0
+        while i < n:
+            cell = str(rows[i].get(h) or "").strip()
+            if not cell:
+                # Empty summary cells stay as blank <td>; leaf empties are covered
+                spans[i][h] = 1 if _summary(rows[i]) else 0
+                i += 1
+                continue
+            j = i + 1
+            while j < n and not str(rows[j].get(h) or "").strip():
+                if _summary(rows[j]):
+                    break
+                j += 1
+            spans[i][h] = j - i
+            for k in range(i + 1, j):
+                spans[k][h] = 0
+            i = j
+    return spans
+
+
+def _matrix_row_css_class(row: dict[str, Any], row_key: str) -> str:
+    kind = str(row.get("row_kind") or "")
+    if kind == "total":
+        return "eva-total"
+    if kind.startswith("subtotal_"):
+        return "eva-subtotal"
+    label = str(row.get(row_key) or "").strip().lower()
+    if label == "total":
+        return "eva-total"
+    for h in (
+        "business_unit",
+        "packing_category",
+        "product",
+        "city",
+        "client_type",
+        "oil_type",
+    ):
+        v = str(row.get(h) or "").strip()
+        if v.lower() == "total":
+            return "eva-total"
+        if v.lower().endswith(" total"):
+            return "eva-subtotal"
+    return ""
+
+
 def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
+    """Render matrix as an HTML table (rowspan merges + bold subtotals/totals)."""
     columns = list(matrix.get("columns") or [])
     rows = list(matrix.get("rows") or [])
     if not columns:
@@ -1922,50 +1995,73 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
         head_labels = [
             _ROW_HEADER_LABELS.get(h, h.replace("_", " ").title()) for h in headers
         ]
-        header = "| " + " | ".join(
-            [_md_escape(c) for c in head_labels + columns]
-        ) + " |"
-        sep = "| " + " | ".join(["---"] * (len(headers) + len(columns))) + " |"
-        lines = [header, sep]
-        for row in rows:
-            bold = _is_matrix_bold_row(row, row_key)
-            cells: list[str] = []
+        spans = _rowspan_map(rows, headers)
+        lines = [
+            '<div class="eva-mtx-wrap">',
+            '<table class="eva-mtx">',
+            "<thead><tr>",
+        ]
+        for lab in head_labels:
+            lines.append(f"<th>{_html_escape(lab)}</th>")
+        for c in columns:
+            cls = ' class="num total-col"' if c == "Total" else ' class="num"'
+            lines.append(f"<th{cls}>{_html_escape(c)}</th>")
+        lines.append("</tr></thead><tbody>")
+        for i, row in enumerate(rows):
+            css = _matrix_row_css_class(row, row_key)
+            lines.append(f'<tr class="{css}">' if css else "<tr>")
             for h in headers:
-                text = _md_escape(row.get(h, "") or "")
-                cells.append(f"**{text}**" if bold and text else (text if text else ""))
+                sp = spans[i].get(h, 1)
+                if sp == 0:
+                    continue
+                text = str(row.get(h, "") or "").strip()
+                rs = f' rowspan="{sp}"' if sp > 1 else ""
+                cls = ' class="dim"' if text else ""
+                lines.append(f"<td{cls}{rs}>{_html_escape(text)}</td>")
             for key in columns:
                 val = row.get(key, 0)
                 if val is None or val == "":
-                    text = "—" if not bold else ""
+                    text = ""
                 elif isinstance(val, (int, float)):
                     text = mt_str(val)
                 else:
-                    text = _md_escape(val)
-                cells.append(f"**{text}**" if bold else text)
-            lines.append("| " + " | ".join(cells) + " |")
+                    text = _html_escape(val)
+                cls = "num total-col" if key == "Total" else "num"
+                lines.append(f'<td class="{cls}">{text}</td>')
+            lines.append("</tr>")
+        lines.append("</tbody></table></div>")
         return "\n".join(lines) + "\n"
 
-    header = "| " + " | ".join([row_key] + [_md_escape(c) for c in columns]) + " |"
-    sep = "| " + " | ".join(["---"] * (len(columns) + 1)) + " |"
-    lines = [header, sep]
+    label_h = _ROW_HEADER_LABELS.get(row_key, row_key.replace("_", " ").title())
+    lines = [
+        '<div class="eva-mtx-wrap">',
+        '<table class="eva-mtx">',
+        "<thead><tr>",
+        f"<th>{_html_escape(label_h)}</th>",
+    ]
+    for c in columns:
+        cls = ' class="num total-col"' if c == "Total" else ' class="num"'
+        lines.append(f"<th{cls}>{_html_escape(c)}</th>")
+    lines.append("</tr></thead><tbody>")
     for row in rows:
-        is_total = _is_matrix_bold_row(row, row_key)
-        cells = []
-        for i, key in enumerate([row_key] + columns):
-            if i == 0:
-                val = row.get(row_key, "")
-                text = _md_escape(val)
+        css = _matrix_row_css_class(row, row_key)
+        lines.append(f'<tr class="{css}">' if css else "<tr>")
+        lab = _html_escape(row.get(row_key, ""))
+        lines.append(f'<td class="dim">{lab}</td>')
+        for key in columns:
+            val = row.get(key, 0)
+            if isinstance(val, (int, float)):
+                text = mt_str(val)
+            elif val is None:
+                text = "—"
             else:
-                val = row.get(key, 0)
-                if isinstance(val, float):
-                    text = mt_str(val) if isinstance(val, (int, float)) else str(val)
-                elif val is None:
-                    text = "—"
-                else:
-                    text = _md_escape(val)
-            cells.append(f"**{text}**" if is_total else text)
-        lines.append("| " + " | ".join(cells) + " |")
+                text = _html_escape(val)
+            cls = "num total-col" if key == "Total" else "num"
+            lines.append(f'<td class="{cls}">{text}</td>')
+        lines.append("</tr>")
+    lines.append("</tbody></table></div>")
     return "\n".join(lines) + "\n"
+
 
 
 def _trend_to_markdown(trend: dict[str, Any]) -> str:

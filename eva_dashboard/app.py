@@ -106,10 +106,61 @@ def _inject_styles() -> None:
         }
         h1, h2, h3 { color: #174a38; }
         .eva-subtle { color: #5b6b64; font-size: 0.92rem; }
+
+        /* Sales matrices in AI Chat */
+        .eva-mtx-wrap { overflow-x: auto; margin: 0.4rem 0 0.9rem; }
+        .eva-mtx {
+            border-collapse: collapse;
+            width: max-content;
+            min-width: 100%;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        .eva-mtx th, .eva-mtx td {
+            border: 1px solid rgba(128, 128, 128, 0.35);
+            padding: 0.38rem 0.6rem;
+            vertical-align: middle;
+        }
+        .eva-mtx th {
+            font-weight: 700;
+            text-align: left;
+            background: rgba(128, 128, 128, 0.14);
+            white-space: nowrap;
+        }
+        .eva-mtx td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .eva-mtx td.dim {
+            font-weight: 600;
+            vertical-align: top;
+            white-space: nowrap;
+        }
+        .eva-mtx td.total-col { font-weight: 700; }
+        .eva-mtx tr.eva-subtotal td {
+            font-weight: 700;
+            background: rgba(128, 128, 128, 0.16);
+        }
+        .eva-mtx tr.eva-total td {
+            font-weight: 800;
+            background: rgba(128, 128, 128, 0.28);
+            border-top: 2px solid rgba(128, 128, 128, 0.55);
+        }
+        .eva-reply-hint {
+            font-size: 0.85rem;
+            opacity: 0.85;
+            margin: 0.15rem 0 0.25rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _chat_markdown(text: str) -> None:
+    """Render chat content; allow HTML tables from sales matrices."""
+    st.markdown(text or "", unsafe_allow_html=True)
 
 
 def page_sales() -> None:
@@ -628,9 +679,18 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             parts = content.split("\n\n", 1)
             display = parts[1] if len(parts) > 1 else content
         with st.chat_message(role):
-            st.markdown(display)
+            _chat_markdown(display)
             if role == "assistant" and content.strip():
-                if st.button("↩ Reply", key=f"eva_reply_btn_{i}", help="Ask a follow-up on this answer"):
+                st.markdown(
+                    '<p class="eva-reply-hint">Follow up on this table / answer:</p>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    "↩ Reply",
+                    key=f"eva_reply_btn_{i}",
+                    type="primary",
+                    help="Your next question reuses this answer’s filters and table layout",
+                ):
                     st.session_state["eva_reply_to"] = i
                     st.rerun()
 
@@ -662,27 +722,28 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
     st.session_state["eva_chat_messages"].append(
         {"role": "user", "content": prompt_for_model}
     )
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
     status = st.empty()
-    with st.chat_message("assistant"):
-        try:
-            answer, updated = chat_completion(
-                st.session_state["eva_chat_messages"],
-                api_key=api_key,
-                model=model or DEFAULT_MODEL,
-                on_status=lambda s: status.caption(s),
-                forced_prior_spec=forced_prior,
-                forced_prior_price_spec=forced_price,
-            )
-            status.empty()
-            st.markdown(answer or "_(No response)_")
-            # Keep only user/assistant visible turns + latest tool transcript for continuity
-            st.session_state["eva_chat_messages"] = updated
-        except Exception as exc:
-            status.empty()
-            st.error(str(exc))
+    try:
+        answer, updated = chat_completion(
+            st.session_state["eva_chat_messages"],
+            api_key=api_key,
+            model=model or DEFAULT_MODEL,
+            on_status=lambda s: status.caption(s),
+            forced_prior_spec=forced_prior,
+            forced_prior_price_spec=forced_price,
+        )
+        status.empty()
+        # Keep only user/assistant visible turns + latest tool transcript for continuity
+        st.session_state["eva_chat_messages"] = updated
+        # Rerun so the new answer appears in the history loop with ↩ Reply under it
+        st.rerun()
+    except Exception as exc:
+        status.empty()
+        st.error(str(exc))
+        # Still show the user turn that failed
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
 
 def main() -> None:

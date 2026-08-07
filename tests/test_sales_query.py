@@ -645,7 +645,9 @@ def test_hierarchical_packing_and_sku_tables() -> None:
             assert "total" in kinds
             md = pack["answer_markdown"]
             assert "Business Unit" in md and "Packing" in md
-            assert "Total" in md
+            assert "eva-mtx" in md
+            assert "eva-subtotal" in md or "Total" in md
+            assert "rowspan=" in md
 
             # By SKU: BU | Packing | SKU + packing + BU totals
             sku = query_sales(
@@ -668,9 +670,10 @@ def test_hierarchical_packing_and_sku_tables() -> None:
             # Parent "merge": after first leaf in a BU, business_unit cell is blank
             leaves = [r for r in sm["rows"] if r.get("row_kind") == "leaf"]
             assert leaves
-            # Markdown shows SKU header and a packing total label
+            # HTML shows SKU header and a packing total label
             smd = sku["answer_markdown"]
-            assert "| SKU |" in smd or "SKU |" in smd
+            assert "<th>SKU</th>" in smd or ">SKU<" in smd
+            assert "eva-total" in smd
             assert "Total" in smd
         finally:
             if previous is None:
