@@ -382,7 +382,12 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             )
         )
     if not show:
-        lines = [f"No close client matches for **{cleaned}** in sales/clients."]
+        lines = [
+            f"Could not find **{cleaned}** in clients or sales data.\n",
+            "If this is a **client / distributor** name, check the spelling "
+            "or try a fuller name (a city suffix helps, e.g. `Rubina Shaheen (LHR)`). "
+            "Or tell me the city / client type so I can narrow the search.",
+        ]
 
     return {
         "ok": True,
@@ -393,6 +398,8 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
         "answer_markdown": "\n".join(lines) + "\n",
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim (or expand match details "
-            "without inventing clients). Report client name, client type, city, etc."
+            "without inventing clients). Report client name, client type, city, etc. "
+            "If no matches, ask the user to confirm whether this is a client name "
+            "and to elaborate (spelling, city, client type)."
         ),
     }

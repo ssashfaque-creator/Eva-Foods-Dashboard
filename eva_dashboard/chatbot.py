@@ -25,6 +25,7 @@ from eva_dashboard.party_analytics import (
     extract_city_from_text,
     infer_party_analytics_from_text,
     list_clients,
+    party_sales,
 )
 from eva_dashboard.paths import data_root, db_path
 from eva_dashboard.product_language import (
@@ -336,6 +337,9 @@ Examples:
     → list_clients with SAME city/client_type/period (July), zeros omitted
   "Show July only" (follow-up after individual distributors)
     → re-run that distributor list for July — do NOT switch back to BU matrix
+  "Show me Rubina Shaheen sales in July" / "sales for the client Rubina Shaheen"
+    → lookup/resolve that party, then sales matrix for THAT party only
+      (do NOT apply prior city/client_type; if not found, say so and ask to elaborate)
 
 MODE FROM LANGUAGE:
 - what were / show / give me / breakdown / month-wise / average sale → matrix
@@ -1853,9 +1857,166 @@ def resolve_row_dimension_request(
     return None
 
 
+
+def _extract_named_party_query(text: str) -> str | None:
+    """Extract a free-text client/party name from a sales question."""
+    from eva_dashboard.sales_query import MONTH_NAMES
+    from eva_dashboard.categories import BUSINESS_UNIT_ALIASES
+    from eva_dashboard.client_language import (
+        extract_client_type_from_text,
+        normalize_client_type,
+    )
+
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    t = re.sub(r"(?i)^(can you|could you|please|pls)\s+", "", raw).strip()
+
+    patterns = [
+        r"(?i)(?:sales?|volume|mt)\s+for\s+(?:the\s+)?"
+        r"(?:client|party|distributor|customer)\s+(.+?)"
+        r"(?:\s+in\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+        r"dec(?:ember)?|this\s+month|last\s+month|20\d{2}).*)?$",
+        r"(?i)(?:client|party|distributor|customer)\s+(.+?)\s+"
+        r"(?:sales?|volume|mt)\b",
+        r"(?i)(?:show|give)(?:\s+me)?\s+(.+?)\s+sales?"
+        r"(?:\s+in\s+\w+.*)?$",
+    ]
+    name = None
+    for pat in patterns:
+        m = re.search(pat, t)
+        if m:
+            name = m.group(1).strip(" ?.,\"'")
+            break
+    if not name:
+        return None
+
+    name = re.sub(
+        r"(?i)\s+in\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+        r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?|this\s+month|last\s+month|20\d{2})\s*$",
+        "",
+        name,
+    ).strip(" ?.,\"'")
+    name = re.sub(
+        r"(?i)^(the\s+)?(client|party|distributor|customer)\s+",
+        "",
+        name,
+    ).strip()
+    name = re.sub(r"(?i)\s+last\s+\d+\s+months?\s*$", "", name).strip()
+
+    low = name.lower()
+    if not name or len(name) < 3 or not re.search(r"[a-zA-Z]", name):
+        return None
+    if re.search(
+        r"\b("
+        r"break\s*down|month|wise|average|avg|compare|versus|\bvs\b|"
+        r"include|combine|merge|group|remove|exclude|packing|product|sku|"
+        r"city|cities|total|all sales|so far|mtd"
+        r")\b",
+        low,
+    ):
+        return None
+    if re.match(r"^(a|an|the)\s+", low):
+        return None
+    # Reject when the whole phrase is a known Client Type (Imtiaz Store, …)
+    if extract_client_type_from_text(name):
+        return None
+    known_ct = normalize_client_type(name)
+    if known_ct and known_ct.lower() != name.lower():
+        # Mapped via alias → it's a type, not a party
+        return None
+    if known_ct and known_ct.lower() == name.lower():
+        # Exact live client-type label
+        from eva_dashboard.client_language import list_known_client_types
+
+        if any(known_ct.lower() == k.lower() for k in list_known_client_types()):
+            return None
+    if low in {
+        "eva distributors",
+        "distributors",
+        "distributor",
+        "imtiaz",
+        "imtiaz store",
+        "clients",
+        "parties",
+        "sales",
+        "all",
+        "eva consumer",
+        "eva bulk",
+        "maan consumer",
+        "maan bulk",
+        "cusine king",
+        "cuisine king",
+    }:
+        return None
+    if low in {a.lower() for a in BUSINESS_UNIT_ALIASES}:
+        return None
+    if low in MONTH_NAMES or re.fullmatch(r"20\d{2}", low):
+        return None
+    cities = {
+        "lahore",
+        "karachi",
+        "islamabad",
+        "faisalabad",
+        "multan",
+        "peshawar",
+        "rawalpindi",
+        "gujranwala",
+        "sialkot",
+        "hyderabad",
+        "quetta",
+    }
+    if low in cities:
+        return None
+    if re.search(r"\bdistributors?\b", low):
+        return None
+    # Reject business-unit phrases ("Eva Consumer and Eva Bulk")
+    bu_names = (
+        "eva consumer",
+        "eva bulk",
+        "maan consumer",
+        "maan bulk",
+        "cusine king",
+        "cuisine king",
+    )
+    if any(b in low for b in bu_names):
+        return None
+    if " and " in low or " & " in low:
+        return None
+    return name
+
+
+def _looks_named_party_sales(text: str) -> bool:
+    """True when the user asks for sales of a specific named client/party."""
+    t = (text or "").lower()
+    if _looks_party_breakdown(t):
+        return False
+    if _looks_period_only_followup(t) and not _extract_named_party_query(text):
+        return False
+    if re.search(
+        r"\b(sales?|volume|mt)\b.+\b(for|of)\b.+\b(client|party|distributor|customer)\b",
+        t,
+    ):
+        return _extract_named_party_query(text) is not None
+    if re.search(
+        r"\b(client|party|distributor|customer)\b.+\b(sales?|volume|mt)\b",
+        t,
+    ):
+        return _extract_named_party_query(text) is not None
+    if re.search(r"\b(show|give)\b.+\bsales?\b", t):
+        return _extract_named_party_query(text) is not None
+    if re.search(r"\bsales?\s+(?:for|of)\b", t):
+        return _extract_named_party_query(text) is not None
+    return False
+
+
 def _looks_party_lookup(text: str) -> bool:
     """Fuzzy single-name lookup only (not lists / rankings)."""
     t = (text or "").lower()
+    if _looks_named_party_sales(text):
+        return False
     if _looks_client_list(t) or _looks_party_analytics(t):
         return False
     return bool(
@@ -1870,6 +2031,8 @@ def _looks_party_lookup(text: str) -> bool:
 
 def _looks_client_list(text: str) -> bool:
     t = (text or "").lower()
+    if _looks_named_party_sales(text):
+        return False
     if _looks_party_breakdown(t):
         return True
     if re.search(
@@ -2452,6 +2615,12 @@ def _dispatch_tool(
     prior_price_spec: dict[str, Any] | None = None,
     prior_party_spec: dict[str, Any] | None = None,
 ) -> Any:
+    # Named client/party sales (do NOT inherit prior city/client_type)
+    if _looks_named_party_sales(user_text):
+        pq = _extract_named_party_query(user_text) or user_text
+        period = _extract_period_phrase(user_text)
+        return party_sales(query=pq, period=period)
+
     # Period-only follow-up on a party/distributor list → stay on that view
     if prior_party_spec and _looks_period_only_followup(user_text):
         new_period = _extract_period_phrase(user_text)
@@ -2995,7 +3164,12 @@ def chat_completion(
         tool_choice: Any = "auto"
         if round_i == 0 and _looks_factual(last_user):
             prior_party_guess = forced_prior_party_spec or _last_party_spec(working)
-            if prior_party_guess and _looks_period_only_followup(last_user):
+            if _looks_named_party_sales(last_user):
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "lookup_party"},
+                }
+            elif prior_party_guess and _looks_period_only_followup(last_user):
                 kind = prior_party_guess.get("kind") or "list_clients"
                 tool_choice = {
                     "type": "function",

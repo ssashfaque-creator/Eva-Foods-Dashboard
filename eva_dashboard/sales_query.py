@@ -416,6 +416,7 @@ def _fetch_lines(
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    party: str | None = None,
     excludes: dict[str, list[str]] | None = None,
 ) -> pd.DataFrame:
     """Pull line-level MT with taxonomy + geography + client type."""
@@ -456,6 +457,12 @@ def _fetch_lines(
             """
         )
         params.append(client_type)
+    if party:
+        where.append(
+            "lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
+            "= lower(trim(replace(replace(?, '  ', ' '), '  ', ' ')))"
+        )
+        params.append(party)
 
     ex = excludes or {}
     if ex.get("city"):
@@ -1348,6 +1355,7 @@ def query_sales(
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    party: str | None = None,
     columns: str = "client_type",
     months_back: int = 6,
     mode: str = "matrix",
@@ -1378,6 +1386,9 @@ def query_sales(
     ``excludes``: drop specific values from the result (e.g. city=Lahore,
     client_type=Eva Distributors) while keeping the same table grain.
 
+    ``party``: filter to one sales party / client name (exact match after resolve).
+    When set, prior city/client_type filters are not inherited.
+
     columns: client_type | city | month
       month → last ``months_back`` months as columns + Average
 
@@ -1403,6 +1414,7 @@ def query_sales(
     pack = normalize_packing_category((packing_category or "").strip() or None)
     city_f = (city or "").strip() or None
     ctype = normalize_client_type((client_type or "").strip() or None)
+    party_f = (party or "").strip() or None
     col = (columns or "client_type").strip().lower().replace(" ", "_")
     mb = int(months_back or 6)
     row_override = normalize_row_dimension(row_dimension)
@@ -1427,8 +1439,9 @@ def query_sales(
             if vs and vs not in bucket:
                 bucket.append(vs)
 
-    if prior_spec:
+    if prior_spec and not party_f:
         # Carry forward dimensions; merge new business units
+        # (skip when a specific party is requested — prior city/type must not stick)
         prior_filters = prior_spec.get("filters") or {}
         prior_units = list(prior_spec.get("business_units") or [])
         if prior_filters.get("business_unit") and prior_filters["business_unit"] not in prior_units:
@@ -1480,6 +1493,14 @@ def query_sales(
                 vs = str(v).strip()
                 if vs and vs not in bucket:
                     bucket.append(vs)
+
+    elif prior_spec and party_f:
+        # Named-party query: only reuse period from prior if caller omitted one
+        if not period and not date_from and prior_spec.get("period_phrase"):
+            period = prior_spec.get("period_phrase")
+        if not period and not date_from and prior_spec.get("period"):
+            date_from = (prior_spec["period"] or {}).get("date_from")
+            date_to = (prior_spec["period"] or {}).get("date_to")
 
     # Apply clears after inherit (regroup promoted a filter to a dimension)
     if "city" in clear:
@@ -1547,6 +1568,10 @@ def query_sales(
             bu, oil, pack, business_units=units if len(units) > 1 else None
         )
 
+    # Single-party views: client_type columns collapse → use city
+    if party_f and col == "client_type":
+        col = "city"
+
     frame = _fetch_lines(
         date_from=d0,
         date_to=d1,
@@ -1556,6 +1581,7 @@ def query_sales(
         oil_type=oil,
         packing_category=pack,
         client_type=ctype,
+        party=party_f,
         excludes=ex_map or None,
     )
 
@@ -1602,6 +1628,7 @@ def query_sales(
             "oil_type": oil,
             "packing_category": pack,
             "client_type": ctype,
+            "party": party_f,
         },
         "business_units": units,
         "column_dimension": col,
@@ -1636,6 +1663,7 @@ def query_sales(
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            party=party_f,
             excludes=ex_map or None,
         )
         if col == "month":
@@ -2140,6 +2168,8 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
 
 def _filter_blurb(filters: dict[str, Any], period: dict[str, Any], units: list[str] | None = None, excludes: dict[str, list[str]] | None = None) -> str:
     bits = [str(period.get("label") or f"{period.get('date_from')} → {period.get('date_to')}")]
+    if filters.get("party"):
+        bits.append(f"party **{filters['party']}**")
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
     if filters.get("client_type"):

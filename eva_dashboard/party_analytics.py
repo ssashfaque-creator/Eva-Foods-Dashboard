@@ -11,6 +11,7 @@ import pandas as pd
 
 from eva_dashboard.client_language import (
     extract_client_type_from_text,
+    lookup_party,
     normalize_client_type,
     normalize_oil_type,
     normalize_packing_category,
@@ -22,6 +23,7 @@ from eva_dashboard.sales_query import (
     _PARTY_JOIN,
     _normalize_business_unit,
     _sales_date_bounds,
+    query_sales,
     resolve_period,
 )
 
@@ -1519,6 +1521,160 @@ def _party_table_result(
         "answer_markdown": "\n".join(lines).strip() + "\n",
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }
+
+
+def party_sales(
+    *,
+    query: str,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    columns: str = "city",
+    mode: str = "matrix",
+) -> dict[str, Any]:
+    """Resolve a named client/party then show their sales for a period.
+
+    Does not inherit city/client_type from chat context — only the named party
+    (plus optional period). Zero matches → clear not-found + ask to elaborate.
+    """
+    q = (query or "").strip()
+    if not q:
+        return {
+            "ok": False,
+            "error": "Empty party query",
+            "answer_markdown": "Please give a client / distributor name to look up.\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    looked = lookup_party(q, limit=10)
+    matches = list(looked.get("matches") or [])
+    if not matches:
+        cleaned = looked.get("query") or q
+        md = (
+            f"Could not find **{cleaned}** in clients or sales data.\n\n"
+            "Is this a **client / distributor** name? Please check the spelling "
+            "or give a fuller name (a city suffix helps, e.g. "
+            "`Rubina Shaheen (LHR)`). You can also name the city or client type "
+            "to help me search."
+        )
+        return {
+            "ok": True,
+            "mode": "party_not_found",
+            "query": cleaned,
+            "matches": [],
+            "answer_markdown": md + "\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    qn = re.sub(r"\s+", " ", q.strip().lower())
+    exact = [m for m in matches if str(m.get("client") or "").strip().lower() == qn]
+    # Also treat query as substring of full client name (Rubina Shaheen vs Rubina Shaheen (LHR))
+    partial = [
+        m
+        for m in matches
+        if qn in str(m.get("client") or "").strip().lower()
+        or str(m.get("client") or "").strip().lower().startswith(qn)
+    ]
+    if len(exact) == 1:
+        chosen = exact[0]
+    elif len(partial) == 1 and float(partial[0].get("match_score") or 0) >= 0.55:
+        chosen = partial[0]
+    elif len(matches) == 1 and float(matches[0].get("match_score") or 0) >= 0.65:
+        chosen = matches[0]
+    elif (
+        len(matches) >= 1
+        and float(matches[0].get("match_score") or 0) >= 0.88
+        and (
+            len(matches) == 1
+            or float(matches[0].get("match_score") or 0)
+            - float(matches[1].get("match_score") or 0)
+            >= 0.08
+        )
+    ):
+        chosen = matches[0]
+    else:
+        lines = [
+            f"Multiple parties match **{q}** — reply with the exact name:\n",
+            "| # | Party | Client Type | City | Score |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for i, m in enumerate(matches[:10], 1):
+            lines.append(
+                f"| {i} | {m.get('client')} | {m.get('client_type') or '—'} | "
+                f"{m.get('city_filter') or m.get('city') or '—'} | "
+                f"{m.get('match_score')} |"
+            )
+        lines.append(
+            "\n_Tell me which one (exact name), or add city / client type._"
+        )
+        return {
+            "ok": True,
+            "mode": "party_pick",
+            "query": q,
+            "matches": matches,
+            "answer_markdown": "\n".join(lines) + "\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    name = str(chosen.get("client"))
+    out = query_sales(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        party=name,
+        columns=columns or "city",
+        mode=mode or "matrix",
+        prior_spec=None,
+    )
+    if not out.get("ok"):
+        return out
+
+    # Empty sales in period → still report the resolved party, not a blank matrix only
+    matrix = out.get("matrix") or {}
+    grand = float(matrix.get("grand_total_mt") or 0)
+    if grand <= 0 and not any(
+        r.get("row_kind") == "leaf" for r in (matrix.get("rows") or [])
+    ):
+        period_label = (out.get("period") or {}).get("label") or period or "that period"
+        md = (
+            f"Found **{name}** "
+            f"({chosen.get('client_type') or '—'} · "
+            f"{chosen.get('city_filter') or chosen.get('city') or '—'}), "
+            f"but **no sales** in **{period_label}**.\n\n"
+            "Try another month, or ask for all-time / last 6 months for this party."
+        )
+        return {
+            "ok": True,
+            "mode": "party_sales_empty",
+            "party": name,
+            "match": chosen,
+            "period": out.get("period"),
+            "filters": {"party": name},
+            "answer_markdown": md + "\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    # Prefixed identity line on the matrix answer
+    prefix = (
+        f"**{name}** · {chosen.get('client_type') or '—'} · "
+        f"{chosen.get('city_filter') or chosen.get('city') or '—'}.\n\n"
+    )
+    out["mode"] = "party_sales"
+    out["party"] = name
+    out["match"] = chosen
+    out["answer_markdown"] = prefix + str(out.get("answer_markdown") or "")
+    out["party_spec"] = {
+        "kind": "party_sales",
+        "filters": {"party": name},
+        "period_phrase": period,
+        "period": {
+            "date_from": (out.get("period") or {}).get("date_from"),
+            "date_to": (out.get("period") or {}).get("date_to"),
+            "label": (out.get("period") or {}).get("label"),
+        },
+        "party": name,
+    }
+    return out
 
 
 def infer_party_analytics_from_text(text: str) -> dict[str, Any]:

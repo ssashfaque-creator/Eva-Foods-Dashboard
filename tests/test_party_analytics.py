@@ -201,6 +201,75 @@ def test_list_distributors_in_lahore() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_named_party_sales_resolves_and_not_found() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            from eva_dashboard.db import connect
+            from eva_dashboard.party_analytics import party_sales
+            from eva_dashboard.chatbot import (
+                _dispatch_tool,
+                _extract_named_party_query,
+                _looks_client_list,
+                _looks_named_party_sales,
+            )
+
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('99','Rubina Shaheen (LHR)','Eva Distributors','Lahore',"
+                    "'Lahore','','{}', datetime('now'))"
+                )
+                conn.execute(
+                    """INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, inv_no, client_type, payload_json
+                    ) VALUES (NULL, 'rub-t', datetime('now'), '2026-07-10',
+                      'Rubina Shaheen (LHR)', 'Eva Canola Oil (StandUpPouch)',
+                      12, 'MT', 12, 'R1', '', '{}')"""
+                )
+                conn.commit()
+
+            q = "Can you show me sales for the client rubina Shaheen in July"
+            assert _extract_named_party_query(q) == "rubina Shaheen"
+            assert _looks_named_party_sales(q)
+            assert not _looks_client_list(q)
+
+            prior = {
+                "filters": {
+                    "city": "Lahore",
+                    "client_type": "Eva Distributors",
+                },
+                "period_phrase": "June",
+            }
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out["ok"] is True
+            assert out["mode"] == "party_sales"
+            assert out["party"] == "Rubina Shaheen (LHR)"
+            assert out["filters"].get("party") == "Rubina Shaheen (LHR)"
+            assert out["filters"].get("city") is None
+            assert out["filters"].get("client_type") is None
+            assert out["period"]["date_from"].startswith("2026-07")
+
+            miss = party_sales(query="No Such Client ZZZ", period="July")
+            assert miss["mode"] == "party_not_found"
+            assert "Could not find" in miss["answer_markdown"]
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_individual_distributors_inherit_period_and_july_only() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
