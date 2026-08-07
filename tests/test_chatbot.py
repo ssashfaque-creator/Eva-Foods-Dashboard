@@ -42,6 +42,18 @@ def test_looks_factual_detects_data_questions() -> None:
     assert not _looks_factual("Thanks!")
 
 
+def test_wants_gpt_analysis_skips_simple_show_me() -> None:
+    from eva_dashboard.chatbot import _wants_gpt_analysis
+
+    assert not _wants_gpt_analysis("Show me Lahore sales")
+    assert not _wants_gpt_analysis("Show me Imtiaz sales")
+    assert not _wants_gpt_analysis("Who are the distributors in Lahore?")
+    assert _wants_gpt_analysis("How are Eva Consumer sales doing in Lahore?")
+    assert _wants_gpt_analysis("Analyze these sales vs last year")
+    assert _wants_gpt_analysis("Show me Lahore sales", result_mode="analytical")
+    assert _wants_gpt_analysis("Compare Lahore vs Karachi last month")
+
+
 def test_compose_tables_plus_gpt_analysis() -> None:
     from eva_dashboard.chatbot import (
         _compose_tables_plus_analysis,

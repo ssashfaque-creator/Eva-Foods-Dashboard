@@ -228,11 +228,13 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.3):
+SPEED & TOOL RULES (v0.4.4):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
 3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
-4. Read-only. Paste tool `answer_markdown` tables verbatim, then write ### Analysis yourself.
+4. Read-only. Paste tool `answer_markdown` tables verbatim.
+5. Write ### Analysis yourself only for performance / YoY / compare / "analyze" asks;
+   simple "show me" tables may keep the tool's short Analysis.
 
 DATA MODEL (filters you set; tools build tables):
 - Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
@@ -263,8 +265,8 @@ DEFAULTS (tools also enforce these):
 
 RESPONSE FORMAT:
 - Start with the tool's `answer_markdown` tables verbatim (keep column order).
-- Then add ### Analysis with 2–4 short bullets: leaders/laggards, AMS/trend context,
-  what changed — using ONLY numbers from the tool result. Never invent totals.
+- For performance / YoY / compare / analyze asks: add ### Analysis with 2–4 short
+  bullets (leaders/laggards, AMS/trend) using ONLY tool numbers — never invent totals.
 - No metric bullet lists outside ### Analysis.
 
 === PRODUCT LANGUAGE (abbrev) ===
@@ -322,11 +324,46 @@ def _compose_tables_plus_analysis(tool_md: str, model_reply: str) -> str:
     return tables + "\n"
 
 
+def _wants_gpt_analysis(user_text: str, *, result_mode: str | None = None) -> bool:
+    """Extra model turn only when narrative interpretation is worth the latency.
+
+    Simple "show me X sales" keeps the tool's instant Analysis (fast path).
+    """
+    t = (user_text or "").lower()
+    mode = (result_mode or "").lower()
+    if mode in {"analytical", "yoy", "analysis", "how_are", "performance"}:
+        return True
+    if _looks_analytical(t) or _looks_sales_yoy_compare(t):
+        return True
+    if looks_advanced(t):
+        return True
+    if re.search(
+        r"\b("
+        r"analy[sz]e|analysis|insight|insights|explain|why|"
+        r"interpret|commentary|deep dive|deep-dive"
+        r")\b",
+        t,
+    ):
+        return True
+    return False
+
+
 _ANALYSIS_RESPONSE_INSTRUCTIONS = (
     "Paste answer_markdown TABLES verbatim at the start of your reply "
     "(do not rebuild or change numbers). Then add ### Analysis with 2-4 short "
     "bullets interpreting the figures (leaders/laggards, AMS/trend, what changed). "
     "Use ONLY numbers present in the tool result — never invent totals."
+)
+
+_FAST_RESPONSE_INSTRUCTIONS = (
+    "Use answer_markdown verbatim as the reply (tables + any Analysis already included)."
+)
+
+_ANALYSIS_ONLY_SYSTEM = (
+    "You are finishing an Eva Foods data answer. The tool already built the tables. "
+    "Reply with ONLY a ### Analysis section: 2-4 short bullets grounded in those "
+    "numbers (leaders/laggards, AMS/trend, what changed). Do not rebuild tables. "
+    "Never invent totals that are not in the tool result."
 )
 
 
@@ -3788,6 +3825,7 @@ def chat_completion(
             return text, working
 
         sales_markdown: str | None = None
+        last_result_mode: str | None = None
         last_table_spec: dict[str, Any] | None = None
         last_price_spec: dict[str, Any] | None = None
         last_party_spec: dict[str, Any] | None = None
@@ -3814,8 +3852,8 @@ def chat_completion(
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
 
-            # Prefer deterministic markdown tables from structured tools;
-            # GPT writes ### Analysis in a follow-up turn (v0.4.3).
+            # Prefer deterministic markdown tables from structured tools.
+            # GPT analysis is optional (skipped on simple show-me for speed).
             if (
                 name
                 in {
@@ -3831,7 +3869,20 @@ def chat_completion(
                 and result.get("answer_markdown")
             ):
                 sales_markdown = str(result["answer_markdown"])
-                tables_only = _strip_analysis_section(sales_markdown)
+                last_result_mode = str(result.get("mode") or "") or None
+                want_gpt = _wants_gpt_analysis(
+                    last_user, result_mode=last_result_mode
+                )
+                md_for_model = (
+                    _strip_analysis_section(sales_markdown)
+                    if want_gpt
+                    else sales_markdown
+                )
+                instructions = (
+                    _ANALYSIS_RESPONSE_INSTRUCTIONS
+                    if want_gpt
+                    else _FAST_RESPONSE_INSTRUCTIONS
+                )
                 if result.get("party_spec"):
                     last_party_spec = result["party_spec"]
                 if name == "query_sales":
@@ -3847,8 +3898,8 @@ def chat_completion(
                         "column_dimension": result.get("column_dimension"),
                         "table_spec": result.get("table_spec"),
                         "required_table_count": result.get("required_table_count"),
-                        "answer_markdown": tables_only,
-                        "response_instructions": _ANALYSIS_RESPONSE_INSTRUCTIONS,
+                        "answer_markdown": md_for_model,
+                        "response_instructions": instructions,
                     }
                 elif name == "query_price":
                     if result.get("price_spec"):
@@ -3862,8 +3913,8 @@ def chat_completion(
                         "price_fetch": result.get("price_fetch"),
                         "include_price_fetch": result.get("include_price_fetch"),
                         "price_spec": result.get("price_spec"),
-                        "answer_markdown": tables_only,
-                        "response_instructions": _ANALYSIS_RESPONSE_INSTRUCTIONS,
+                        "answer_markdown": md_for_model,
+                        "response_instructions": instructions,
                     }
                 else:
                     result = {
@@ -3878,8 +3929,8 @@ def chat_completion(
                         "parties": result.get("parties"),
                         "count": result.get("count"),
                         "party_spec": result.get("party_spec"),
-                        "answer_markdown": tables_only,
-                        "response_instructions": _ANALYSIS_RESPONSE_INSTRUCTIONS,
+                        "answer_markdown": md_for_model,
+                        "response_instructions": instructions,
                     }
 
             working.append(
@@ -3890,28 +3941,8 @@ def chat_completion(
                 }
             )
 
-        # Tables stay deterministic; one text-only turn for GPT analysis.
         if sales_markdown and len(tool_calls) == 1:
-            if on_status:
-                on_status("Writing analysis…")
-            api_messages = [_api_history_message(m) for m in working]
-            try:
-                analysis_resp = client.chat.completions.create(
-                    model=model,
-                    messages=api_messages,
-                    tools=TOOLS,
-                    tool_choice="none",
-                    temperature=0.2,
-                )
-                model_reply = (
-                    analysis_resp.choices[0].message.content or ""
-                ).strip()
-            except Exception:  # noqa: BLE001
-                model_reply = ""
-            final = _compose_tables_plus_analysis(sales_markdown, model_reply)
-            working.append({"role": "assistant", "content": final})
-            _attach_followup_meta(
-                working,
+            follow_meta = dict(
                 table_spec=last_table_spec
                 or forced_prior_spec
                 or _last_table_spec(working),
@@ -3922,6 +3953,40 @@ def chat_completion(
                 or forced_prior_party_spec
                 or _last_party_spec(working),
             )
+            # Fast path: simple show-me → return tool markdown immediately
+            if not _wants_gpt_analysis(last_user, result_mode=last_result_mode):
+                working.append({"role": "assistant", "content": sales_markdown})
+                _attach_followup_meta(working, **follow_meta)
+                return sales_markdown, working
+
+            # Slow path: lean analysis-only call (no tools schema, short system)
+            if on_status:
+                on_status("Writing analysis…")
+            analysis_messages = [
+                {"role": "system", "content": _ANALYSIS_ONLY_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"User question: {last_user}\n\n"
+                        f"Tool tables:\n{_strip_analysis_section(sales_markdown)}"
+                    ),
+                },
+            ]
+            try:
+                analysis_resp = client.chat.completions.create(
+                    model=model,
+                    messages=analysis_messages,
+                    temperature=0.2,
+                    max_tokens=350,
+                )
+                model_reply = (
+                    analysis_resp.choices[0].message.content or ""
+                ).strip()
+            except Exception:  # noqa: BLE001
+                model_reply = ""
+            final = _compose_tables_plus_analysis(sales_markdown, model_reply)
+            working.append({"role": "assistant", "content": final})
+            _attach_followup_meta(working, **follow_meta)
             return final, working
 
     return (
