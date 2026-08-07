@@ -233,19 +233,28 @@ def list_clients(
     *,
     city: str | None = None,
     client_type: str | None = None,
+    business_unit: str | None = None,
     period: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 200,
     include_zero: bool = False,
 ) -> dict[str, Any]:
-    """List clients matching city (City-Filter) and/or client type — not fuzzy name search."""
+    """List clients matching city / client type / BU — not fuzzy name search.
+
+    ``business_unit`` scopes the volume ranking (who bought that BU) while
+    still listing clients in the city/type scope when provided.
+    """
     city_f = (city or "").strip() or None
     ctype = normalize_client_type((client_type or "").strip() or None)
-    if not city_f and not ctype:
+    bu = _normalize_business_unit(business_unit)
+    if not city_f and not ctype and not bu:
         return {
             "ok": False,
-            "error": "Pass city and/or client_type (e.g. Lahore + Eva Distributors).",
+            "error": (
+                "Pass city, client_type, and/or business_unit "
+                "(e.g. Lahore + Eva Distributors, or Maan Consumer)."
+            ),
         }
 
     period_info = None
@@ -268,36 +277,59 @@ def list_clients(
             }
 
     init_db()
-    params: list[Any] = []
-    where = ["cl.client IS NOT NULL", "trim(cl.client) != ''"]
-    if city_f:
-        where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
-        params.append(city_f)
-    if ctype:
-        where.append("lower(trim(COALESCE(cl.type, ''))) = lower(trim(?))")
-        params.append(ctype)
+    clients = pd.DataFrame()
+    # BU-only (no city/type): discover buyers from sales — skip full client scan
+    if bu and not city_f and not ctype and d0 and d1:
+        sales_only = _fetch_party_lines(
+            date_from=d0,
+            date_to=d1,
+            business_unit=bu,
+        )
+        if not sales_only.empty:
+            clients = (
+                sales_only.groupby("party", as_index=False)
+                .agg(mt=("mt", "sum"))
+                .rename(columns={"party": "client"})
+            )
+            clients["client_type"] = ""
+            clients["city_filter"] = ""
+            clients["city"] = ""
+            clients["inactive"] = ""
+    else:
+        params: list[Any] = []
+        where = ["cl.client IS NOT NULL", "trim(cl.client) != ''"]
+        if city_f:
+            where.append(
+                "lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))"
+            )
+            params.append(city_f)
+        if ctype:
+            where.append("lower(trim(COALESCE(cl.type, ''))) = lower(trim(?))")
+            params.append(ctype)
 
-    sql = f"""
-    SELECT
-      cl.client AS client,
-      COALESCE(NULLIF(trim(cl.type), ''), 'Unmapped') AS client_type,
-      COALESCE(NULLIF(trim(cl.city_filter), ''), '') AS city_filter,
-      COALESCE(NULLIF(trim(cl.city), ''), '') AS city,
-      COALESCE(NULLIF(trim(cl.inactive), ''), '') AS inactive
-    FROM clients cl
-    WHERE {' AND '.join(where)}
-    ORDER BY cl.client
-    """
-    with connect() as conn:
-        clients = pd.read_sql_query(sql, conn, params=params)
+        sql = f"""
+        SELECT
+          cl.client AS client,
+          COALESCE(NULLIF(trim(cl.type), ''), 'Unmapped') AS client_type,
+          COALESCE(NULLIF(trim(cl.city_filter), ''), '') AS city_filter,
+          COALESCE(NULLIF(trim(cl.city), ''), '') AS city,
+          COALESCE(NULLIF(trim(cl.inactive), ''), '') AS inactive
+        FROM clients cl
+        WHERE {' AND '.join(where)}
+        ORDER BY cl.client
+        """
+        with connect() as conn:
+            clients = pd.read_sql_query(sql, conn, params=params)
 
     mt_map: dict[str, float] = {}
-    if d0 and d1 and not clients.empty:
+    from_sales_only = bool(bu and not city_f and not ctype and "mt" in clients.columns)
+    if d0 and d1 and not clients.empty and not from_sales_only:
         sales = _fetch_party_lines(
             date_from=d0,
             date_to=d1,
             city=city_f,
             client_type=ctype,
+            business_unit=bu,
         )
         if not sales.empty:
             mt_map = {
@@ -308,16 +340,19 @@ def list_clients(
     rows: list[dict[str, Any]] = []
     for _, r in clients.iterrows():
         name = str(r["client"])
-        mt = round(mt_map.get(name, 0.0), 3)
+        if from_sales_only:
+            mt = round(float(r.get("mt") or 0.0), 3)
+        else:
+            mt = round(mt_map.get(name, 0.0), 3)
         if not include_zero and mt <= 0:
             continue
         rows.append(
             {
                 "client": name,
-                "client_type": r["client_type"],
-                "city_filter": r["city_filter"] or None,
-                "city": r["city"] or None,
-                "inactive": r["inactive"] or None,
+                "client_type": r.get("client_type") or ctype or "—",
+                "city_filter": (r.get("city_filter") or None) or None,
+                "city": (r.get("city") or None) or None,
+                "inactive": (r.get("inactive") or None) or None,
                 "mt": mt,
             }
         )
@@ -331,6 +366,8 @@ def list_clients(
         scope_bits.append(f"Client Type **{ctype}**")
     if city_f:
         scope_bits.append(f"City-Filter **{city_f}**")
+    if bu:
+        scope_bits.append(f"BU **{bu}**")
     scope = " · ".join(scope_bits) or "clients"
     period_label = (period_info or {}).get("label") or "all time"
 
@@ -376,7 +413,11 @@ def list_clients(
 
     party_spec = {
         "kind": "list_clients",
-        "filters": {"city": city_f, "client_type": ctype},
+        "filters": {
+            "city": city_f,
+            "client_type": ctype,
+            "business_unit": bu,
+        },
         "period_phrase": period,
         "period": {
             "date_from": (period_info or {}).get("date_from"),
@@ -390,7 +431,11 @@ def list_clients(
     return {
         "ok": True,
         "mode": "list_clients",
-        "filters": {"city": city_f, "client_type": ctype},
+        "filters": {
+            "city": city_f,
+            "client_type": ctype,
+            "business_unit": bu,
+        },
         "period": period_info,
         "count": len(rows),
         "total_mt": total_mt,
@@ -1794,6 +1839,24 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         "sort": "desc",
         "per_party_mix": False,
     }
+
+    # Business units mentioned in the ask (Maan Consumer, Eva Bulk, …)
+    bu_aliases = (
+        ("maan consumer", "Maan Consumer"),
+        ("maan bulk", "Maan Bulk"),
+        ("eva consumer", "Eva Consumer"),
+        ("eva bulk", "Eva Bulk"),
+        ("cusine king", "Cusine King"),
+        ("cuisine king", "Cusine King"),
+        ("shortening", "Shortening"),
+        ("bulk oil", "Bulk Oil"),
+        ("byproducts", "Byproducts"),
+        ("meal", "Meal"),
+    )
+    for needle, label in bu_aliases:
+        if needle in t:
+            out["business_unit"] = label
+            break
 
     # Oil / VTF / packing from language
     if re.search(r"\bvtf\b|\bbanaspati\b", t):

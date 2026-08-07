@@ -77,6 +77,21 @@ def _assert_month_ams(out: dict) -> None:
     assert "AMS (6 months)" in md
 
 
+def _assert_named_month_trend(out: dict) -> None:
+    """Named month asks → Volume + AMS + %change (not a 6-month grid)."""
+    assert out.get("ok") is True
+    assert out.get("column_dimension") != "month"
+    trend = out.get("trend") or {}
+    cols = trend.get("columns") or []
+    assert "volume_mt" in cols
+    assert "ams_mt" in cols
+    assert "pct_vs_ams" in cols or "pct_vs_expected" in cols
+    md = out.get("answer_markdown") or ""
+    assert "Volume vs AMS" in md or "AMS (MT)" in md
+    assert "AMS (6 months)" not in md
+    assert "Mar 2026" not in md
+
+
 def test_fetch_lines_fast_with_large_client_master() -> None:
     """Regression: expression clients JOIN scanned all clients per sales row."""
     previous = os.environ.get("EVA_DATA_DIR")
@@ -144,7 +159,7 @@ def test_fetch_lines_fast_with_large_client_master() -> None:
                 user_text="Show me Eva distributor sales for july",
             )
             elapsed = time.time() - t0
-            _assert_month_ams(out)
+            _assert_named_month_trend(out)
             assert out.get("filters", {}).get("client_type") == "Eva Distributors"
             # Old join was ~2 minutes at this scale; fast path should be well under 5s
             assert elapsed < 5.0, f"query_sales too slow: {elapsed:.2f}s"
@@ -176,7 +191,7 @@ def test_month_ams_uses_single_fetch() -> None:
                 out = _dispatch_tool(
                     "query_sales",
                     {},
-                    user_text="Show me Eva distributor sales for july",
+                    user_text="Show me Eva distributor sales",
                 )
             finally:
                 sq._fetch_lines = orig  # type: ignore[assignment]
@@ -360,6 +375,102 @@ def test_group_by_city_keeps_month_and_ams() -> None:
             ]
             assert headers[0] == "city"
             assert by_city.get("filters", {}).get("client_type") == "Eva Distributors"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_named_month_uses_volume_ams_pct_not_six_month_grid() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Show me Eva distributor sales in Karachi for July",
+            )
+            _assert_named_month_trend(out)
+            assert out.get("filters", {}).get("city") == "Karachi"
+            assert out.get("filters", {}).get("client_type") == "Eva Distributors"
+            assert (out.get("period") or {}).get("date_from", "").startswith("2026-07")
+            # No-month ask still gets the 6-month AMS grid
+            bare = _dispatch_tool(
+                "query_sales", {}, user_text="Show me Eva distributor sales in Karachi"
+            )
+            _assert_month_ams(bare)
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_sold_to_followup_filters_business_unit() -> None:
+    """Ad-hoc 'which distributor was BU sold to' keeps prior scope + BU filter."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "('Maan Canola Oil', 'Maan Consumer', 'Maan Canola', "
+                    "'Stand up', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, client_type, payload_json
+                    ) VALUES (NULL, 'maan-khi', datetime('now'), '2026-07-12',
+                      'Gamma Dist', 'Maan Canola Oil', 5, 'MT', 5,
+                      'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+
+            from eva_dashboard.chatbot import (
+                _looks_sold_to_parties,
+                resolve_forced_tool,
+            )
+
+            q = "Which distributor was the maan consumer sold to"
+            assert _looks_sold_to_parties(q)
+            prior = {
+                "filters": {
+                    "city": "Karachi",
+                    "client_type": "Eva Distributors",
+                },
+                "period_phrase": "July 2026",
+                "column_dimension": "month",
+                "business_units": [],
+            }
+            assert (
+                resolve_forced_tool(q, prior_table_spec=prior) == "list_clients"
+            )
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out.get("ok") is True
+            assert out.get("mode") == "list_clients"
+            assert out.get("filters", {}).get("business_unit") == "Maan Consumer"
+            assert out.get("filters", {}).get("city") == "Karachi"
+            assert out.get("filters", {}).get("client_type") == "Eva Distributors"
+            clients = {c["client"] for c in (out.get("clients") or [])}
+            assert "Gamma Dist" in clients
+            # Eva Consumer-only parties in Karachi must not dominate without Maan
+            md = out.get("answer_markdown") or ""
+            assert "Maan Consumer" in md or "BU" in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

@@ -271,9 +271,11 @@ def test_language_controls_matrix_vs_analytical() -> None:
                 },
                 user_text="What were Eva Consumer sales in Lahore last month?",
             )
-            assert what["mode"] == "matrix"
+            # Named month / last month → lean Volume + AMS + % (not analytical 3-pack)
+            assert what["mode"] == "trend"
             assert what["required_table_count"] == 1
             assert "### 3. Trend vs AMS" not in (what.get("answer_markdown") or "")
+            assert "Volume vs AMS" in (what.get("answer_markdown") or "")
 
             how = _dispatch_tool(
                 "query_sales",

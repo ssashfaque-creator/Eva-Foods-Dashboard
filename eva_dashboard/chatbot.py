@@ -258,19 +258,22 @@ TOOL CHOICE:
 - Daily briefing → report_snapshot; what's loaded? → get_sales_overview
 
 DEFAULTS (tools also enforce these):
-- "Show me X sales" when X is party / client type / city → columns='month', months_back=6
-  with AMS (3 months) + AMS (6 months). "July only" / "just August" → single period.
+- "Show me X sales" (party / client type / city) with NO named month → columns='month',
+  months_back=6 + AMS (3) + AMS (6).
+- Named month in the ask ("for July", "this month") → that month's Volume + AMS + % vs AMS
+  only (not a 6-month grid). Explicit "last N months" / "month-wise" keeps the grid.
+- "Sold to" / "which distributor bought [BU]" → list_clients with that business_unit,
+  inheriting prior city / client type / period when this is a follow-up.
 - Matrix mode: what/show/breakdown/average → matrix; how/performance/doing/trend → analytical.
 - Row grain (query_sales): no BU → Business Unit; one BU → Packing Category (+ BU subtotal);
   oil set → Packing; packing set → Product; "by product" → Packing; "by SKU" → Product.
 - Columns: client_type | city | month. Tables include row + column totals.
 - [FOLLOW-UP …] / Reply: reuse that answer's filters via prior_spec (same grain unless asked
-  to regroup, drill, remove, include/combine, list individuals, or YoY-compare).
+  to regroup, drill, remove, include/combine, list individuals, sold-to, or YoY-compare).
 
 RESPONSE FORMAT:
 - Start with the tool's `answer_markdown` tables verbatim (keep column order).
-- Then ### Analysis: 3–5 short commercial bullets grounded only in that table
-  (leaders/gaps, MoM vs AMS, concentration, soft spots). Fresh each time.
+- Then ### Analysis: 2–3 one-line bullets from that table only (no bold labels).
 - No metric bullet lists outside ### Analysis.
 
 === PRODUCT LANGUAGE (abbrev) ===
@@ -337,8 +340,8 @@ def _wants_gpt_analysis(user_text: str, *, result_mode: str | None = None) -> bo
 
 _ANALYSIS_RESPONSE_INSTRUCTIONS = (
     "Paste answer_markdown TABLES verbatim at the start of your reply "
-    "(do not rebuild or change numbers). Then add ### Analysis with 3-5 short "
-    "bullets of quality insight from THIS table only."
+    "(do not rebuild or change numbers). Then add ### Analysis with 2-3 "
+    "one-line bullets from THIS table only."
 )
 
 _FAST_RESPONSE_INSTRUCTIONS = (
@@ -346,18 +349,16 @@ _FAST_RESPONSE_INSTRUCTIONS = (
 )
 
 _ANALYSIS_ONLY_SYSTEM = (
-    "You are Eva Foods' commercial analyst. The database tool already built the "
-    "tables — do NOT rebuild or invent numbers.\n"
-    "Reply with ONLY a ### Analysis section: 3-5 sharp bullets grounded in the "
-    "table you are given.\n"
-    "Cover what matters for this view, for example:\n"
-    "- Who/what leads and by how much (share or gap)\n"
-    "- Month-to-month or recent trend vs AMS when those columns exist\n"
-    "- Mix concentration / risk (one line or city dominating)\n"
-    "- Soft spots (zeros, declines, below AMS) worth acting on\n"
-    "Write fresh insight for THIS table — never generic filler like "
-    "'Tin is the lead line' unless that is the real story with figures.\n"
-    "Use only numbers visible in the tool tables."
+    "You are Eva Foods' commercial analyst. Tables are already built — "
+    "do NOT rebuild or invent numbers.\n"
+    "Reply with ONLY ### Analysis and 2-3 one-line bullets. Keep it short.\n"
+    "Rules:\n"
+    "- No bold headings / labels (not 'Sales Leader:' — just the insight).\n"
+    "- One fact per bullet; include the key number(s).\n"
+    "- Prefer: who leads + gap/share; volume vs AMS / % change when present; "
+    "one risk or soft spot.\n"
+    "- Skip obvious restatements of every row. No filler.\n"
+    "- Use only numbers visible in the tool tables."
 )
 
 
@@ -776,14 +777,23 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "list_clients",
             "description": (
-                "List clients by City-Filter and/or Client Type. "
-                "Use for 'who are my distributors in Lahore?'"
+                "List clients by City-Filter and/or Client Type, optionally "
+                "filtered to a Business Unit (who bought / sold to). "
+                "Use for 'who are my distributors in Lahore?' and "
+                "'which distributor was Maan Consumer sold to'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "city": {"type": "string"},
                     "client_type": {"type": "string"},
+                    "business_unit": {
+                        "type": "string",
+                        "description": (
+                            "Filter volume to this Business Unit "
+                            "(e.g. Maan Consumer) for sold-to / buyers asks."
+                        ),
+                    },
                     "period": {"type": "string"},
                     "date_from": {"type": "string"},
                     "date_to": {"type": "string"},
@@ -1243,17 +1253,53 @@ def _looks_month_wise(text: str) -> bool:
 
 
 def _looks_single_month_only(text: str) -> bool:
-    """True for 'July only' / 'just August' — keep a single-period matrix."""
+    """True for 'July only' / 'just August' — keep a single-period view."""
     t = (text or "").lower()
     if re.search(r"\b(only|just)\b", t) and _extract_period_phrase(text):
         return True
     return False
 
 
+def _wants_named_month_trend(text: str) -> bool:
+    """Named calendar month → Volume + AMS + %change (not a 6-month grid).
+
+    Explicit multi-month language ('last 6 months', 'month-wise') keeps the grid.
+    Analytical 'how were / performance' keeps the full analytical pack.
+    """
+    if not (text or "").strip():
+        return False
+    if not _extract_period_phrase(text):
+        return False
+    t = (text or "").lower()
+    if _looks_analytical(t):
+        return False
+    if _looks_month_wise(text):
+        return False
+    if re.search(r"\b(last|past|previous)\s+\d{1,2}\s+months?\b", t):
+        return False
+    if re.search(r"\b(last|past|previous)\s+quarter\b", t):
+        return False
+    # Mutating follow-ups keep prior grain; period-only / July-only → trend
+    if _looks_table_op_followup(text) and not (
+        _looks_single_month_only(text) or _looks_period_only_followup(text)
+    ):
+        return False
+    if _looks_party_analytics(t) or _looks_client_list(t):
+        return False
+    if _looks_party_breakdown(t) or _looks_party_mix_query(t):
+        return False
+    return bool(
+        re.search(r"\b(sales?|volume|mt|show|give|how much)\b", t)
+        or _looks_named_party_sales(text)
+        or extract_client_type_from_text(text)
+        or extract_city_from_text(text)
+    )
+
+
 def _looks_scoped_entity_sales(text: str) -> bool:
     """True for 'show me X sales' where X is party / client type / city.
 
-    These default to a month-wise matrix with AMS columns.
+    These default to a month-wise matrix with AMS columns when no month is named.
     """
     t = (text or "").lower()
     if _looks_analytical(t) or _looks_party_analytics(t) or _looks_client_list(t):
@@ -1288,8 +1334,10 @@ def _looks_table_op_followup(text: str) -> bool:
 
 
 def _wants_scoped_month_ams(text: str) -> bool:
-    """Fresh city/client-type sales ask → month grid + AMS (unless July-only)."""
+    """Fresh city/client-type sales ask → month grid + AMS (no named month)."""
     if not (text or "").strip():
+        return False
+    if _wants_named_month_trend(text):
         return False
     if _looks_table_op_followup(text) or _looks_single_month_only(text):
         return False
@@ -2422,12 +2470,35 @@ def _party_filters_from_prior(
     return out
 
 
+def _looks_sold_to_parties(text: str) -> bool:
+    """True for 'which distributor was X sold to' / 'who bought Maan Consumer'."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"sold\s+to|"
+            r"sell(?:s|ing)?\s+to|"
+            r"who\s+(bought|purchased|takes?|took)|"
+            r"which\s+(distributors?|parties|clients?|customers?)\s+"
+            r"(was|were|did|bought|purchased|take|took)|"
+            r"(was|were)\s+(the\s+)?.{0,40}\s+sold\s+to|"
+            r"buyers?\s+(of|for)|"
+            r"who\s+(are|were)\s+the\s+(buyers?|distributors?|parties)\s+"
+            r"(of|for|that\s+bought)"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _looks_party_breakdown(text: str) -> bool:
-    """True for 'by individual distributors' / distributor-wise breakdown of prior table."""
+    """True for individual-distributor break / sold-to / buyers of a BU."""
     t = (text or "").lower()
     # Product/packing mix for each distributor is analyze_parties, not a list
     if _looks_party_mix_query(t):
         return False
+    if _looks_sold_to_parties(t):
+        return True
     return bool(
         re.search(
             r"\b("
@@ -2566,6 +2637,7 @@ def _replay_party_spec(
     return list_clients(
         city=filters.get("city"),
         client_type=filters.get("client_type"),
+        business_unit=filters.get("business_unit"),
         period=p_phrase,
         date_from=d0,
         date_to=d1,
@@ -2867,15 +2939,17 @@ def _dispatch_tool(
     if _looks_named_party_sales(user_text):
         pq = _extract_named_party_query(user_text) or user_text
         period = _extract_period_phrase(user_text)
-        # Default: last 6 months + AMS. Single-month only when user says "July only".
-        if _looks_single_month_only(user_text) and period:
+        # Named month → Volume + AMS + %change; else last 6 months + AMS grid.
+        if period and (
+            _wants_named_month_trend(user_text) or _looks_single_month_only(user_text)
+        ):
             return party_sales(
-                query=pq, period=period, columns="city", mode="matrix"
+                query=pq, period=period, columns="city", mode="trend"
             )
         months_back = _months_back_from_text(user_text, 6)
         return party_sales(
             query=pq,
-            period=None if not _looks_single_month_only(user_text) else period,
+            period=None,
             columns="month",
             months_back=months_back,
             mode="matrix",
@@ -2886,13 +2960,23 @@ def _dispatch_tool(
         new_period = _extract_period_phrase(user_text)
         return _replay_party_spec(prior_party_spec, period=new_period)
 
-    # "By individual distributors" after a sales table → list those parties for same period
+    # Individual distributors / "sold to" / buyers of a BU → party list
     if (
-        name in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
-        and prior_spec
+        name
+        in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
         and _looks_party_breakdown(user_text)
+        and (prior_spec or _extract_business_units_from_text(user_text))
     ):
-        prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+        prior_ctx = _party_filters_from_prior(prior_spec, user_text) if prior_spec else {}
+        units = _extract_business_units_from_text(user_text)
+        bu = (
+            units[0]
+            if len(units) == 1
+            else (
+                arguments.get("business_unit")
+                or prior_ctx.get("business_unit")
+            )
+        )
         ctype = normalize_client_type(
             arguments.get("client_type")
             or prior_ctx.get("client_type")
@@ -2902,10 +2986,20 @@ def _dispatch_tool(
                 else None
             )
         )
+        city = (
+            arguments.get("city")
+            or extract_city_from_text(user_text)
+            or prior_ctx.get("city")
+        )
         return list_clients(
-            city=arguments.get("city") or prior_ctx.get("city"),
+            city=city,
             client_type=ctype,
-            period=arguments.get("period") or prior_ctx.get("period"),
+            business_unit=bu,
+            period=(
+                arguments.get("period")
+                or _extract_period_phrase(user_text)
+                or prior_ctx.get("period")
+            ),
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             limit=int(arguments.get("limit") or 200),
@@ -2935,9 +3029,19 @@ def _dispatch_tool(
 
         columns = arguments.get("columns") or "client_type"
         months_back = int(arguments.get("months_back") or 6)
-        # Default "show me X sales" → months + AMS (even if a stale prior_spec
-        # sits in the thread; real table ops keep their own grain below).
-        if mode != "analytical" and _wants_scoped_month_ams(user_text):
+        # Named month → lean Volume + AMS + %change (not a 6-month grid).
+        # Bare "show me X sales" → months + AMS grid (even with stale prior_spec).
+        if mode != "analytical" and _wants_named_month_trend(user_text):
+            mode = "trend"
+            if str(columns).lower().replace(" ", "_") in {
+                "month",
+                "months",
+                "monthly",
+                "month_wise",
+                "monthwise",
+            }:
+                columns = "client_type"
+        elif mode != "analytical" and _wants_scoped_month_ams(user_text):
             columns = "month"
             months_back = _months_back_from_text(user_text, 6)
             mode = "matrix"
@@ -3055,6 +3159,8 @@ def _dispatch_tool(
                 use_prior
                 and use_prior.get("column_dimension") == "month"
                 and not lock_columns
+                and mode not in {"trend", "analytical"}
+                and not _wants_named_month_trend(user_text)
             ):
                 columns = "month"
                 months_back = int(use_prior.get("months_back") or months_back)
@@ -3191,6 +3297,16 @@ def _dispatch_tool(
             return _replay_party_spec(
                 prior_party_spec, period=_extract_period_phrase(user_text)
             )
+        units = _extract_business_units_from_text(user_text)
+        bu = (
+            units[0]
+            if len(units) == 1
+            else (
+                arguments.get("business_unit")
+                or inferred.get("business_unit")
+                or prior_ctx.get("business_unit")
+            )
+        )
         city = (
             arguments.get("city")
             or inferred.get("city")
@@ -3208,12 +3324,16 @@ def _dispatch_tool(
         )
         period = (
             _extract_period_phrase(user_text)
-            if _looks_period_only_followup(user_text)
+            if (
+                _looks_period_only_followup(user_text)
+                or _looks_sold_to_parties(user_text)
+            )
             else None
         )
         return list_clients(
             city=city,
             client_type=ctype,
+            business_unit=bu,
             period=period
             or arguments.get("period")
             or inferred.get("period")
@@ -3825,6 +3945,14 @@ def resolve_forced_tool(
 
     # 4) "By individual distributors" after a sales table → list those parties
     if (has_table_prior or is_followup) and _looks_party_breakdown(text):
+        return "list_clients"
+    # Sold-to / buyers-of-BU even without a pinned prior table
+    if _looks_sold_to_parties(text) and (
+        _extract_business_units_from_text(text)
+        or extract_city_from_text(text)
+        or extract_client_type_from_text(text)
+        or has_table_prior
+    ):
         return "list_clients"
 
     # 5) Explicit Reply follow-up with a pinned sales table, otherwise stay flexible

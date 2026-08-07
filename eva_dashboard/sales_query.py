@@ -1450,6 +1450,7 @@ def _trend_table(
     oil_type: str | None,
     packing_category: str | None,
     client_type: str | None = None,
+    party: str | None = None,
 ) -> dict[str, Any]:
     as_of = date.fromisoformat(period["date_to"])
     ams = _ams_by_row(
@@ -1461,6 +1462,7 @@ def _trend_table(
         oil_type=oil_type,
         packing_category=packing_category,
         client_type=client_type,
+        party=party,
     )
     volume = (
         period_frame.groupby(row_dim)["mt"].sum().to_dict()
@@ -2015,7 +2017,9 @@ def query_sales(
     mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"auto", "default"}:
         mode_norm = "matrix"
-    # Month-wise custom tables stay matrix (not the 3-pack analytical)
+    if mode_norm in {"month_ams", "scoped_month", "volume_ams"}:
+        mode_norm = "trend"
+    # Month-wise custom tables stay matrix (not the 3-pack analytical / trend)
     if col == "month":
         mode_norm = "matrix"
 
@@ -2158,7 +2162,37 @@ def query_sales(
         )
         return result
 
-    if mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
+    if mode_norm in {"trend"} and col != "month":
+        # Lean named-month view: Volume + AMS + %change only
+        trend = _trend_table(
+            frame,
+            row_dim=row_dim,
+            period=period_info,
+            city=city_f,
+            business_unit=bu,
+            business_units=units if len(units) > 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+            client_type=ctype,
+            party=party_f,
+        )
+        result["mode"] = "trend"
+        result["trend"] = trend
+        trend_cols = "Volume | AMS | " + (
+            "Expected | % vs Expected"
+            if period_info.get("partial_month")
+            else "% vs AMS"
+        )
+        result["tables"] = [
+            {
+                "index": 1,
+                "title": f"Volume vs AMS ({trend_cols})",
+                "source": "trend",
+                "data": trend,
+            }
+        ]
+        result["required_table_count"] = 1
+    elif mode_norm in {"analytical", "analysis", "how_are", "performance"} and col != "month":
         city_matrix = _build_pivot(frame, row_dim, "city")
         trend = _trend_table(
             frame,
@@ -2170,6 +2204,7 @@ def query_sales(
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            party=party_f,
         )
         result["mode"] = "analytical"
         result["city_matrix"] = city_matrix
@@ -2837,7 +2872,15 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
             parts.append("")
         return "\n".join(parts).strip() + "\n"
 
-    if result.get("mode") == "analytical":
+    if result.get("mode") == "trend":
+        parts.append("### Volume vs AMS\n")
+        parts.append(_trend_to_markdown(result.get("trend") or {}))
+        insights = _auto_insights(result)
+        if insights:
+            parts.append("### Analysis\n")
+            parts.extend(f"- {t}" for t in insights)
+            parts.append("")
+    elif result.get("mode") == "analytical":
         parts.append("### 1. City-wise breakdown\n")
         parts.append(
             _matrix_to_markdown(result.get("city_matrix") or {}, row_dim)

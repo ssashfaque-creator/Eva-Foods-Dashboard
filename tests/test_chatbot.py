@@ -72,11 +72,11 @@ def test_compose_tables_plus_gpt_analysis() -> None:
 
     composed = _compose_tables_plus_analysis(
         tool_md,
-        "### Analysis\n- Lahore is led by distributors at 42 MT.\n- Watch AMS vs July volume.\n",
+        "### Analysis\n- Distributors lead Lahore at 42 MT.\n- July is above AMS.\n",
     )
     assert '<table class="eva-mtx">' in composed
     assert "### Analysis" in composed
-    assert "Lahore is led by distributors" in composed
+    assert "Distributors lead Lahore at 42 MT" in composed
     assert "Canned insight" not in composed
 
     # No AI analysis → keep tables only (do not resurface canned bullets)

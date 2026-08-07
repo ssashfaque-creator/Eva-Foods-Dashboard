@@ -272,13 +272,14 @@ def test_named_party_sales_resolves_and_not_found() -> None:
             assert out["filters"].get("party") == "Rubina Shaheen (LHR)"
             assert out["filters"].get("city") is None
             assert out["filters"].get("client_type") is None
-            # Default party sales = last N months + AMS (not a single July MTD slice)
-            assert out["column_dimension"] == "month"
-            assert "AMS (3 months)" in (out.get("matrix") or {}).get("columns", [])
-            assert out["period"]["date_from"] <= "2026-07-01"
-            assert out["period"]["date_to"].startswith("2026-")
+            # Named month → Volume + AMS + %change (not a 6-month grid)
+            assert out["column_dimension"] != "month"
+            trend_cols = (out.get("trend") or {}).get("columns") or []
+            assert "volume_mt" in trend_cols and "ams_mt" in trend_cols
+            assert out["period"]["date_from"].startswith("2026-07")
+            assert out["period"]["date_to"].startswith("2026-07")
 
-            # Explicit "July only" keeps a single-period party matrix
+            # Explicit "July only" also uses the lean named-month trend view
             july_only = _dispatch_tool(
                 "lookup_party",
                 {},
@@ -287,6 +288,7 @@ def test_named_party_sales_resolves_and_not_found() -> None:
             assert july_only["ok"] is True
             assert july_only["party"] == "Rubina Shaheen (LHR)"
             assert july_only["period"]["date_from"].startswith("2026-07")
+            assert "volume_mt" in ((july_only.get("trend") or {}).get("columns") or [])
 
             miss = party_sales(query="No Such Client ZZZ", period="July")
             assert miss["mode"] == "party_not_found"
@@ -657,15 +659,14 @@ def test_distributor_sales_routes_to_matrix_not_list() -> None:
             assert out["ok"] is True
             assert out["filters"]["client_type"] == "Eva Distributors"
             assert out["filters"]["city"] == "Karachi"
-            # Scoped "distributor sales" defaults to month grid + AMS
-            assert out["column_dimension"] == "month"
-            assert "AMS (3 months)" in (out.get("matrix") or {}).get("columns", [])
-            assert out["period"]["date_from"] <= "2026-07-01"
-            # Matrix grain (BU / packing), not a party list
-            assert out.get("matrix") or out.get("row_dimension")
-            assert "party_spec" not in out or out.get("mode") != "list_clients"
+            # Named month → Volume + AMS + %change (not a 6-month grid / party list)
+            assert out["column_dimension"] != "month"
+            trend_cols = (out.get("trend") or {}).get("columns") or []
+            assert "volume_mt" in trend_cols and "ams_mt" in trend_cols
+            assert out["period"]["date_from"].startswith("2026-07")
+            assert out.get("mode") != "list_clients"
             md = out.get("answer_markdown") or ""
-            assert "Gamma Dist" not in md or "Business Unit" in md or "Packing" in md
+            assert "Volume vs AMS" in md or "AMS (MT)" in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
