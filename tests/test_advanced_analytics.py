@@ -44,6 +44,10 @@ def _seed() -> None:
                 ("1", "Alpha Dist", "Eva Distributors", "Lahore", "Lahore"),
                 ("2", "Beta Dist", "Eva Distributors", "Karachi", "Karachi"),
                 ("3", "Silent Guy", "Eva Distributors", "Lahore", "Lahore"),
+                ("4", "Isb Dist", "Eva Distributors", "Islamabad", "Islamabad"),
+                ("5", "Metro Lhr", "METRO HABIB", "Lahore", "Lahore"),
+                ("6", "Chase Up Khi", "CHASE UP", "Karachi", "Karachi"),
+                ("7", "Imtiaz Lhr", "Imtiaz Store", "Lahore", "Lahore"),
             ],
         )
         rows = []
@@ -52,13 +56,18 @@ def _seed() -> None:
                 (f"2026-{month}-05", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "A"),
                 (f"2026-{month}-05", "Beta Dist", "Eva Canola Oil (StandUpPouch)", 20.0, "B"),
                 (f"2026-{month}-05", "Silent Guy", "Eva Canola Oil (StandUpPouch)", 15.0, "S"),
+                (f"2026-{month}-05", "Isb Dist", "Eva Canola Oil (StandUpPouch)", 12.0, "I"),
                 (f"2026-{month}-12", "Alpha Dist", "Eva Cooking Oil Pillow 1L", 8.0, "P"),
+                (f"2026-{month}-12", "Metro Lhr", "Eva Canola Oil (StandUpPouch)", 18.0, "M"),
+                (f"2026-{month}-12", "Chase Up Khi", "Eva Canola Oil (StandUpPouch)", 14.0, "C"),
+                (f"2026-{month}-12", "Imtiaz Lhr", "Eva Canola Oil (StandUpPouch)", 22.0, "Z"),
             ]
         rows += [
             ("2026-08-01", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 10.0, "A8"),
             ("2026-08-04", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 90.0, "DUMP"),
             ("2025-08-02", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 10.0, "Y"),
             ("2025-08-02", "Beta Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "Y2"),
+            ("2025-08-02", "Isb Dist", "Eva Canola Oil (StandUpPouch)", 8.0, "Y3"),
         ]
         for i, (dt, party, product, mt, inv) in enumerate(rows):
             conn.execute(
@@ -146,6 +155,54 @@ def test_compare_silent_not_ordered_dumping_routing() -> None:
             assert dump["cases"][0]["party"] == "Alpha Dist"
 
             assert looks_advanced("Compare growth in Karachi and Lahore")
+            multi_city = infer_advanced_from_text(
+                "Compare Lahore vs Karachi vs Islamabad last month"
+            )
+            assert multi_city["mode"] == "compare_cities"
+            assert multi_city["entities"] == ["Lahore", "Karachi", "Islamabad"]
+            multi_type = infer_advanced_from_text(
+                "Imtiaz vs Metro vs Chase Up this month"
+            )
+            assert multi_type["mode"] == "compare_client_types"
+            assert multi_type["entities"] == [
+                "Imtiaz Store",
+                "METRO HABIB",
+                "CHASE UP",
+            ]
+            pairwise = infer_advanced_from_text(
+                "Compare Imtiaz vs distributors growth last month"
+            )
+            assert pairwise["mode"] == "compare_client_types"
+            assert pairwise["entities"] == ["Imtiaz Store", "Eva Distributors"]
+
+            city3 = compare_segments(
+                segment="city",
+                entities=["Lahore", "Karachi", "Islamabad"],
+                period="July",
+                business_unit="Eva Consumer",
+            )
+            assert city3["ok"] is True
+            assert len(city3["entities"]) == 3
+            assert "Lahore vs Karachi vs Islamabad" in city3["answer_markdown"]
+
+            type3 = compare_segments(
+                segment="client_type",
+                entities=["Imtiaz Store", "METRO HABIB", "CHASE UP"],
+                period="July",
+            )
+            assert type3["ok"] is True
+            assert len(type3["entities"]) == 3
+            names = {e["name"] for e in type3["entities"]}
+            assert names == {"Imtiaz Store", "METRO HABIB", "CHASE UP"}
+
+            disp = _dispatch_tool(
+                "advanced_query",
+                {},
+                user_text="Compare Lahore vs Karachi vs Islamabad for July",
+            )
+            assert disp["ok"] is True
+            assert len(disp["entities"]) == 3
+
             assert infer_advanced_from_text(
                 "What customers have not had any sale this week"
             )["mode"] == "silent_week"

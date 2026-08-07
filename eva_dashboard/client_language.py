@@ -159,43 +159,67 @@ def normalize_oil_type(value: str | None) -> str | None:
     return OIL_TYPE_ALIASES.get(_norm(text), text)
 
 
-def extract_client_type_from_text(text: str) -> str | None:
-    """Pull a client-type mention from free text (longest alias first)."""
+_GENERIC_CLIENT_ALIASES = {
+    "store",
+    "stores",
+    "dist",
+    "distributor",
+    "distributors",
+}
+
+
+def extract_all_client_types_from_text(text: str) -> list[str]:
+    """All distinct client types mentioned, in order of appearance.
+
+    Longer / specific aliases win on overlapping spans (so ``imtiaz stores``
+    is Imtiaz, not a bare ``stores`` hit). Non-overlapping generics still
+    count — ``Imtiaz vs distributors`` → both types. Used for multi-type
+    compares (Imtiaz vs Metro vs Chase Up).
+    """
     t = _norm(text or "")
     if not t:
-        return None
+        return []
 
-    # Ultra-generic shorthand — ignore when a specific channel is also named
-    # ("who are the CSD stores" must not become Imtiaz via bare "stores").
-    generic_aliases = {
-        "store",
-        "stores",
-        "dist",
-        "distributor",
-        "distributors",
-    }
-
-    # Prefer multi-word / longer aliases so "canteen store" beats "store"
+    hits: list[tuple[int, int, str]] = []  # start, end, canon
+    # Longest alias first so specific phrases claim their span before generics
     aliases = sorted(CLIENT_TYPE_ALIASES.keys(), key=len, reverse=True)
-    matches: list[str] = []
     for alias in aliases:
-        # word-boundary-ish: alias as whole phrase
         pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
-        if re.search(pattern, t):
-            matches.append(alias)
-    if matches:
-        specific = [a for a in matches if a not in generic_aliases]
-        chosen = (specific or matches)[0]
-        return CLIENT_TYPE_ALIASES[chosen]
+        for m in re.finditer(pattern, t):
+            start, end = m.start(), m.end()
+            if any(not (end <= s or start >= e) for s, e, _ in hits):
+                continue
+            hits.append((start, end, CLIENT_TYPE_ALIASES[alias]))
 
-    # Live type names mentioned verbatim
-    for name in list_known_client_types():
+    # Live type names not already covered
+    covered = {c for _, _, c in hits}
+    try:
+        known = list_known_client_types()
+    except Exception:
+        known = []
+    for name in known:
         n = _norm(name)
-        if len(n) < 3:
+        if len(n) < 3 or name in covered:
             continue
-        if re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", t):
-            return name
-    return None
+        for m in re.finditer(r"(?<!\w)" + re.escape(n) + r"(?!\w)", t):
+            start, end = m.start(), m.end()
+            if any(not (end <= s or start >= e) for s, e, _ in hits):
+                continue
+            hits.append((start, end, name))
+            covered.add(name)
+
+    hits.sort(key=lambda h: h[0])
+    out: list[str] = []
+    for _, _, canon in hits:
+        if canon not in out:
+            out.append(canon)
+    return out
+
+
+def extract_client_type_from_text(text: str) -> str | None:
+    """Pull a client-type mention from free text (longest alias first)."""
+    found = extract_all_client_types_from_text(text)
+    return found[0] if found else None
 
 
 def extract_packing_from_text(text: str) -> str | None:

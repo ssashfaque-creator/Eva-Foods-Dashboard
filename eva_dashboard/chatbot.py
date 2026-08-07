@@ -260,7 +260,10 @@ TOOL CHOICE:
 - Volume pivots / month grids / regroup / include-bulk / remove / YoY on a table → query_sales
 - Party rankings, AMS, share, mix, new/lost/silent, invoice frequency → analyze_parties
 - Rate / price / Price Fetch → query_price
-- City/client compares, dumping, expected month, filter grown/declined/>N MT → advanced_query
+- City/client compares (2+ sides: Lahore vs Karachi vs Islamabad; Imtiaz vs Metro
+  vs Chase Up) → advanced_query with mode compare_cities/compare_client_types and
+  `entities` for all sides. Dumping, expected month, filter grown/declined/>N MT
+  → advanced_query too.
 - Single spoken product → resolve_product_language then product_sales / filtered query
 - Daily briefing → report_snapshot; what's loaded? → get_sales_overview
 
@@ -1124,6 +1127,15 @@ TOOLS.append(
                     "packing_category": {"type": "string"},
                     "left": {"type": "string"},
                     "right": {"type": "string"},
+                    "entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "For multi-way compares: all cities or client types "
+                            "(e.g. Lahore, Karachi, Islamabad or Imtiaz, Metro, Chase Up). "
+                            "Prefer this over only left/right when 3+ sides."
+                        ),
+                    },
                     "party_query": {"type": "string"},
                     "group_by": {"type": "string"},
                     "metric": {"type": "string"},
@@ -2947,6 +2959,11 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
     metric = arguments.get("metric") or inferred.get("metric") or "volume"
     left = arguments.get("left") or inferred.get("left")
     right = arguments.get("right") or inferred.get("right")
+    entities = arguments.get("entities") or inferred.get("entities")
+    if isinstance(entities, str):
+        entities = [e.strip() for e in entities.split(",") if e.strip()]
+    elif entities is not None:
+        entities = [str(e).strip() for e in entities if str(e).strip()]
     group_by = arguments.get("group_by") or inferred.get("group_by")
     party_query = arguments.get("party_query") or inferred.get("party_query") or user_text
     entity = arguments.get("entity") or inferred.get("entity") or "party"
@@ -2967,8 +2984,9 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
     if mode in {"compare_cities", "compare_client_types"}:
         return compare_segments(
             segment="city" if mode == "compare_cities" else "client_type",
-            left=left or "Lahore",
-            right=right or "Karachi",
+            left=left or (None if entities else "Lahore"),
+            right=right or (None if entities else "Karachi"),
+            entities=entities,
             metric=metric,
             period=period,
             business_unit=bu,

@@ -182,8 +182,9 @@ def _scope_bits(filters: dict[str, Any]) -> str:
 def compare_segments(
     *,
     segment: str = "city",  # city | client_type
-    left: str,
-    right: str,
+    left: str | None = None,
+    right: str | None = None,
+    entities: list[str] | None = None,
     metric: str = "volume",  # volume | growth | yoy
     period: str | None = None,
     date_from: str | None = None,
@@ -195,7 +196,12 @@ def compare_segments(
     city: str | None = None,
     exclude_client_types: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Side-by-side city or client-type compare (volume and/or YoY growth)."""
+    """Compare 2+ cities or client types (volume + YoY growth).
+
+    Pass ``entities`` for multi-way compares (Lahore vs Karachi vs Islamabad,
+    Imtiaz vs Metro vs Chase Up). ``left``/``right`` remain supported for
+    pairwise asks.
+    """
     period_info = resolve_period(period or "this month", date_from=date_from, date_to=date_to)
     if period_info.get("ok") is False:
         return {"ok": False, "error": period_info.get("error")}
@@ -205,6 +211,23 @@ def compare_segments(
     pack = normalize_packing_category(packing_category)
     ctype = normalize_client_type(client_type)
     seg = "city" if segment == "city" else "client_type"
+
+    names: list[str] = []
+    for raw in list(entities or []) + ([left] if left else []) + ([right] if right else []):
+        if not raw:
+            continue
+        label = str(raw).strip()
+        if seg == "client_type":
+            label = normalize_client_type(label) or label
+        elif seg == "city":
+            label = label.title() if label == label.lower() else label
+        if label and label not in names:
+            names.append(label)
+    if len(names) < 2:
+        return {
+            "ok": False,
+            "error": "Compare needs at least two cities or client types.",
+        }
 
     def _vol(value: str, p0: str, p1: str) -> float:
         kw: dict[str, Any] = dict(
@@ -235,12 +258,24 @@ def compare_segments(
     except ValueError:
         p1 = c1.replace(year=c1.year - 1, day=28).isoformat()
 
-    left_v = _vol(left, d0, d1)
-    right_v = _vol(right, d0, d1)
-    left_p = _vol(left, p0, p1)
-    right_p = _vol(right, p0, p1)
-    left_g = pct_change(left_v, left_p)
-    right_g = pct_change(right_v, right_p)
+    rows_data: list[dict[str, Any]] = []
+    for name in names:
+        vol = _vol(name, d0, d1)
+        prior = _vol(name, p0, p1)
+        growth = pct_change(vol, prior)
+        rows_data.append(
+            {
+                "name": name,
+                "volume_mt": mt_round(vol),
+                "prior_mt": mt_round(prior),
+                "yoy_pct": pct_round(growth),
+                "_vol": vol,
+                "_prior": prior,
+                "_growth": growth,
+            }
+        )
+    # Rank by current volume for the table / tips (keep mention order in entities)
+    ranked = sorted(rows_data, key=lambda r: (-float(r["_vol"]), str(r["name"])))
 
     filters = {
         "business_unit": bu,
@@ -250,40 +285,51 @@ def compare_segments(
         "city": city if seg != "city" else None,
         "exclude_client_types": exclude_client_types,
     }
-    title = f"{left} vs {right}"
+    title = " vs ".join(names)
+    dim_label = seg.replace("_", " ").title()
     lines = [
         f"Compare {seg.replace('_', ' ')} — **{title}** · {period_info.get('label')} "
         f"({_scope_bits(filters)}).\n",
-        f"| {seg.replace('_', ' ').title()} | Volume (MT) | Prior YoY (MT) | YoY % |",
-        "| --- | --- | --- | --- |",
+        f"| # | {dim_label} | Volume (MT) | Prior YoY (MT) | YoY % | Share |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
-    for name, vol, prior, growth in (
-        (left, left_v, left_p, left_g),
-        (right, right_v, right_p, right_g),
-    ):
-        gs = f"{growth:+.1f}%" if growth is not None else "—"
-        lines.append(f"| {name} | {mt_round(vol)} | {mt_round(prior)} | {gs} |")
-    lines.append(f"| **Gap ({left} − {right})** | **{mt_round(left_v - right_v)}** | | |")
-    tips = []
-    if left_v >= right_v:
-        tips.append(
-            f"**{left}** leads **{right}** by {mt_round(left_v - right_v)} MT this period."
+    total_v = sum(float(r["_vol"]) for r in ranked) or 0.0
+    for i, r in enumerate(ranked, 1):
+        gs = f"{r['_growth']:+.1f}%" if r["_growth"] is not None else "—"
+        share = (100.0 * float(r["_vol"]) / total_v) if total_v else 0.0
+        lines.append(
+            f"| {i} | {r['name']} | {r['volume_mt']} | {r['prior_mt']} | {gs} | "
+            f"{share:.1f}% |"
         )
-    else:
-        tips.append(
-            f"**{right}** leads **{left}** by {mt_round(right_v - left_v)} MT this period."
+    lines.append(f"| | **Total** | **{mt_round(total_v)}** | | | **100%** |")
+
+    tips: list[str] = []
+    leader, second = ranked[0], ranked[1] if len(ranked) > 1 else ranked[0]
+    gap = float(leader["_vol"]) - float(second["_vol"])
+    tips.append(
+        f"**{leader['name']}** leads with {leader['volume_mt']} MT "
+        f"({(100.0 * float(leader['_vol']) / total_v) if total_v else 0:.1f}% share)"
+        + (
+            f" — ahead of **{second['name']}** by {mt_round(gap)} MT."
+            if leader["name"] != second["name"]
+            else "."
         )
-    if left_g is not None and right_g is not None:
-        if left_g > right_g:
+    )
+    growth_rows = [r for r in ranked if r["_growth"] is not None]
+    if len(growth_rows) >= 2:
+        fastest = max(growth_rows, key=lambda r: float(r["_growth"]))
+        slowest = min(growth_rows, key=lambda r: float(r["_growth"]))
+        if fastest["name"] != slowest["name"]:
             tips.append(
-                f"**{left}** is growing faster YoY ({left_g:+.1f}% vs {right_g:+.1f}%)."
-            )
-        elif right_g > left_g:
-            tips.append(
-                f"**{right}** is growing faster YoY ({right_g:+.1f}% vs {left_g:+.1f}%)."
+                f"**{fastest['name']}** is growing fastest YoY "
+                f"({fastest['_growth']:+.1f}%); **{slowest['name']}** "
+                f"slowest ({slowest['_growth']:+.1f}%)."
             )
         else:
-            tips.append("YoY growth rates are similar.")
+            tips.append("YoY growth rates are similar across the set.")
+
+    left_row = next((r for r in rows_data if r["name"] == names[0]), ranked[0])
+    right_row = next((r for r in rows_data if r["name"] == names[1]), ranked[1])
 
     return {
         "ok": True,
@@ -292,10 +338,27 @@ def compare_segments(
         "metric": metric,
         "period": period_info,
         "filters": filters,
-        "left": {"name": left, "volume_mt": mt_round(left_v), "prior_mt": mt_round(left_p),
-                 "yoy_pct": pct_round(left_g)},
-        "right": {"name": right, "volume_mt": mt_round(right_v), "prior_mt": mt_round(right_p),
-                  "yoy_pct": pct_round(right_g)},
+        "entities": [
+            {
+                "name": r["name"],
+                "volume_mt": r["volume_mt"],
+                "prior_mt": r["prior_mt"],
+                "yoy_pct": r["yoy_pct"],
+            }
+            for r in ranked
+        ],
+        "left": {
+            "name": left_row["name"],
+            "volume_mt": left_row["volume_mt"],
+            "prior_mt": left_row["prior_mt"],
+            "yoy_pct": left_row["yoy_pct"],
+        },
+        "right": {
+            "name": right_row["name"],
+            "volume_mt": right_row["volume_mt"],
+            "prior_mt": right_row["prior_mt"],
+            "yoy_pct": right_row["yoy_pct"],
+        },
         "answer_markdown": _analysis(lines, tips),
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }

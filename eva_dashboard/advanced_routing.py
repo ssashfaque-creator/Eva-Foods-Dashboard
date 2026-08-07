@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from eva_dashboard.client_language import (
+    extract_all_client_types_from_text,
     extract_client_type_from_text,
     extract_oil_type_from_text,
     extract_packing_from_text,
@@ -58,6 +59,7 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
         "exclude_client_types": extract_exclude_client_types(text),
         "left": None,
         "right": None,
+        "entities": None,
         "segment": "city",
         "dimension": "packing_category",
         "group_by": None,
@@ -178,31 +180,40 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
         out["mode"] = "week_over_week"
         return out
 
-    # City / client compare
-    cities = re.findall(
+    # City / client compare (pairwise or multi-way: A vs B vs C)
+    _compare_cue = bool(
+        re.search(r"\bcompar(?:e|ison|ing)\b", t)
+        or re.search(r"\bvs\.?\b|\bversus\b", t)
+    )
+    cities_raw = re.findall(
         r"\b(lahore|karachi|faisalabad|islamabad|multan|peshawar|rawalpindi|"
         r"gujranwala|sialkot|hyderabad|quetta)\b",
         t,
     )
-    if re.search(r"\bcompar(e|ison|ing)\b", t) and len(cities) >= 2:
+    cities: list[str] = []
+    for c in cities_raw:
+        title = c.title()
+        if title not in cities:
+            cities.append(title)
+    if _compare_cue and len(cities) >= 2:
         out["mode"] = "compare_cities"
         out["segment"] = "city"
-        out["left"] = cities[0].title()
-        out["right"] = cities[1].title()
+        out["entities"] = cities
+        out["left"] = cities[0]
+        out["right"] = cities[1]
         if re.search(r"\b(growth|grew|yoy|year over year)\b", t):
             out["metric"] = "growth"
         return out
 
-    if re.search(r"\bcompar(e|ison|ing)\b", t) and re.search(
-        r"\b(imtiaz|distributors?)\b.+\b(imtiaz|distributors?)\b", t
-    ):
+    client_types = extract_all_client_types_from_text(text)
+    if _compare_cue and len(client_types) >= 2:
         out["mode"] = "compare_client_types"
         out["segment"] = "client_type"
-        # order of mention
-        if t.find("imtiaz") < t.find("distribut"):
-            out["left"], out["right"] = "Imtiaz Store", "Eva Distributors"
-        else:
-            out["left"], out["right"] = "Eva Distributors", "Imtiaz Store"
+        out["entities"] = client_types
+        out["left"] = client_types[0]
+        out["right"] = client_types[1]
+        # Don't pin a single client_type filter when comparing types
+        out["client_type"] = None
         if re.search(r"\b(growth|grew|yoy)\b", t):
             out["metric"] = "growth"
         return out
