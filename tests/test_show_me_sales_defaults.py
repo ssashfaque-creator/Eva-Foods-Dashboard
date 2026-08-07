@@ -77,6 +77,41 @@ def _assert_month_ams(out: dict) -> None:
     assert "AMS (6 months)" in md
 
 
+def test_month_ams_uses_single_fetch() -> None:
+    """Regression: AMS enrichment must not scan the DB once per prior month."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            import eva_dashboard.sales_query as sq
+
+            calls = {"n": 0}
+            orig = sq._fetch_lines
+
+            def _counted(*args, **kwargs):
+                calls["n"] += 1
+                return orig(*args, **kwargs)
+
+            sq._fetch_lines = _counted  # type: ignore[assignment]
+            try:
+                out = _dispatch_tool(
+                    "query_sales",
+                    {},
+                    user_text="Show me Eva distributor sales for july",
+                )
+            finally:
+                sq._fetch_lines = orig  # type: ignore[assignment]
+            _assert_month_ams(out)
+            # One extended window fetch for matrix + AMS (was ~19 before v0.4.5)
+            assert calls["n"] <= 2, f"too many _fetch_lines calls: {calls['n']}"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_show_me_party_client_type_city_default_months_ams() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:

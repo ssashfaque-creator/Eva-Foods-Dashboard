@@ -47,6 +47,10 @@ from eva_dashboard.seasonality import expected_month_close
 DEFAULT_MODEL = "gpt-4o-mini"
 MAX_SQL_ROWS = 200
 MAX_TOOL_ROUNDS = 4  # Prefer one structured query_sales call over many SQL rounds
+# Hard cap so a stalled OpenAI call cannot sit for the SDK default (10 minutes).
+OPENAI_TIMEOUT_S = 45.0
+MAX_API_HISTORY_MESSAGES = 12  # recent user/assistant turns only
+MAX_API_ASSISTANT_CHARS = 1600  # drop huge HTML tables from prior turns
 
 _FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|"
@@ -228,7 +232,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.4):
+SPEED & TOOL RULES (v0.4.5):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
 3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
@@ -2459,8 +2463,12 @@ def _looks_period_only_followup(text: str) -> bool:
 
 
 def _last_party_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Find the most recent list_clients / analyze_parties party_spec in tool results."""
+    """Find the most recent list_clients / analyze_parties party_spec."""
     for m in reversed(messages):
+        if m.get("role") == "assistant":
+            spec = (m.get("_eva_followup") or {}).get("party_spec")
+            if spec:
+                return spec
         if m.get("role") != "tool":
             continue
         raw = m.get("content") or ""
@@ -2585,8 +2593,12 @@ def _months_back_from_text(text: str, default: int = 6) -> int:
 
 
 def _last_table_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Find the most recent query_sales table_spec in tool results."""
+    """Find the most recent query_sales table_spec (tool result or Reply meta)."""
     for m in reversed(messages):
+        if m.get("role") == "assistant":
+            spec = (m.get("_eva_followup") or {}).get("table_spec")
+            if spec:
+                return spec
         if m.get("role") != "tool":
             continue
         raw = m.get("content") or ""
@@ -2616,6 +2628,10 @@ def _last_table_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def _last_price_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     for m in reversed(messages):
+        if m.get("role") == "assistant":
+            spec = (m.get("_eva_followup") or {}).get("price_spec")
+            if spec:
+                return spec
         if m.get("role") != "tool":
             continue
         raw = m.get("content") or ""
@@ -2632,6 +2648,22 @@ def _last_price_spec(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
                 "include_price_fetch": bool(payload.get("include_price_fetch")),
             }
     return None
+
+
+def _prune_session_messages(working: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist only user/assistant turns (+ follow-up meta) — drop tool blobs."""
+    out: list[dict[str, Any]] = []
+    for m in working:
+        if m.get("role") not in {"user", "assistant"}:
+            continue
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        entry: dict[str, Any] = {"role": m["role"], "content": m["content"]}
+        if m.get("_eva_followup"):
+            entry["_eva_followup"] = m["_eva_followup"]
+        out.append(entry)
+    return out
 
 
 
@@ -3375,6 +3407,61 @@ def _api_history_message(msg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _compact_assistant_for_api(content: str) -> str:
+    """Keep prior answers short in the API payload (tables are huge HTML)."""
+    text = content or ""
+    if len(text) <= MAX_API_ASSISTANT_CHARS:
+        return text
+    head = text.split("\n", 1)[0][:240].strip()
+    return (
+        f"{head}\n\n"
+        f"[Prior table omitted from history — {len(text)} chars. "
+        "Use Reply / prior_spec for follow-ups on that answer.]\n"
+    )
+
+
+def _working_messages_for_api(working: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build a lean OpenAI payload: system + recent turns; compact old tables.
+
+    Current-turn tool messages are kept intact so the model can read results.
+    """
+    system = next((m for m in working if m.get("role") == "system"), None)
+    # Find start of the current tool round (last assistant with tool_calls,
+    # or keep trailing tool msgs after the last user).
+    last_user_i = max(
+        (i for i, m in enumerate(working) if m.get("role") == "user"),
+        default=-1,
+    )
+    current_tail = working[last_user_i:] if last_user_i >= 0 else []
+    prior = working[:last_user_i] if last_user_i >= 0 else list(working)
+
+    prior_compact: list[dict[str, Any]] = []
+    for m in prior:
+        role = m.get("role")
+        if role == "system":
+            continue
+        if role == "tool":
+            continue
+        if role == "assistant" and m.get("tool_calls") and not (m.get("content") or "").strip():
+            continue
+        if role in {"user", "assistant"}:
+            content = m.get("content") or ""
+            if role == "assistant":
+                content = _compact_assistant_for_api(content)
+            prior_compact.append({"role": role, "content": content})
+    if len(prior_compact) > MAX_API_HISTORY_MESSAGES:
+        prior_compact = prior_compact[-MAX_API_HISTORY_MESSAGES:]
+
+    out: list[dict[str, Any]] = []
+    if system:
+        out.append(_api_history_message(system))
+    out.extend(prior_compact)
+    # Current user + any in-flight assistant/tool messages this turn
+    for m in current_tail:
+        out.append(_api_history_message(m))
+    return out
+
+
 def _attach_followup_meta(
     messages: list[dict[str, Any]],
     *,
@@ -3715,7 +3802,7 @@ def chat_completion(
             "OpenAI package is not installed. Run: pip install openai"
         ) from exc
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_S)
 
     # Drop any prior system message and inject a fresh live briefing + catalog.
     history = [m for m in messages if m.get("role") != "system"]
@@ -3756,14 +3843,23 @@ def chat_completion(
                     "function": {"name": forced_name},
                 }
 
-        api_messages = [_api_history_message(m) for m in working]
-        response = client.chat.completions.create(
-            model=model,
-            messages=api_messages,
-            tools=TOOLS,
-            tool_choice=tool_choice,
-            temperature=0.1,
-        )
+        api_messages = _working_messages_for_api(working)
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=api_messages,
+                tools=TOOLS,
+                tool_choice=tool_choice,
+                temperature=0.1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc).lower()
+            if "timeout" in err or "timed out" in err:
+                raise RuntimeError(
+                    f"OpenAI request timed out after {OPENAI_TIMEOUT_S:.0f}s. "
+                    "Try again — if this keeps happening, check network / API key."
+                ) from exc
+            raise
         choice = response.choices[0]
         msg = choice.message
         tool_calls = msg.tool_calls or []
@@ -3822,7 +3918,7 @@ def chat_completion(
                 price_spec=forced_prior_price_spec or _last_price_spec(working),
                 party_spec=forced_prior_party_spec or _last_party_spec(working),
             )
-            return text, working
+            return text, _prune_session_messages(working)
 
         sales_markdown: str | None = None
         last_result_mode: str | None = None
@@ -3954,10 +4050,11 @@ def chat_completion(
                 or _last_party_spec(working),
             )
             # Fast path: simple show-me → return tool markdown immediately
+            # (OpenAI already chose the tool; skip a second narrative round.)
             if not _wants_gpt_analysis(last_user, result_mode=last_result_mode):
                 working.append({"role": "assistant", "content": sales_markdown})
                 _attach_followup_meta(working, **follow_meta)
-                return sales_markdown, working
+                return sales_markdown, _prune_session_messages(working)
 
             # Slow path: lean analysis-only call (no tools schema, short system)
             if on_status:
@@ -3987,9 +4084,9 @@ def chat_completion(
             final = _compose_tables_plus_analysis(sales_markdown, model_reply)
             working.append({"role": "assistant", "content": final})
             _attach_followup_meta(working, **follow_meta)
-            return final, working
+            return final, _prune_session_messages(working)
 
     return (
         "I hit the tool-call limit before finishing. Please ask a more specific question.",
-        working,
+        _prune_session_messages(working),
     )

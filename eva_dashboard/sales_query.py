@@ -995,6 +995,109 @@ def _build_pivot(
     return _pivot_mt(frame, leaf, col_dim)
 
 
+def _ams_fetch_filters(
+    *,
+    city: str | None = None,
+    business_unit: str | None = None,
+    business_units: list[str] | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    party: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "city": city,
+        "business_unit": business_unit,
+        "business_units": business_units,
+        "oil_type": oil_type,
+        "packing_category": packing_category,
+        "client_type": client_type,
+        "party": party,
+    }
+
+
+def _load_ams_window_frame(
+    *,
+    as_of: date,
+    n_months: int,
+    city: str | None = None,
+    business_unit: str | None = None,
+    business_units: list[str] | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    party: str | None = None,
+    frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """One window covering the N prior full months (reuse ``frame`` when it already covers it)."""
+    n = max(1, int(n_months))
+    ranges = _prior_n_month_ranges(as_of, n)
+    if not ranges:
+        return pd.DataFrame()
+    start, end = ranges[0][0], ranges[-1][1]
+    start_s, end_s = start.isoformat(), end.isoformat()
+    if frame is not None and not frame.empty and "date" in frame.columns:
+        dmin = str(frame["date"].min())[:10]
+        dmax = str(frame["date"].max())[:10]
+        if dmin <= start_s and dmax >= end_s:
+            work = frame.copy()
+            work["_d"] = work["date"].astype(str).str.slice(0, 10)
+            return work[(work["_d"] >= start_s) & (work["_d"] <= end_s)].drop(
+                columns=["_d"]
+            )
+    return _fetch_lines(
+        date_from=start_s,
+        date_to=end_s,
+        **_ams_fetch_filters(
+            city=city,
+            business_unit=business_unit,
+            business_units=business_units,
+            oil_type=oil_type,
+            packing_category=packing_category,
+            client_type=client_type,
+            party=party,
+        ),
+    )
+
+
+def _ams_from_window_frame(
+    frame: pd.DataFrame,
+    *,
+    as_of: date,
+    n_months: int,
+    row_dim: str | None = None,
+) -> tuple[dict[str, float], float]:
+    """Compute per-row AMS map + overall AMS from an already-loaded window frame.
+
+    Returns ``(by_row, total_ams)``. Missing prior months count as 0 in the mean.
+    """
+    n = max(1, int(n_months))
+    ranges = _prior_n_month_ranges(as_of, n)
+    if not ranges:
+        return {}, 0.0
+    month_keys = [f"{start.year:04d}-{start.month:02d}" for start, _ in ranges]
+    if frame is None or frame.empty or "date" not in frame.columns:
+        return {}, 0.0
+
+    work = frame.copy()
+    work["month"] = work["date"].astype(str).str.slice(0, 7)
+    work = work[work["month"].isin(month_keys)]
+    month_totals = (
+        work.groupby("month")["mt"].sum().to_dict() if not work.empty else {}
+    )
+    total_ams = sum(float(month_totals.get(m, 0.0)) for m in month_keys) / float(n)
+
+    by_row: dict[str, float] = {}
+    if row_dim and row_dim in work.columns and not work.empty:
+        grouped = work.groupby([row_dim, "month"])["mt"].sum().reset_index()
+        keys = {str(k) for k in grouped[row_dim].unique()}
+        for key in keys:
+            sub = grouped[grouped[row_dim].astype(str) == key]
+            mt_by_m = {str(r["month"]): float(r["mt"]) for _, r in sub.iterrows()}
+            by_row[key] = sum(mt_by_m.get(m, 0.0) for m in month_keys) / float(n)
+    return by_row, total_ams
+
+
 def _ams_by_row(
     *,
     row_dim: str,
@@ -1007,37 +1110,25 @@ def _ams_by_row(
     client_type: str | None = None,
     party: str | None = None,
     n_months: int = 3,
+    frame: pd.DataFrame | None = None,
 ) -> dict[str, float]:
-    """Mean of the N prior full calendar months' MT by row dimension."""
-    n = max(1, int(n_months))
-    ranges = _prior_n_month_ranges(as_of, n)
-    monthly: list[dict[str, float]] = []
-    keys: set[str] = set()
-    for start, end in ranges:
-        frame = _fetch_lines(
-            date_from=start.isoformat(),
-            date_to=end.isoformat(),
-            city=city,
-            business_unit=business_unit,
-            business_units=business_units,
-            oil_type=oil_type,
-            packing_category=packing_category,
-            client_type=client_type,
-            party=party,
-        )
-        if frame.empty:
-            monthly.append({})
-            continue
-        if row_dim not in frame.columns:
-            monthly.append({})
-            continue
-        grouped = frame.groupby(row_dim)["mt"].sum()
-        totals = {str(k): float(v) for k, v in grouped.items()}
-        keys.update(totals)
-        monthly.append(totals)
-    return {
-        key: sum(m.get(key, 0.0) for m in monthly) / float(n) for key in keys
-    }
+    """Mean of the N prior full calendar months' MT by row dimension (one DB read)."""
+    window = _load_ams_window_frame(
+        as_of=as_of,
+        n_months=n_months,
+        city=city,
+        business_unit=business_unit,
+        business_units=business_units,
+        oil_type=oil_type,
+        packing_category=packing_category,
+        client_type=client_type,
+        party=party,
+        frame=frame,
+    )
+    by_row, _ = _ams_from_window_frame(
+        window, as_of=as_of, n_months=n_months, row_dim=row_dim
+    )
+    return by_row
 
 
 def _ams_total(
@@ -1051,25 +1142,25 @@ def _ams_total(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    frame: pd.DataFrame | None = None,
 ) -> float:
-    """Overall AMS (mean of N prior full months) for the same filter scope."""
-    n = max(1, int(n_months))
-    ranges = _prior_n_month_ranges(as_of, n)
-    totals: list[float] = []
-    for start, end in ranges:
-        frame = _fetch_lines(
-            date_from=start.isoformat(),
-            date_to=end.isoformat(),
-            city=city,
-            business_unit=business_unit,
-            business_units=business_units,
-            oil_type=oil_type,
-            packing_category=packing_category,
-            client_type=client_type,
-            party=party,
-        )
-        totals.append(float(frame["mt"].sum()) if not frame.empty else 0.0)
-    return sum(totals) / float(n)
+    """Overall AMS (mean of N prior full months) for the same filter scope (one DB read)."""
+    window = _load_ams_window_frame(
+        as_of=as_of,
+        n_months=n_months,
+        city=city,
+        business_unit=business_unit,
+        business_units=business_units,
+        oil_type=oil_type,
+        packing_category=packing_category,
+        client_type=client_type,
+        party=party,
+        frame=frame,
+    )
+    _, total = _ams_from_window_frame(
+        window, as_of=as_of, n_months=n_months, row_dim=None
+    )
+    return total
 
 
 def _month_header_label(col: str) -> str:
@@ -1096,8 +1187,13 @@ def _enrich_month_matrix_with_ams(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    lines_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Insert AMS (3 months) / AMS (6 months) before Total on a month matrix."""
+    """Insert AMS (3 months) / AMS (6 months) before Total on a month matrix.
+
+    Uses **one** AMS window query (or reuses ``lines_frame`` when it already
+    covers the lookback) instead of one fetch per prior month.
+    """
     columns = list(matrix.get("columns") or [])
     rows = list(matrix.get("rows") or [])
     if not columns or "Total" not in columns:
@@ -1113,58 +1209,44 @@ def _enrich_month_matrix_with_ams(
     row_dim = str(matrix.get("row_dimension") or "business_unit")
     headers = list(matrix.get("row_headers") or [])
     leaf_dim = headers[-1] if headers else row_dim
+    max_n = 6 if AMS_6_COL in ams_cols else 3
+
+    # Single DB window for the longest AMS lookback; derive 3/6 from it in memory.
+    window = _load_ams_window_frame(
+        as_of=ams_as_of,
+        n_months=max_n,
+        city=city,
+        business_unit=business_unit,
+        business_units=business_units,
+        oil_type=oil_type,
+        packing_category=packing_category,
+        client_type=client_type,
+        party=party,
+        frame=lines_frame,
+    )
 
     ams_maps: dict[str, dict[str, float]] = {}
+    totals_ams: dict[str, float] = {}
     for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
         if label not in ams_cols:
             continue
-        ams_maps[label] = _ams_by_row(
-            row_dim=leaf_dim,
-            as_of=ams_as_of,
-            city=city,
-            business_unit=business_unit,
-            business_units=business_units,
-            oil_type=oil_type,
-            packing_category=packing_category,
-            client_type=client_type,
-            party=party,
-            n_months=n,
+        by_row, total = _ams_from_window_frame(
+            window, as_of=ams_as_of, n_months=n, row_dim=leaf_dim
         )
+        ams_maps[label] = by_row
+        totals_ams[label] = total
 
-    totals_ams = {
-        label: _ams_total(
-            as_of=ams_as_of,
-            n_months=3 if label == AMS_3_COL else 6,
-            city=city,
-            business_unit=business_unit,
-            business_units=business_units,
-            oil_type=oil_type,
-            packing_category=packing_category,
-            client_type=client_type,
-            party=party,
-        )
-        for label in ams_cols
-    }
-
-    # Parent-level AMS maps for hierarchical subtotals
+    # Parent-level AMS maps for hierarchical subtotals (same window, no extra I/O)
     parent_maps: dict[str, dict[str, dict[str, float]]] = {}
     for lv in headers[:-1] if headers else []:
         parent_maps[lv] = {}
         for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
             if label not in ams_cols:
                 continue
-            parent_maps[lv][label] = _ams_by_row(
-                row_dim=lv,
-                as_of=ams_as_of,
-                city=city,
-                business_unit=business_unit,
-                business_units=business_units,
-                oil_type=oil_type,
-                packing_category=packing_category,
-                client_type=client_type,
-                party=party,
-                n_months=n,
+            by_row, _ = _ams_from_window_frame(
+                window, as_of=ams_as_of, n_months=n, row_dim=lv
             )
+            parent_maps[lv][label] = by_row
 
     new_columns: list[str] = []
     for c in columns:
@@ -1180,7 +1262,6 @@ def _enrich_month_matrix_with_ams(
             if kind == "total":
                 row[label] = mt_round(totals_ams[label])
                 continue
-            key = None
             if kind.startswith("subtotal_") and headers:
                 lv = kind.replace("subtotal_", "", 1)
                 raw = str(row.get(lv) or "")
@@ -1700,6 +1781,7 @@ def query_sales(
         col = "city"
 
     # Month-wise: date range = last N months ending at max sales date
+    ams_lookback_start: str | None = None
     if col == "month":
         _, max_d = _sales_date_bounds()
         if max_d is None:
@@ -1708,6 +1790,11 @@ def query_sales(
         start_y, start_m = map(int, labels[0].split("-"))
         d0 = date(start_y, start_m, 1).isoformat()
         d1 = max_d.isoformat()
+        # Extend fetch to cover AMS(6) prior months so matrix + AMS share one query
+        ams_as_of = max_d.replace(day=1)
+        ams_ranges = _prior_n_month_ranges(ams_as_of, 6 if mb >= 6 else 3)
+        if ams_ranges:
+            ams_lookback_start = ams_ranges[0][0].isoformat()
         period_info = {
             "ok": True,
             "date_from": d0,
@@ -1745,8 +1832,12 @@ def query_sales(
     if party_f and col == "client_type":
         col = "city"
 
+    fetch_from = d0
+    if ams_lookback_start and ams_lookback_start < d0:
+        fetch_from = ams_lookback_start
+
     frame = _fetch_lines(
-        date_from=d0,
+        date_from=fetch_from,
         date_to=d1,
         city=city_f,
         business_unit=bu,
@@ -1774,6 +1865,7 @@ def query_sales(
             packing_category=pack,
             client_type=ctype,
             party=party_f,
+            lines_frame=frame,
         )
     else:
         primary = _build_pivot(frame, row_dim, col, row_groups=groups or None)
