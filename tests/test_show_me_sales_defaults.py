@@ -77,6 +77,84 @@ def _assert_month_ams(out: dict) -> None:
     assert "AMS (6 months)" in md
 
 
+def test_fetch_lines_fast_with_large_client_master() -> None:
+    """Regression: expression clients JOIN scanned all clients per sales row."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            init_db()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "('Eva Canola Oil (StandUpPouch)', 'Eva Consumer', "
+                    "'Eva Canola', 'Stand up', '{}', datetime('now'))"
+                )
+                clients = [
+                    (
+                        str(i),
+                        f"Dist {i}",
+                        "Eva Distributors" if i % 3 else "Imtiaz Store",
+                        "Lahore" if i % 2 == 0 else "Karachi",
+                        "Lahore" if i % 2 == 0 else "Karachi",
+                    )
+                    for i in range(2000)
+                ]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "(?,?,?,?,?,'','{}', datetime('now'))",
+                    clients,
+                )
+                rows = []
+                for i in range(8000):
+                    month = 1 + (i % 8)
+                    ci = i % 2000
+                    rows.append(
+                        (
+                            f"big-{i}",
+                            f"2026-{month:02d}-05",
+                            clients[ci][1],
+                            "Eva Canola Oil (StandUpPouch)",
+                            2.0,
+                            2.0,
+                            clients[ci][2],
+                        )
+                    )
+                conn.executemany(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, client_type, payload_json
+                    ) VALUES (NULL, ?, datetime('now'), ?, ?, ?, ?, 'MT', ?, ?, '{}')
+                    """,
+                    rows,
+                )
+                conn.commit()
+
+            import time
+
+            t0 = time.time()
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="Show me Eva distributor sales for july",
+            )
+            elapsed = time.time() - t0
+            _assert_month_ams(out)
+            assert out.get("filters", {}).get("client_type") == "Eva Distributors"
+            # Old join was ~2 minutes at this scale; fast path should be well under 5s
+            assert elapsed < 5.0, f"query_sales too slow: {elapsed:.2f}s"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_month_ams_uses_single_fetch() -> None:
     """Regression: AMS enrichment must not scan the DB once per prior month."""
     previous = os.environ.get("EVA_DATA_DIR")

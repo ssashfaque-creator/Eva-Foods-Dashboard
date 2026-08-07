@@ -32,12 +32,110 @@ AMS_6_COL = "AMS (6 months)"
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round, mt_str
 
+# Legacy expression join — DO NOT use for hot paths. SQLite cannot index
+# lower(trim(replace(...))) and ends up SCANNING all clients per sales row
+# (~55k×5k ≈ minutes). Hot path uses `_clients_lookup` + sales↔category SQL.
 _PARTY_JOIN = """
 LEFT JOIN clients cl
   ON lower(trim(replace(replace(cl.client, '  ', ' '), '  ', ' ')))
    = lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' ')))
 LEFT JOIN category c ON c.product = s.product
 """
+
+_CLIENTS_CACHE: dict[str, dict[str, str]] | None = None
+_CLIENTS_CACHE_SIG: tuple[Any, ...] | None = None
+
+
+def _norm_party_key(value: str | None) -> str:
+    """Normalize party/client names for dictionary joins (spaces/case)."""
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+
+def _clients_lookup() -> dict[str, dict[str, str]]:
+    """Map normalized client name → {city, type, client}. Cached per DB fingerprint."""
+    global _CLIENTS_CACHE, _CLIENTS_CACHE_SIG
+    init_db()
+    with connect() as conn:
+        sig_row = conn.execute(
+            "SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM clients"
+        ).fetchone()
+        sig = (sig_row["n"] if sig_row else 0, sig_row["u"] if sig_row else None)
+        if _CLIENTS_CACHE is not None and _CLIENTS_CACHE_SIG == sig:
+            return _CLIENTS_CACHE
+        rows = conn.execute(
+            "SELECT client, type, city_filter, city FROM clients"
+        ).fetchall()
+    lookup: dict[str, dict[str, str]] = {}
+    for r in rows:
+        key = _norm_party_key(r["client"])
+        if not key:
+            continue
+        city = (r["city_filter"] or r["city"] or "").strip() or "Unmapped"
+        ctype = (r["type"] or "").strip()
+        lookup.setdefault(
+            key,
+            {"client": str(r["client"] or ""), "city": city, "type": ctype},
+        )
+    _CLIENTS_CACHE = lookup
+    _CLIENTS_CACHE_SIG = sig
+    return lookup
+
+
+def _parties_matching(
+    *,
+    city: str | None = None,
+    client_type: str | None = None,
+) -> list[str] | None:
+    """Raw client names matching city and/or type, or None if no such filter."""
+    if not city and not client_type:
+        return None
+    lookup = _clients_lookup()
+    city_key = (city or "").strip().lower()
+    type_key = (client_type or "").strip().lower()
+    names: list[str] = []
+    for meta in lookup.values():
+        if city_key and meta["city"].strip().lower() != city_key:
+            continue
+        if type_key and meta["type"].strip().lower() != type_key:
+            continue
+        if meta["client"]:
+            names.append(meta["client"])
+    return names
+
+
+def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add city / resolved client_type from the clients master (in-memory map)."""
+    if frame.empty:
+        work = frame.copy()
+        if "city" not in work.columns:
+            work["city"] = pd.Series(dtype=object)
+        if "client_type" not in work.columns:
+            work["client_type"] = pd.Series(dtype=object)
+        return work
+    lookup = _clients_lookup()
+    work = frame.copy()
+    keys = work["party"].map(_norm_party_key)
+    sales_types = (
+        work["sales_client_type"].fillna("").astype(str)
+        if "sales_client_type" in work.columns
+        else pd.Series([""] * len(work), index=work.index)
+    )
+    cities: list[str] = []
+    types: list[str] = []
+    for key, st in zip(keys.tolist(), sales_types.tolist()):
+        meta = lookup.get(key) or {}
+        cities.append(meta.get("city") or "Unmapped")
+        master_t = (meta.get("type") or "").strip()
+        sales_t = str(st or "").strip()
+        types.append(master_t or sales_t or "Unmapped")
+    work["city"] = cities
+    work["client_type"] = types
+    if "sales_client_type" in work.columns:
+        work = work.drop(columns=["sales_client_type"])
+    return work
+
 
 MONTH_NAMES = {
     "january": 1,
@@ -423,13 +521,54 @@ def _fetch_lines(
     party: str | None = None,
     excludes: dict[str, list[str]] | None = None,
 ) -> pd.DataFrame:
-    """Pull line-level MT with taxonomy + geography + client type."""
+    """Pull line-level MT with taxonomy + geography + client type.
+
+    Fast path: sales ↔ category in SQL (indexed), then attach city/client_type
+    from an in-memory clients map. Avoids the O(sales×clients) expression JOIN.
+    """
     init_db()
     params: list[Any] = [date_from, date_to]
     where = ["s.date >= ?", "s.date <= ?"]
-    if city:
-        where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
-        params.append(city)
+
+    # Resolve city / client_type to party lists from the clients master (tiny).
+    # Also keep s.client_type filter as a fallback when the master has gaps.
+    if city or client_type:
+        matched = _parties_matching(city=city, client_type=client_type) or []
+        if client_type and not city:
+            # Prefer master list; also allow sales rows tagged with that type
+            # even if the party is missing from clients.
+            where.append(
+                "("
+                + (
+                    f"s.party IN ({','.join('?' for _ in matched)}) OR "
+                    if matched
+                    else "0 OR "
+                )
+                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + ")"
+            )
+            if matched:
+                params.extend(matched)
+            params.append(client_type)
+        elif matched:
+            placeholders = ",".join("?" for _ in matched)
+            where.append(f"s.party IN ({placeholders})")
+            params.extend(matched)
+        else:
+            # No matching clients — return empty quickly
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "product",
+                    "party",
+                    "business_unit",
+                    "oil_type",
+                    "packing_category",
+                    "city",
+                    "client_type",
+                    "mt",
+                ]
+            )
 
     units = [u for u in (business_units or []) if u]
     if not units and business_unit:
@@ -450,17 +589,6 @@ def _fetch_lines(
     if packing_category:
         where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
         params.append(packing_category)
-    if client_type:
-        where.append(
-            """
-            lower(trim(COALESCE(
-              NULLIF(trim(cl.type), ''),
-              NULLIF(trim(s.client_type), ''),
-              'Unmapped'
-            ))) = lower(trim(?))
-            """
-        )
-        params.append(client_type)
     if party:
         where.append(
             "lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
@@ -469,24 +597,11 @@ def _fetch_lines(
         params.append(party)
 
     ex = excludes or {}
-    if ex.get("city"):
-        placeholders = ",".join("?" for _ in ex["city"])
-        where.append(
-            f"lower(trim(COALESCE(cl.city_filter, ''))) NOT IN ({placeholders})"
-        )
-        params.extend(v.lower().strip() for v in ex["city"])
-    if ex.get("client_type"):
-        placeholders = ",".join("?" for _ in ex["client_type"])
-        where.append(
-            f"""
-            lower(trim(COALESCE(
-              NULLIF(trim(cl.type), ''),
-              NULLIF(trim(s.client_type), ''),
-              'Unmapped'
-            ))) NOT IN ({placeholders})
-            """
-        )
-        params.extend(v.lower().strip() for v in ex["client_type"])
+    # City / client_type excludes applied after attach (need resolved dims).
+    post_ex_city = {str(v).strip().lower() for v in (ex.get("city") or []) if v}
+    post_ex_ctype = {
+        str(v).strip().lower() for v in (ex.get("client_type") or []) if v
+    }
     if ex.get("business_unit"):
         placeholders = ",".join("?" for _ in ex["business_unit"])
         where.append(
@@ -509,6 +624,15 @@ def _fetch_lines(
         placeholders = ",".join("?" for _ in ex["product"])
         where.append(f"lower(trim(COALESCE(s.product, ''))) NOT IN ({placeholders})")
         params.extend(v.lower().strip() for v in ex["product"])
+    if ex.get("party"):
+        placeholders = ",".join("?" for _ in ex["party"])
+        where.append(
+            f"lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
+            f"NOT IN ({placeholders})"
+        )
+        params.extend(
+            re.sub(r"\s+", " ", str(v)).strip().lower() for v in ex["party"]
+        )
 
     sql = f"""
     SELECT
@@ -518,12 +642,7 @@ def _fetch_lines(
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
       COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
       COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
-      COALESCE(NULLIF(trim(cl.city_filter), ''), 'Unmapped') AS city,
-      COALESCE(
-        NULLIF(trim(cl.type), ''),
-        NULLIF(trim(s.client_type), ''),
-        'Unmapped'
-      ) AS client_type,
+      COALESCE(NULLIF(trim(s.client_type), ''), '') AS sales_client_type,
       CASE
         WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
         WHEN lower(trim(COALESCE(s.unit,''))) IN ('kg','kgs')
@@ -534,11 +653,34 @@ def _fetch_lines(
         ELSE 0
       END AS mt
     FROM sales s
-    {_PARTY_JOIN}
+    LEFT JOIN category c ON c.product = s.product
     WHERE {' AND '.join(where)}
     """
     with connect() as conn:
-        return pd.read_sql_query(sql, conn, params=params)
+        frame = pd.read_sql_query(sql, conn, params=params)
+
+    frame = _attach_client_dims(frame)
+
+    # Apply city/type filters that need resolved dims (and excludes)
+    if city:
+        ck = city.strip().lower()
+        frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    if client_type:
+        tk = client_type.strip().lower()
+        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+    if post_ex_city:
+        frame = frame[
+            ~frame["city"].astype(str).str.strip().str.lower().isin(post_ex_city)
+        ]
+    if post_ex_ctype:
+        frame = frame[
+            ~frame["client_type"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(post_ex_ctype)
+        ]
+    return frame.reset_index(drop=True)
 
 
 def _pivot_mt(

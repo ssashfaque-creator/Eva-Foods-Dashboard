@@ -232,7 +232,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.5):
+SPEED & TOOL RULES (v0.4.6):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
 3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
