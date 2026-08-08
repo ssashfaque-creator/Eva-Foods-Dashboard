@@ -92,6 +92,7 @@ def _fetch_party_lines(
     date_from: str,
     date_to: str,
     city: str | None = None,
+    zone: str | None = None,
     client_type: str | None = None,
     business_unit: str | None = None,
     oil_type: str | None = None,
@@ -100,17 +101,21 @@ def _fetch_party_lines(
 ) -> pd.DataFrame:
     """Line-level MT with party + taxonomy for analytics.
 
-    Fast path: sales ↔ category in SQL, city/client_type from in-memory clients
-    map — same approach as ``sales_query._fetch_lines`` (avoids O(sales×clients)
-    expression JOIN that hung list_clients / analyze_parties on live DBs).
+    Fast path: sales ↔ category in SQL, city/zone/client_type from in-memory
+    clients map — same approach as ``sales_query._fetch_lines``.
     """
+    from eva_dashboard.geo import normalize_zone
+
     init_db()
     params: list[Any] = [date_from, date_to]
     where = ["s.date >= ?", "s.date <= ?", "s.party IS NOT NULL", "trim(s.party) != ''"]
+    zone_n = normalize_zone(zone) if zone else None
 
-    if city or client_type:
-        matched = _parties_matching(city=city, client_type=client_type) or []
-        if client_type and not city:
+    if city or zone_n or client_type:
+        matched = _parties_matching(
+            city=city, zone=zone_n, client_type=client_type
+        ) or []
+        if client_type and not city and not zone_n:
             where.append(
                 "("
                 + (
@@ -137,6 +142,7 @@ def _fetch_party_lines(
                     "product",
                     "client_type",
                     "city",
+                    "zone",
                     "business_unit",
                     "oil_type",
                     "packing_category",
@@ -178,6 +184,9 @@ def _fetch_party_lines(
     if city:
         ck = city.strip().lower()
         frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    if zone_n:
+        zk = zone_n.strip().lower()
+        frame = frame[frame["zone"].astype(str).str.strip().str.lower() == zk]
     if client_type:
         tk = client_type.strip().lower()
         frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
@@ -187,6 +196,7 @@ def _fetch_party_lines(
 def _first_sale_dates(
     *,
     city: str | None = None,
+    zone: str | None = None,
     client_type: str | None = None,
     business_unit: str | None = None,
     oil_type: str | None = None,
@@ -202,6 +212,7 @@ def _first_sale_dates(
         date_from=min_d.isoformat(),
         date_to=max_d.isoformat(),
         city=city,
+        zone=zone,
         client_type=client_type,
         business_unit=business_unit,
         oil_type=oil_type,
@@ -227,6 +238,7 @@ def _ams_by_party(
     oil_type: str | None,
     packing_category: str | None,
     brand_prefix: str | None,
+    zone: str | None = None,
 ) -> dict[str, float]:
     ranges = _prior_three_month_ranges(as_of)
     monthly: list[dict[str, float]] = []
@@ -236,6 +248,7 @@ def _ams_by_party(
             date_from=start.isoformat(),
             date_to=end.isoformat(),
             city=city,
+            zone=zone,
             client_type=client_type,
             business_unit=business_unit,
             oil_type=oil_type,
@@ -257,6 +270,7 @@ def _ams_by_party(
 def list_clients(
     *,
     city: str | None = None,
+    zone: str | None = None,
     client_type: str | None = None,
     business_unit: str | None = None,
     period: str | None = None,
@@ -265,20 +279,23 @@ def list_clients(
     limit: int = 200,
     include_zero: bool = False,
 ) -> dict[str, Any]:
-    """List clients matching city / client type / BU — not fuzzy name search.
+    """List clients matching city / zone / client type / BU — not fuzzy name search.
 
     ``business_unit`` scopes the volume ranking (who bought that BU) while
     still listing clients in the city/type scope when provided.
     """
+    from eva_dashboard.geo import normalize_zone, resolve_city_zone
+
     city_f = (city or "").strip() or None
+    zone_f = normalize_zone(zone) if zone else None
     ctype = normalize_client_type((client_type or "").strip() or None)
     bu = _normalize_business_unit(business_unit)
-    if not city_f and not ctype and not bu:
+    if not city_f and not zone_f and not ctype and not bu:
         return {
             "ok": False,
             "error": (
-                "Pass city, client_type, and/or business_unit "
-                "(e.g. Lahore + Eva Distributors, or Maan Consumer)."
+                "Pass city, zone, client_type, and/or business_unit "
+                "(e.g. Lahore + Eva Distributors, SOUTH zone, or Maan Consumer)."
             ),
         }
 
@@ -303,8 +320,8 @@ def list_clients(
 
     init_db()
     clients = pd.DataFrame()
-    # BU-only (no city/type): discover buyers from sales — skip full client scan
-    if bu and not city_f and not ctype and d0 and d1:
+    # BU-only (no city/zone/type): discover buyers from sales — skip full client scan
+    if bu and not city_f and not zone_f and not ctype and d0 and d1:
         sales_only = _fetch_party_lines(
             date_from=d0,
             date_to=d1,
@@ -319,15 +336,12 @@ def list_clients(
             clients["client_type"] = ""
             clients["city_filter"] = ""
             clients["city"] = ""
+            clients["zone"] = ""
             clients["inactive"] = ""
     else:
         params: list[Any] = []
         where = ["cl.client IS NOT NULL", "trim(cl.client) != ''"]
-        if city_f:
-            where.append(
-                "lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))"
-            )
-            params.append(city_f)
+        # City/zone resolved in Python (blank/undefined → Karachi/SOUTH)
         if ctype:
             where.append("lower(trim(COALESCE(cl.type, ''))) = lower(trim(?))")
             params.append(ctype)
@@ -345,14 +359,31 @@ def list_clients(
         """
         with connect() as conn:
             clients = pd.read_sql_query(sql, conn, params=params)
+        if not clients.empty:
+            resolved = clients["city_filter"].map(resolve_city_zone)
+            clients["city_filter"] = resolved.map(lambda x: x[0])
+            clients["zone"] = resolved.map(lambda x: x[1])
+            if city_f:
+                ck = city_f.strip().lower()
+                clients = clients[
+                    clients["city_filter"].astype(str).str.strip().str.lower() == ck
+                ]
+            if zone_f:
+                zk = zone_f.strip().lower()
+                clients = clients[
+                    clients["zone"].astype(str).str.strip().str.lower() == zk
+                ]
 
     mt_map: dict[str, float] = {}
-    from_sales_only = bool(bu and not city_f and not ctype and "mt" in clients.columns)
+    from_sales_only = bool(
+        bu and not city_f and not zone_f and not ctype and "mt" in clients.columns
+    )
     if d0 and d1 and not clients.empty and not from_sales_only:
         sales = _fetch_party_lines(
             date_from=d0,
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
         )
@@ -377,6 +408,7 @@ def list_clients(
                 "client_type": r.get("client_type") or ctype or "—",
                 "city_filter": (r.get("city_filter") or None) or None,
                 "city": (r.get("city") or None) or None,
+                "zone": (r.get("zone") or None) or None,
                 "inactive": (r.get("inactive") or None) or None,
                 "mt": mt,
             }
@@ -391,6 +423,8 @@ def list_clients(
         scope_bits.append(f"Client Type **{ctype}**")
     if city_f:
         scope_bits.append(f"City-Filter **{city_f}**")
+    if zone_f:
+        scope_bits.append(f"Zone **{zone_f}**")
     if bu:
         scope_bits.append(f"BU **{bu}**")
     scope = " · ".join(scope_bits) or "clients"
@@ -407,10 +441,15 @@ def list_clients(
         and all(str(r.get("city") or "") in {city_f, ""} for r in rows)
         and all(str(r.get("city_filter") or "") == city_f for r in rows)
     )
+    show_zone = not (
+        zone_f and all(str(r.get("zone") or "") == zone_f for r in rows)
+    )
 
     headers = ["#", "Client"]
     if show_type:
         headers.append("Client Type")
+    if show_zone:
+        headers.append("Zone")
     if show_cf:
         headers.append("City-Filter")
     if show_city:
@@ -426,6 +465,8 @@ def list_clients(
         cells = [str(i), str(r["client"]).replace("|", "/")]
         if show_type:
             cells.append(str(r["client_type"]).replace("|", "/"))
+        if show_zone:
+            cells.append(str(r.get("zone") or "—").replace("|", "/"))
         if show_cf:
             cells.append(str(r["city_filter"] or "—").replace("|", "/"))
         if show_city:
@@ -440,6 +481,7 @@ def list_clients(
         "kind": "list_clients",
         "filters": {
             "city": city_f,
+            "zone": zone_f,
             "client_type": ctype,
             "business_unit": bu,
         },
@@ -458,6 +500,7 @@ def list_clients(
         "mode": "list_clients",
         "filters": {
             "city": city_f,
+            "zone": zone_f,
             "client_type": ctype,
             "business_unit": bu,
         },
@@ -477,6 +520,7 @@ def analyze_parties(
     date_from: str | None = None,
     date_to: str | None = None,
     city: str | None = None,
+    zone: str | None = None,
     client_type: str | None = None,
     business_unit: str | None = None,
     oil_type: str | None = None,
@@ -499,14 +543,17 @@ def analyze_parties(
       segment_mix | geo_share | doing_well | new_parties | lost_parties |
       packing_mix | product_mix | invoices | invoice_mt
 
-    group_by: party (default) | city
+    group_by: party (default) | city | zone
     mix_dimension: packing_category | product (for mix metrics)
     per_party_mix: when True with packing/product_mix, one mix table per party
     sort: desc (default) | asc  — underperformers force asc on % vs AMS
     grown_only: when True with yoy/yoy_ams, keep parties with YoY % > 0
     Default ranking metric is AMS unless the user asks for volume/growth.
     """
+    from eva_dashboard.geo import normalize_zone
+
     city_f = (city or "").strip() or None
+    zone_f = normalize_zone(zone) if zone else None
     ctype = normalize_client_type((client_type or "").strip() or None)
     bu = _normalize_business_unit(business_unit)
     oil = normalize_oil_type((oil_type or "").strip() or None)
@@ -521,7 +568,9 @@ def analyze_parties(
     group = (group_by or "party").strip().lower()
     if group in {"cities", "city_filter"}:
         group = "city"
-    if group not in {"party", "city"}:
+    if group in {"zones", "region", "regions"}:
+        group = "zone"
+    if group not in {"party", "city", "zone"}:
         group = "party"
 
     mix_dim = (mix_dimension or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -655,6 +704,7 @@ def analyze_parties(
 
     filters = {
         "city": city_f,
+        "zone": zone_f,
         "client_type": ctype,
         "business_unit": bu,
         "oil_type": oil,
@@ -726,6 +776,7 @@ def analyze_parties(
             date_from=d0,
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -872,6 +923,7 @@ def analyze_parties(
     if metric_n == "new_parties":
         firsts = _first_sale_dates(
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -882,6 +934,7 @@ def analyze_parties(
             date_from=d0,
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -944,6 +997,7 @@ def analyze_parties(
         ams = _ams_by_party(
             as_of=as_of.replace(day=1),
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -954,6 +1008,7 @@ def analyze_parties(
             date_from=d0,
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -971,6 +1026,7 @@ def analyze_parties(
             date_from=ams_start.isoformat(),
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -1020,6 +1076,7 @@ def analyze_parties(
         date_from=d0,
         date_to=d1,
         city=city_f,
+        zone=zone_f,
         client_type=ctype,
         business_unit=bu if metric_n not in {"share_of_segment", "segment_mix"} else None,
         oil_type=oil if metric_n not in {"share_of_segment", "segment_mix"} else None,
@@ -1038,6 +1095,7 @@ def analyze_parties(
             date_from=d0,
             date_to=d1,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=segment_bu,
             oil_type=segment_oil,
@@ -1096,8 +1154,13 @@ def analyze_parties(
             ),
         )
 
-    # Volume / AMS / vs AMS / doing well / YoY / invoices (party or city)
-    entity_key = "city" if group == "city" else "party"
+    # Volume / AMS / vs AMS / doing well / YoY / invoices (party / city / zone)
+    if group == "zone":
+        entity_key = "zone"
+    elif group == "city":
+        entity_key = "city"
+    else:
+        entity_key = "party"
     if party_frame.empty and metric_n in {"volume", "invoices", "invoice_mt"}:
         return {
             "ok": True,
@@ -1133,16 +1196,17 @@ def analyze_parties(
             inv.groupby(entity_key)["inv_key"].nunique().astype(int).to_dict()
         )
 
-    if group == "city":
-        # AMS by city = mean of prior 3 months' city totals
+    if group in {"city", "zone"}:
+        # AMS by city/zone = mean of prior 3 months' geo totals
         ranges = _prior_three_month_ranges(as_of.replace(day=1))
-        monthly_city: list[dict[str, float]] = []
+        monthly_geo: list[dict[str, float]] = []
         keys: set[str] = set()
         for start, end in ranges:
             cf = _fetch_party_lines(
                 date_from=start.isoformat(),
                 date_to=end.isoformat(),
                 city=city_f,
+                zone=zone_f,
                 client_type=ctype,
                 business_unit=bu,
                 oil_type=oil,
@@ -1150,18 +1214,20 @@ def analyze_parties(
                 brand_prefix=brand_prefix,
             )
             if cf.empty:
-                monthly_city.append({})
+                monthly_geo.append({})
                 continue
             totals = {
-                str(k): float(v) for k, v in cf.groupby("city")["mt"].sum().items()
+                str(k): float(v)
+                for k, v in cf.groupby(entity_key)["mt"].sum().items()
             }
             keys.update(totals)
-            monthly_city.append(totals)
-        ams = {k: sum(m.get(k, 0.0) for m in monthly_city) / 3.0 for k in keys}
+            monthly_geo.append(totals)
+        ams = {k: sum(m.get(k, 0.0) for m in monthly_geo) / 3.0 for k in keys}
     else:
         ams = _ams_by_party(
             as_of=as_of.replace(day=1),
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -1201,6 +1267,7 @@ def analyze_parties(
             date_from=compare_info["date_from"],
             date_to=compare_info["date_to"],
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -1225,6 +1292,7 @@ def analyze_parties(
         prior_ams = _ams_by_party(
             as_of=prior_as_of,
             city=city_f,
+            zone=zone_f,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -1491,10 +1559,11 @@ def analyze_parties(
 def _party_meta(frame: pd.DataFrame, party: str) -> dict[str, Any]:
     part = frame[frame["party"] == party]
     if part.empty:
-        return {"client_type": None, "city": None}
+        return {"client_type": None, "city": None, "zone": None}
     return {
         "client_type": str(part["client_type"].iloc[0]) if "client_type" in part else None,
         "city": str(part["city"].iloc[0]) if "city" in part else None,
+        "zone": str(part["zone"].iloc[0]) if "zone" in part else None,
     }
 
 
@@ -1674,6 +1743,8 @@ def _scope_blurb(filters: dict[str, Any], period: dict[str, Any]) -> str:
     bits = [str(period.get("label") or "")]
     if filters.get("client_type"):
         bits.append(f"**{filters['client_type']}**")
+    if filters.get("zone"):
+        bits.append(f"zone **{filters['zone']}**")
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
     if filters.get("brand"):
@@ -1807,6 +1878,7 @@ def _party_table_result(
             "kind": "analyze_parties",
             "filters": {
                 "city": filters.get("city"),
+                "zone": filters.get("zone"),
                 "client_type": filters.get("client_type"),
                 "business_unit": filters.get("business_unit"),
                 "oil_type": filters.get("oil_type"),
@@ -1820,7 +1892,9 @@ def _party_table_result(
             },
             "metric": metric,
             "limit": len(rows) if rows else 10,
-            "group_by": entity_key if entity_key in {"party", "city"} else "party",
+            "group_by": (
+                entity_key if entity_key in {"party", "city", "zone"} else "party"
+            ),
         },
         "answer_markdown": "\n".join(lines).strip() + "\n",
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
@@ -1986,9 +2060,12 @@ def party_sales(
 
 def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     """Heuristic argument extraction for list_clients / analyze_parties."""
+    from eva_dashboard.geo import extract_zone_from_text
+
     t = (text or "").lower()
     out: dict[str, Any] = {
         "city": extract_city_from_text(text),
+        "zone": extract_zone_from_text(text),
         "client_type": extract_client_type_from_text(text),
         "oil_type": None,
         "business_unit": None,
@@ -2078,12 +2155,17 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     elif re.search(r"\bwhich\b", t) and not re.search(r"\btop\s+\d", t):
         out["limit"] = 10
 
-    # City league
+    # City / zone league
     if re.search(
         r"\b(cities|city league|rank(ed)? cities|top\s+\d+\s+cities|top cities)\b",
         t,
     ):
         out["group_by"] = "city"
+    if re.search(
+        r"\b(zones|zone league|rank(ed)? zones|top\s+zones|by\s+zone)\b",
+        t,
+    ):
+        out["group_by"] = "zone"
 
     # List mode
     if re.search(

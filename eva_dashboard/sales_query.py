@@ -26,13 +26,20 @@ from eva_dashboard.data import (
     price_fetch_per_maund,
     weighted_avg,
 )
+from eva_dashboard.geo import (
+    DEFAULT_CITY,
+    DEFAULT_ZONE,
+    normalize_zone,
+    resolve_city_zone,
+    zone_for_city,
+)
+from eva_dashboard.db import connect, init_db
+from eva_dashboard.fmt import mt_round, mt_str
 
 AMS_3_COL = "AMS (3 months)"
 AMS_6_COL = "AMS (6 months)"
 AMS_PRIOR_3_COL = "AMS prior (3 months)"
 AMS_GROWTH_COL = "AMS growth %"
-from eva_dashboard.db import connect, init_db
-from eva_dashboard.fmt import mt_round, mt_str
 
 # Legacy expression join — DO NOT use for hot paths. SQLite cannot index
 # lower(trim(replace(...))) and ends up SCANNING all clients per sales row
@@ -56,7 +63,10 @@ def _norm_party_key(value: str | None) -> str:
 
 
 def _clients_lookup() -> dict[str, dict[str, str]]:
-    """Map normalized client name → {city, type, client}. Cached per DB fingerprint."""
+    """Map normalized client name → {city, zone, type, client}.
+
+    Blank / undefined City-Filter → Karachi + SOUTH.
+    """
     global _CLIENTS_CACHE, _CLIENTS_CACHE_SIG
     init_db()
     with connect() as conn:
@@ -74,11 +84,17 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
         key = _norm_party_key(r["client"])
         if not key:
             continue
-        city = (r["city_filter"] or r["city"] or "").strip() or "Unmapped"
+        raw_city = (r["city_filter"] or r["city"] or "").strip()
+        city, zone = resolve_city_zone(raw_city)
         ctype = (r["type"] or "").strip()
         lookup.setdefault(
             key,
-            {"client": str(r["client"] or ""), "city": city, "type": ctype},
+            {
+                "client": str(r["client"] or ""),
+                "city": city,
+                "zone": zone,
+                "type": ctype,
+            },
         )
     _CLIENTS_CACHE = lookup
     _CLIENTS_CACHE_SIG = sig
@@ -88,17 +104,21 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
 def _parties_matching(
     *,
     city: str | None = None,
+    zone: str | None = None,
     client_type: str | None = None,
 ) -> list[str] | None:
-    """Raw client names matching city and/or type, or None if no such filter."""
-    if not city and not client_type:
+    """Raw client names matching city/zone/type, or None if no such filter."""
+    if not city and not zone and not client_type:
         return None
     lookup = _clients_lookup()
     city_key = (city or "").strip().lower()
+    zone_key = (zone or "").strip().lower()
     type_key = (client_type or "").strip().lower()
     names: list[str] = []
     for meta in lookup.values():
         if city_key and meta["city"].strip().lower() != city_key:
+            continue
+        if zone_key and str(meta.get("zone") or "").strip().lower() != zone_key:
             continue
         if type_key and meta["type"].strip().lower() != type_key:
             continue
@@ -108,11 +128,13 @@ def _parties_matching(
 
 
 def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add city / resolved client_type from the clients master (in-memory map)."""
+    """Add city / zone / resolved client_type from the clients master."""
     if frame.empty:
         work = frame.copy()
         if "city" not in work.columns:
             work["city"] = pd.Series(dtype=object)
+        if "zone" not in work.columns:
+            work["zone"] = pd.Series(dtype=object)
         if "client_type" not in work.columns:
             work["client_type"] = pd.Series(dtype=object)
         return work
@@ -125,14 +147,19 @@ def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
         else pd.Series([""] * len(work), index=work.index)
     )
     cities: list[str] = []
+    zones: list[str] = []
     types: list[str] = []
     for key, st in zip(keys.tolist(), sales_types.tolist()):
         meta = lookup.get(key) or {}
-        cities.append(meta.get("city") or "Unmapped")
+        city = meta.get("city") or DEFAULT_CITY
+        zone = meta.get("zone") or zone_for_city(city) or DEFAULT_ZONE
+        cities.append(city)
+        zones.append(zone)
         master_t = (meta.get("type") or "").strip()
         sales_t = str(st or "").strip()
         types.append(master_t or sales_t or "Unmapped")
     work["city"] = cities
+    work["zone"] = zones
     work["client_type"] = types
     if "sales_client_type" in work.columns:
         work = work.drop(columns=["sales_client_type"])
@@ -460,6 +487,7 @@ _VALID_ROW_DIMS = {
     "packing_category",
     "product",
     "city",
+    "zone",
     "client_type",
     "party",
 }
@@ -499,6 +527,10 @@ def normalize_row_dimension(value: str | None) -> str | None:
         "items": "product",
         "city": "city",
         "cities": "city",
+        "zone": "zone",
+        "zones": "zone",
+        "region": "zone",
+        "regions": "zone",
         "client type": "client_type",
         "client": "client_type",
         "clients": "client_type",
@@ -521,6 +553,7 @@ def _fetch_lines(
     date_from: str,
     date_to: str,
     city: str | None = None,
+    zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
@@ -531,18 +564,21 @@ def _fetch_lines(
 ) -> pd.DataFrame:
     """Pull line-level MT with taxonomy + geography + client type.
 
-    Fast path: sales ↔ category in SQL (indexed), then attach city/client_type
+    Fast path: sales ↔ category in SQL (indexed), then attach city/zone/client_type
     from an in-memory clients map. Avoids the O(sales×clients) expression JOIN.
     """
     init_db()
     params: list[Any] = [date_from, date_to]
     where = ["s.date >= ?", "s.date <= ?"]
+    zone_n = normalize_zone(zone) if zone else None
 
-    # Resolve city / client_type to party lists from the clients master (tiny).
+    # Resolve city / zone / client_type to party lists from the clients master.
     # Also keep s.client_type filter as a fallback when the master has gaps.
-    if city or client_type:
-        matched = _parties_matching(city=city, client_type=client_type) or []
-        if client_type and not city:
+    if city or zone_n or client_type:
+        matched = _parties_matching(
+            city=city, zone=zone_n, client_type=client_type
+        ) or []
+        if client_type and not city and not zone_n:
             # Prefer master list; also allow sales rows tagged with that type
             # even if the party is missing from clients.
             where.append(
@@ -573,6 +609,7 @@ def _fetch_lines(
                     "oil_type",
                     "packing_category",
                     "city",
+                    "zone",
                     "client_type",
                     "mt",
                 ]
@@ -605,8 +642,9 @@ def _fetch_lines(
         params.append(party)
 
     ex = excludes or {}
-    # City / client_type excludes applied after attach (need resolved dims).
+    # City / zone / client_type excludes applied after attach (need resolved dims).
     post_ex_city = {str(v).strip().lower() for v in (ex.get("city") or []) if v}
+    post_ex_zone = {str(v).strip().lower() for v in (ex.get("zone") or []) if v}
     post_ex_ctype = {
         str(v).strip().lower() for v in (ex.get("client_type") or []) if v
     }
@@ -669,16 +707,23 @@ def _fetch_lines(
 
     frame = _attach_client_dims(frame)
 
-    # Apply city/type filters that need resolved dims (and excludes)
+    # Apply city/zone/type filters that need resolved dims (and excludes)
     if city:
         ck = city.strip().lower()
         frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    if zone_n:
+        zk = zone_n.strip().lower()
+        frame = frame[frame["zone"].astype(str).str.strip().str.lower() == zk]
     if client_type:
         tk = client_type.strip().lower()
         frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
     if post_ex_city:
         frame = frame[
             ~frame["city"].astype(str).str.strip().str.lower().isin(post_ex_city)
+        ]
+    if post_ex_zone:
+        frame = frame[
+            ~frame["zone"].astype(str).str.strip().str.lower().isin(post_ex_zone)
         ]
     if post_ex_ctype:
         frame = frame[
@@ -867,6 +912,7 @@ def _pivot_months(
 _ROW_HIERARCHY: dict[str, list[str]] = {
     "packing_category": ["business_unit", "packing_category"],
     "product": ["business_unit", "packing_category", "product"],
+    "city": ["zone", "city"],
 }
 
 _ROW_HEADER_LABELS = {
@@ -875,6 +921,7 @@ _ROW_HEADER_LABELS = {
     "product": "SKU",
     "oil_type": "Oil Type",
     "city": "City",
+    "zone": "Zone",
     "client_type": "Client Type",
     "party": "Distributor",
 }
@@ -1149,6 +1196,7 @@ def _build_pivot(
 def _ams_fetch_filters(
     *,
     city: str | None = None,
+    zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
@@ -1158,6 +1206,7 @@ def _ams_fetch_filters(
 ) -> dict[str, Any]:
     return {
         "city": city,
+        "zone": zone,
         "business_unit": business_unit,
         "business_units": business_units,
         "oil_type": oil_type,
@@ -1172,6 +1221,7 @@ def _load_ams_window_frame(
     as_of: date,
     n_months: int,
     city: str | None = None,
+    zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
@@ -1201,6 +1251,7 @@ def _load_ams_window_frame(
         date_to=end_s,
         **_ams_fetch_filters(
             city=city,
+            zone=zone,
             business_unit=business_unit,
             business_units=business_units,
             oil_type=oil_type,
@@ -1332,6 +1383,7 @@ def _enrich_month_matrix_with_ams(
     as_of: date,
     months_back: int,
     city: str | None = None,
+    zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
@@ -1376,6 +1428,7 @@ def _enrich_month_matrix_with_ams(
         as_of=ams_as_of,
         n_months=max_n,
         city=city,
+        zone=zone,
         business_unit=business_unit,
         business_units=business_units,
         oil_type=oil_type,
@@ -1793,6 +1846,7 @@ def query_sales(
     date_from: str | None = None,
     date_to: str | None = None,
     city: str | None = None,
+    zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
@@ -1819,9 +1873,9 @@ def query_sales(
       Oil Type set → Packing; Packing set → Product
 
     Explicit ``row_dimension`` (follow-ups): business_unit | oil_type |
-    packing_category | product | city | client_type — keeps prior filters/columns.
+    packing_category | product | city | zone | client_type — keeps prior filters.
 
-    ``row_groups``: optional leading group dims (e.g. city above packing).
+    ``row_groups``: optional leading group dims (e.g. zone above city).
 
     ``clear_filters``: drop inherited filters when a follow-up promotes that
     dimension to rows/columns (e.g. group by city clears city=Lahore).
@@ -1836,6 +1890,7 @@ def query_sales(
       month → last ``months_back`` months as columns + AMS (3/6 months)
 
     client_type: filter to one Client Type (aliases resolved), e.g. Imtiaz Store.
+    zone: SOUTH | CENTRAL | NORTH (City-Filter → zone map).
 
     prior_spec: previous table_spec for follow-ups like "add Eva Bulk" /
     "show by product" / "SKU wise" / "group by city" / "remove Lahore".
@@ -1856,6 +1911,7 @@ def query_sales(
     oil = normalize_oil_type((oil_type or "").strip() or None)
     pack = normalize_packing_category((packing_category or "").strip() or None)
     city_f = (city or "").strip() or None
+    zone_f = normalize_zone(zone)
     ctype = normalize_client_type((client_type or "").strip() or None)
     party_f = (party or "").strip() or None
     col = (columns or "client_type").strip().lower().replace(" ", "_")
@@ -1896,6 +1952,8 @@ def query_sales(
                     units.insert(0, nu)
         if not city_f and "city" not in clear:
             city_f = prior_filters.get("city")
+        if not zone_f and "zone" not in clear:
+            zone_f = normalize_zone(prior_filters.get("zone"))
         if not oil and "oil_type" not in clear:
             oil = prior_filters.get("oil_type") or None
         if not pack and "packing_category" not in clear:
@@ -1964,6 +2022,8 @@ def query_sales(
     # Apply clears after inherit (regroup promoted a filter to a dimension)
     if "city" in clear:
         city_f = None
+    if "zone" in clear:
+        zone_f = None
     if "client_type" in clear:
         ctype = None
     if "oil_type" in clear:
@@ -1976,14 +2036,19 @@ def query_sales(
         col = "client_type"
     if col in {"cities"}:
         col = "city"
+    if col in {"zones", "region", "regions"}:
+        col = "zone"
     if col in {"months", "monthly", "month_wise", "monthwise"}:
         col = "month"
-    if col not in {"client_type", "city", "month"}:
+    if col not in {"client_type", "city", "zone", "month"}:
         col = "client_type"
 
     # When filtering to one client type, client_type columns are useless → city
     if ctype and col == "client_type":
         col = "city"
+    # City is more specific than zone — don't AND a sticky zone against a city
+    if city_f:
+        zone_f = None
 
     # Month-wise: date range = last N months ending at max sales date
     ams_lookback_start: str | None = None
@@ -2045,6 +2110,7 @@ def query_sales(
         date_from=fetch_from,
         date_to=d1,
         city=city_f,
+        zone=zone_f,
         business_unit=bu,
         business_units=units if len(units) > 1 else None,
         oil_type=oil,
@@ -2064,6 +2130,7 @@ def query_sales(
             as_of=as_of_ams,
             months_back=mb,
             city=city_f,
+            zone=zone_f,
             business_unit=bu,
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
@@ -2109,6 +2176,7 @@ def query_sales(
         },
         "filters": {
             "city": city_f,
+            "zone": zone_f,
             "business_unit": bu,
             "oil_type": oil,
             "packing_category": pack,
@@ -2728,6 +2796,8 @@ def _filter_blurb(
         )
     if filters.get("party"):
         bits.append(f"party **{filters['party']}**")
+    if filters.get("zone"):
+        bits.append(f"zone **{filters['zone']}**")
     if filters.get("city"):
         bits.append(f"city **{filters['city']}**")
     if filters.get("client_type"):

@@ -63,6 +63,12 @@ Every category upload **replaces** the whole table.
 | `inactive` | `Y` / blank |
 | `payload_json` | Full Excel row (Locality, Zone, CrDays, PaymentType, …) |
 
+**Zones (app logic, not a DB column):** each City-Filter maps to
+`SOUTH` / `CENTRAL` / `NORTH` via `eva_dashboard/geo.py`.
+Blank, unmapped, or `undefined` City-Filter → **Karachi** → **SOUTH**.
+Chatbot can filter/pivot by `zone` the same way as `city`; after a zone
+table, “city wise” nests City under Zone.
+
 ### `product_cost_lines` / `packing_cost_lines`
 Append-only historical cost source lines.
 

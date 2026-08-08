@@ -37,6 +37,13 @@ from eva_dashboard.product_language import (
     product_sales,
     resolve_product_language,
 )
+from eva_dashboard.geo import (
+    DEFAULT_CITY,
+    DEFAULT_ZONE,
+    ZONES,
+    extract_zone_from_text,
+    normalize_zone,
+)
 from eva_dashboard.sales_query import (
     check_segment_inclusion,
     normalize_row_dimension,
@@ -237,14 +244,18 @@ def system_prompt() -> str:
 SPEED & TOOL RULES (v0.4.7):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
 2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
-3. Geography = City-Filter (`city`). Always use the period label returned by the tool.
+3. Geography = City-Filter (`city`) or Zone (`SOUTH` / `CENTRAL` / `NORTH`).
+   Blank/unmapped/undefined City-Filter defaults to Karachi → SOUTH.
 4. Read-only. Paste tool `answer_markdown` tables verbatim.
 5. ### Analysis is written by you from the tool table (quality commercial insight) —
    never invent numbers; never paste generic canned filler.
 
 DATA MODEL (filters you set; tools build tables):
 - Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
-- Client hierarchy: Client Type → Party (named client). City = City-Filter on clients.
+- Client hierarchy: Client Type → Party (named client).
+  City = City-Filter on clients; Zone = SOUTH/CENTRAL/NORTH mapped from city.
+- Geography: use `city` or `zone` like each other. "South zone sales" → filter zone=SOUTH.
+  After a zone table, "city wise" → cities nested under Zone (first column Zone, then City).
 - Channel = Client Type (trade channel). "Which channels grew/declined" → client_type
   rows with Volume + AMS + % vs AMS (not packing, not party list).
 - Client-type aliases (set `client_type`, never invent a Business Unit for these):
@@ -284,6 +295,8 @@ DEFAULTS (tools also enforce these):
   Spoken "product" / "product wise" / "by product" → Packing Category (never SKU).
   Only "SKU" / "SKU wise" / "break it down further" (from packing) → individual SKU.
 - Columns: client_type | city | month. Tables include row + column totals.
+- Zones: SOUTH, CENTRAL, NORTH. "zone wise" / "by zone" → row_dimension=zone.
+  "city wise" after a zone view → row_dimension=city with zone grouping.
 - [FOLLOW-UP …] / Reply: reuse that answer's filters via prior_spec (same grain unless asked
   to regroup, drill, remove, include/combine, list individuals, sold-to, or YoY-compare).
 
@@ -692,6 +705,13 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "City-Filter filter, e.g. Lahore",
                     },
+                    "zone": {
+                        "type": "string",
+                        "description": (
+                            "Geography zone: SOUTH, CENTRAL, or NORTH "
+                            "(mapped from City-Filter; blank city → Karachi/SOUTH)"
+                        ),
+                    },
                     "business_unit": {
                         "type": "string",
                         "description": "e.g. Eva Consumer, Eva Bulk, Maan Consumer",
@@ -722,15 +742,22 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "Override rows: business_unit | oil_type | "
-                            "packing_category | product. Spoken product / "
+                            "packing_category | product | city | zone | "
+                            "client_type | party. Spoken product / "
                             "product-wise / by product → packing_category. "
-                            "Only SKU wise / break down further → product."
+                            "Only SKU wise / break down further → product. "
+                            "zone wise → zone; city wise after zone → city "
+                            "nested under zone."
                         ),
                         "enum": [
                             "business_unit",
                             "oil_type",
                             "packing_category",
                             "product",
+                            "city",
+                            "zone",
+                            "client_type",
+                            "party",
                         ],
                     },
                     "columns": {
@@ -796,15 +823,20 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "list_clients",
             "description": (
-                "List clients by City-Filter and/or Client Type, optionally "
-                "filtered to a Business Unit (who bought / sold to). "
-                "Use for 'who are my distributors in Lahore?' and "
+                "List clients by City-Filter, Zone (SOUTH/CENTRAL/NORTH), "
+                "and/or Client Type, optionally filtered to a Business Unit "
+                "(who bought / sold to). Use for 'who are my distributors in "
+                "Lahore?', 'SOUTH zone distributors', and "
                 "'which distributor was Maan Consumer sold to'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "city": {"type": "string"},
+                    "zone": {
+                        "type": "string",
+                        "description": "SOUTH, CENTRAL, or NORTH",
+                    },
                     "client_type": {"type": "string"},
                     "business_unit": {
                         "type": "string",
@@ -827,11 +859,11 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "analyze_parties",
             "description": (
-                "Rank parties/cities or answer AMS, underperformers, new/lost, "
-                "packing/SKU mix, invoices, share, YoY. Default rank metric = AMS. "
-                "Examples: top 5 distributors for Eva VTF; poorly in Lahore; "
-                "new parties last 6 months; product mix for Imtiaz; city league; "
-                "growth in July."
+                "Rank parties/cities/zones or answer AMS, underperformers, "
+                "new/lost, packing/SKU mix, invoices, share, YoY. Default rank "
+                "metric = AMS. Examples: top 5 distributors for Eva VTF; poorly "
+                "in Lahore; SOUTH zone AMS; new parties last 6 months; product "
+                "mix for Imtiaz; city league; zone league; growth in July."
             ),
             "parameters": {
                 "type": "object",
@@ -840,6 +872,10 @@ TOOLS: list[dict[str, Any]] = [
                     "date_from": {"type": "string"},
                     "date_to": {"type": "string"},
                     "city": {"type": "string"},
+                    "zone": {
+                        "type": "string",
+                        "description": "SOUTH, CENTRAL, or NORTH",
+                    },
                     "client_type": {"type": "string"},
                     "business_unit": {"type": "string"},
                     "oil_type": {"type": "string"},
@@ -868,7 +904,7 @@ TOOLS: list[dict[str, Any]] = [
                     "share_city": {"type": "string"},
                     "group_by": {
                         "type": "string",
-                        "enum": ["party", "city"],
+                        "enum": ["party", "city", "zone"],
                     },
                     "mix_dimension": {
                         "type": "string",
@@ -1696,6 +1732,10 @@ _STRUCT_DIM_PHRASES: list[tuple[str, str]] = [
     ("sku", "product"),
     ("cities", "city"),
     ("city", "city"),
+    ("zones", "zone"),
+    ("zone", "zone"),
+    ("regions", "zone"),
+    ("region", "zone"),
     ("months", "month"),
     ("month", "month"),
     ("bu", "business_unit"),
@@ -1803,6 +1843,9 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
 
     from eva_dashboard.party_analytics import extract_city_from_text
 
+    zone = extract_zone_from_text(raw) or normalize_zone(raw)
+    if zone:
+        return ("zone", zone)
     city = extract_city_from_text(raw)
     if city:
         return ("city", city)
@@ -1937,9 +1980,19 @@ def resolve_remove_request(
 
 
 def extract_regroup_dimension(text: str) -> str | None:
-    """Which dimension the user wants to group by (city, client_type, …)."""
+    """Which dimension the user wants to group by (city, zone, client_type, …)."""
     t = (text or "").lower()
     patterns: list[tuple[str, str]] = [
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
+            r"organise\s+by|organize\s+by)\s+(zones?|regions?)\b",
+            "zone",
+        ),
+        (
+            r"\b(zone[- ]?wise|by\s+zone|zones?\s+wise|show\s+zone\s+wise|"
+            r"region[- ]?wise|by\s+region)\b",
+            "zone",
+        ),
         (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
             r"organise\s+by|organize\s+by)\s+(cities|city)\b",
@@ -2082,6 +2135,8 @@ def resolve_regroup_request(
     clear: list[str] = []
     if dim == "city" and pf.get("city"):
         clear.append("city")
+    if dim == "zone" and pf.get("zone"):
+        clear.append("zone")
     if dim == "client_type" and pf.get("client_type"):
         clear.append("client_type")
     if dim == "oil_type" and pf.get("oil_type"):
@@ -2101,11 +2156,15 @@ def resolve_regroup_request(
 
     nestable = {"packing_category", "product", "business_unit", "oil_type"}
     if axis == "row":
-        if (
+        # After a zone table, "city wise" → Zone then City
+        if prior_row == "zone" and dim == "city":
+            out["row_dimension"] = "city"
+            out["row_groups"] = ["zone"]
+        elif (
             prior_row
             and prior_row != dim
             and prior_row in nestable
-            and dim in {"city", "client_type", "business_unit"}
+            and dim in {"city", "zone", "client_type", "business_unit"}
         ):
             out["row_dimension"] = prior_row
             out["row_groups"] = [dim]
@@ -2164,6 +2223,14 @@ def resolve_row_dimension_request(
     # Business Unit
     if re.search(r"\b(by business unit|by bu\b|show by bu|business unit break)\b", t):
         return "business_unit"
+
+    # Zones / regions as rows
+    if re.search(
+        r"\b(by\s+zones?|zone[- ]?wise|show\s+by\s+zone|zones?\s+wise|"
+        r"by\s+regions?|region[- ]?wise)\b",
+        t,
+    ):
+        return "zone"
 
     # Channels / client types as rows
     if re.search(
@@ -2643,6 +2710,8 @@ def _party_filters_from_prior(
     # National / all-over Pakistan asks must not keep a sticky city
     if pf.get("city") and not _looks_national_scope(user_text):
         out["city"] = pf["city"]
+    if pf.get("zone") and not _looks_national_scope(user_text):
+        out["zone"] = pf["zone"]
     if pf.get("oil_type"):
         out["oil_type"] = pf["oil_type"]
     if pf.get("packing_category"):
@@ -2910,6 +2979,7 @@ def _replay_party_spec(
             date_from=d0,
             date_to=d1,
             city=filters.get("city"),
+            zone=normalize_zone(filters.get("zone")),
             client_type=filters.get("client_type"),
             business_unit=filters.get("business_unit"),
             oil_type=filters.get("oil_type"),
@@ -2920,6 +2990,7 @@ def _replay_party_spec(
         )
     return list_clients(
         city=filters.get("city"),
+        zone=normalize_zone(filters.get("zone")),
         client_type=filters.get("client_type"),
         business_unit=filters.get("business_unit"),
         period=p_phrase,
@@ -3379,16 +3450,25 @@ def _dispatch_which_parties(
         or inferred.get("city")
         or extract_city_from_text(user_text)
     )
+    zone_from_text = normalize_zone(
+        args.get("zone")
+        or inferred.get("zone")
+        or extract_zone_from_text(user_text)
+    )
     prior_ctype = normalize_client_type(prior_ctx.get("client_type"))
     # Switching client type (Distributors → Imtiaz) must not keep prior city
     if _looks_national_scope(user_text):
         city = None
+        zone = None
     elif city_from_text:
         city = city_from_text
+        zone = zone_from_text or prior_ctx.get("zone")
     elif ctype and prior_ctype and ctype != prior_ctype:
         city = None
+        zone = zone_from_text
     else:
         city = prior_ctx.get("city")
+        zone = zone_from_text or prior_ctx.get("zone")
     units = _extract_business_units_from_text(user_text)
     bu = (
         units[0]
@@ -3426,6 +3506,7 @@ def _dispatch_which_parties(
             date_from=date_from,
             date_to=date_to,
             city=city,
+            zone=zone,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -3441,6 +3522,7 @@ def _dispatch_which_parties(
         months_back = int((prior_spec or {}).get("months_back") or 6)
         return query_sales(
             city=city,
+            zone=zone,
             client_type=ctype,
             business_unit=bu,
             oil_type=oil,
@@ -3458,6 +3540,7 @@ def _dispatch_which_parties(
 
     return list_clients(
         city=city,
+        zone=zone,
         client_type=ctype,
         business_unit=bu,
         period=period,
@@ -3551,8 +3634,17 @@ def _dispatch_tool(
             or extract_city_from_text(user_text)
             or prior_ctx.get("city")
         )
+        zone = normalize_zone(
+            arguments.get("zone")
+            or extract_zone_from_text(user_text)
+            or prior_ctx.get("zone")
+        )
+        if _looks_national_scope(user_text):
+            city = None
+            zone = None
         return list_clients(
             city=city,
+            zone=zone,
             client_type=ctype,
             business_unit=bu,
             period=(
@@ -3784,14 +3876,20 @@ def _dispatch_tool(
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
         city_arg = arguments.get("city") or extract_city_from_text(user_text)
+        zone_arg = normalize_zone(
+            arguments.get("zone") or extract_zone_from_text(user_text)
+        )
         period_arg = arguments.get("period") or _extract_period_phrase(user_text)
 
-        # National / all-over Pakistan → drop sticky city
+        # National / all-over Pakistan → drop sticky city (and zone)
         if _looks_national_scope(user_text):
             city_arg = None
+            zone_arg = None
             clear_filters = list(clear_filters or [])
             if "city" not in clear_filters:
                 clear_filters.append("city")
+            if "zone" not in clear_filters:
+                clear_filters.append("zone")
 
         # Same format with a new client type: keep grain, clear prior BU filter
         if is_same_format and ctype and use_prior:
@@ -3830,12 +3928,14 @@ def _dispatch_tool(
             if not _extract_business_units_from_text(user_text):
                 uniq = []
 
-        # Drop model-invented BUs when user scoped by client type and/or city only.
+        # Drop model-invented BUs when user scoped by client type/city/zone only.
         mentioned_units = (
             _extract_business_units_from_text(user_text)
             + _companion_business_units(user_text, prior_spec)
         )
-        scoped_filter_only = bool((ctype or city_arg) and not mentioned_units)
+        scoped_filter_only = bool(
+            (ctype or city_arg or zone_arg) and not mentioned_units
+        )
         if (scoped_filter_only or (is_drill and use_prior and not mentioned_units)) and (
             not is_combine and not is_regroup and not is_remove
         ):
@@ -3880,11 +3980,17 @@ def _dispatch_tool(
         ):
             model_prior = None
 
+        # Regroup / remove: do not invent zone from short follow-up unless spoken
+        if is_regroup or is_remove:
+            if not extract_zone_from_text(user_text):
+                zone_arg = None
+
         return query_sales(
             period=period_arg,
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
             city=city_arg,
+            zone=zone_arg,
             business_unit=bu_param,
             business_units=bus_param,
             oil_type=oil,
@@ -3907,6 +4013,11 @@ def _dispatch_tool(
             inferred = infer_party_analytics_from_text(user_text)
             return list_clients(
                 city=inferred.get("city") or arguments.get("city"),
+                zone=normalize_zone(
+                    inferred.get("zone")
+                    or arguments.get("zone")
+                    or extract_zone_from_text(user_text)
+                ),
                 client_type=inferred.get("client_type")
                 or normalize_client_type(arguments.get("client_type")),
                 limit=int(arguments.get("limit") or inferred.get("limit") or 200),
@@ -3948,6 +4059,15 @@ def _dispatch_tool(
             or inferred.get("city")
             or prior_ctx.get("city")
         )
+        zone = normalize_zone(
+            arguments.get("zone")
+            or inferred.get("zone")
+            or extract_zone_from_text(user_text)
+            or prior_ctx.get("zone")
+        )
+        if _looks_national_scope(user_text):
+            city = None
+            zone = None
         ctype = normalize_client_type(
             arguments.get("client_type")
             or inferred.get("client_type")
@@ -3968,6 +4088,7 @@ def _dispatch_tool(
         )
         return list_clients(
             city=city,
+            zone=zone,
             client_type=ctype,
             business_unit=bu,
             period=period
@@ -4085,6 +4206,20 @@ def _dispatch_tool(
                 or prior_ctx.get("city")
             )
         )
+        zone_arg = (
+            None
+            if _looks_national_scope(user_text)
+            else normalize_zone(
+                extract_zone_from_text(user_text)
+                or inferred.get("zone")
+                or (
+                    None
+                    if _looks_party_growth_rank(user_text)
+                    else arguments.get("zone")
+                )
+                or prior_ctx.get("zone")
+            )
+        )
         return analyze_parties(
             period=arguments.get("period")
             or inferred.get("period")
@@ -4092,6 +4227,7 @@ def _dispatch_tool(
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             city=city_arg,
+            zone=zone_arg,
             client_type=normalize_client_type(
                 arguments.get("client_type")
                 or inferred.get("client_type")
@@ -4267,6 +4403,7 @@ def _looks_factual(text: str) -> bool:
         "oil type", "packing", "expected", "forecast", "yoy", "wow",
         "week over", "exclude", "without", "remove", "city wise", "sku wise",
         "pakistan", "nationwide", "national", "all over",
+        "zone", "zones", "south", "central", "north", "region",
         # All trade channels / client types
         "channel", "metro", "chase", "spar", "gelani", "panda", "food panda",
         "csd", "canteen", "online", "lmt", "active", "selling", "sells",
