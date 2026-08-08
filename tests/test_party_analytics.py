@@ -503,7 +503,7 @@ def test_infer_new_lost_poor_mix_rank_defaults() -> None:
     growth = infer_party_analytics_from_text(
         "Show me distributors by top sales growth in July"
     )
-    assert growth["metric"] == "yoy"
+    assert growth["metric"] == "ams_growth"
     assert growth["period"] == "July" or (
         growth["period"] and "july" in growth["period"].lower()
     )

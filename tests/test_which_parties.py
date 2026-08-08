@@ -95,25 +95,24 @@ def test_selling_maan_inherits_prior_and_filters_bu() -> None:
             q = "which distributor is selling maan"
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "list_clients"
+                == "query_sales"
             )
-            assert suggest_preferred_tool(q, prior_table_spec=prior) == "list_clients"
+            assert suggest_preferred_tool(q, prior_table_spec=prior) == "query_sales"
             out = _dispatch_tool(
-                "query_sales",
+                "list_clients",
                 {},
                 user_text=q,
                 prior_spec=prior,
             )
             assert out.get("ok") is True
-            assert out.get("mode") == "list_clients"
+            assert out.get("row_dimension") == "party"
+            assert out.get("column_dimension") == "month"
             assert out.get("filters", {}).get("city") == "Karachi"
             assert out.get("filters", {}).get("client_type") == "Eva Distributors"
             assert out.get("filters", {}).get("business_unit") == "Maan Consumer"
-            clients = [c["client"] for c in (out.get("clients") or [])]
-            assert "Gamma Dist" in clients
-            assert "Alpha Dist" in clients
-            # Pure Eva Consumer-only parties with no Maan must not appear alone as the answer
-            assert clients[0] == "Gamma Dist"
+            md = out.get("answer_markdown") or ""
+            assert "Gamma Dist" in md
+            assert "Alpha Dist" in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

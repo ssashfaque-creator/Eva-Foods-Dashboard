@@ -29,6 +29,8 @@ from eva_dashboard.data import (
 
 AMS_3_COL = "AMS (3 months)"
 AMS_6_COL = "AMS (6 months)"
+AMS_PRIOR_3_COL = "AMS prior (3 months)"
+AMS_GROWTH_COL = "AMS growth %"
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round, mt_str
 
@@ -459,6 +461,7 @@ _VALID_ROW_DIMS = {
     "product",
     "city",
     "client_type",
+    "party",
 }
 
 
@@ -499,6 +502,11 @@ def normalize_row_dimension(value: str | None) -> str | None:
         "client type": "client_type",
         "client": "client_type",
         "clients": "client_type",
+        "party": "party",
+        "parties": "party",
+        "distributor": "party",
+        "distributors": "party",
+        "client name": "party",
     }
     if raw in aliases:
         return aliases[raw]
@@ -868,6 +876,7 @@ _ROW_HEADER_LABELS = {
     "oil_type": "Oil Type",
     "city": "City",
     "client_type": "Client Type",
+    "party": "Distributor",
 }
 
 
@@ -1331,10 +1340,11 @@ def _enrich_month_matrix_with_ams(
     party: str | None = None,
     lines_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Insert AMS (3 months) / AMS (6 months) before Total on a month matrix.
+    """Insert AMS columns before Total on a month matrix.
 
-    Uses **one** AMS window query (or reuses ``lines_frame`` when it already
-    covers the lookback) instead of one fetch per prior month.
+    Columns: AMS (3 months), AMS prior (3 months), AMS growth %, and when
+    ``months_back >= 6`` also AMS (6 months). Uses one AMS window covering
+    six prior full months so current and prior 3-month AMS share one fetch.
     """
     columns = list(matrix.get("columns") or [])
     rows = list(matrix.get("rows") or [])
@@ -1343,15 +1353,23 @@ def _enrich_month_matrix_with_ams(
 
     # Drop legacy Average if present
     columns = [c for c in columns if c != "Average"]
-    ams_cols: list[str] = [AMS_3_COL]
+    ams_cols: list[str] = [AMS_3_COL, AMS_PRIOR_3_COL, AMS_GROWTH_COL]
     if int(months_back) >= 6:
         ams_cols.append(AMS_6_COL)
 
     ams_as_of = as_of.replace(day=1)
+    # Prior AMS window ends 3 months before current AMS as-of
+    prior_as_of = ams_as_of
+    for _ in range(3):
+        y, m = prior_as_of.year, prior_as_of.month - 1
+        if m == 0:
+            y, m = y - 1, 12
+        prior_as_of = date(y, m, 1)
     row_dim = str(matrix.get("row_dimension") or "business_unit")
     headers = list(matrix.get("row_headers") or [])
     leaf_dim = headers[-1] if headers else row_dim
-    max_n = 6 if AMS_6_COL in ams_cols else 3
+    # 6 months before as_of covers current AMS(3) + prior AMS(3)
+    max_n = 6 if AMS_6_COL in ams_cols else 6
 
     # Single DB window for the longest AMS lookback; derive 3/6 from it in memory.
     window = _load_ams_window_frame(
@@ -1369,11 +1387,15 @@ def _enrich_month_matrix_with_ams(
 
     ams_maps: dict[str, dict[str, float]] = {}
     totals_ams: dict[str, float] = {}
-    for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
+    for label, n, asof in (
+        (AMS_3_COL, 3, ams_as_of),
+        (AMS_PRIOR_3_COL, 3, prior_as_of),
+        (AMS_6_COL, 6, ams_as_of),
+    ):
         if label not in ams_cols:
             continue
         by_row, total = _ams_from_window_frame(
-            window, as_of=ams_as_of, n_months=n, row_dim=leaf_dim
+            window, as_of=asof, n_months=n, row_dim=leaf_dim
         )
         ams_maps[label] = by_row
         totals_ams[label] = total
@@ -1382,13 +1404,26 @@ def _enrich_month_matrix_with_ams(
     parent_maps: dict[str, dict[str, dict[str, float]]] = {}
     for lv in headers[:-1] if headers else []:
         parent_maps[lv] = {}
-        for label, n in ((AMS_3_COL, 3), (AMS_6_COL, 6)):
+        for label, n, asof in (
+            (AMS_3_COL, 3, ams_as_of),
+            (AMS_PRIOR_3_COL, 3, prior_as_of),
+            (AMS_6_COL, 6, ams_as_of),
+        ):
             if label not in ams_cols:
                 continue
             by_row, _ = _ams_from_window_frame(
-                window, as_of=ams_as_of, n_months=n, row_dim=lv
+                window, as_of=asof, n_months=n, row_dim=lv
             )
             parent_maps[lv][label] = by_row
+
+    def _ams_val(kind: str, raw_key: str, label: str) -> float:
+        if kind == "total":
+            return float(totals_ams.get(label, 0.0))
+        if kind.startswith("subtotal_") and headers:
+            lv = kind.replace("subtotal_", "", 1)
+            key = raw_key.replace(" Total", "").strip() if raw_key else ""
+            return float((parent_maps.get(lv) or {}).get(label, {}).get(key, 0.0))
+        return float(ams_maps.get(label, {}).get(raw_key, 0.0))
 
     new_columns: list[str] = []
     for c in columns:
@@ -1400,33 +1435,42 @@ def _enrich_month_matrix_with_ams(
 
     for row in rows:
         kind = str(row.get("row_kind") or "leaf")
-        for label in ams_cols:
-            if kind == "total":
-                row[label] = mt_round(totals_ams[label])
-                continue
-            if kind.startswith("subtotal_") and headers:
-                lv = kind.replace("subtotal_", "", 1)
-                raw = str(row.get(lv) or "")
-                key = raw.replace(" Total", "").strip() if raw else None
-                val = float((parent_maps.get(lv) or {}).get(label, {}).get(key or "", 0.0))
-                row[label] = mt_round(val)
-                continue
-            # leaf / flat
+        raw = ""
+        if kind == "total":
+            raw = ""
+        elif kind.startswith("subtotal_") and headers:
+            lv = kind.replace("subtotal_", "", 1)
+            raw = str(row.get(lv) or "")
+        else:
             raw = str(row.get(leaf_dim) or row.get(row_dim) or "").strip()
             if not raw:
-                # hierarchical blank parent cell — find last non-empty header
                 for h in reversed(headers or [row_dim]):
                     cand = str(row.get(h) or "").strip()
                     if cand:
                         raw = cand
                         break
-            row[label] = mt_round(float(ams_maps[label].get(raw, 0.0)))
+        cur = _ams_val(kind, raw, AMS_3_COL)
+        prior = _ams_val(kind, raw, AMS_PRIOR_3_COL)
+        for label in ams_cols:
+            if label == AMS_GROWTH_COL:
+                growth = pct_change(cur, prior)
+                row[label] = (
+                    round(float(growth), 1) if growth is not None else None
+                )
+                continue
+            row[label] = mt_round(_ams_val(kind, raw, label))
         row.pop("Average", None)
 
     col_tot = dict(matrix.get("column_totals") or {})
     col_tot.pop("Average", None)
+    tot_cur = float(totals_ams.get(AMS_3_COL, 0.0))
+    tot_prior = float(totals_ams.get(AMS_PRIOR_3_COL, 0.0))
     for label in ams_cols:
-        col_tot[label] = mt_round(totals_ams[label])
+        if label == AMS_GROWTH_COL:
+            g = pct_change(tot_cur, tot_prior)
+            col_tot[label] = round(float(g), 1) if g is not None else None
+        else:
+            col_tot[label] = mt_round(totals_ams.get(label, 0.0))
     matrix["columns"] = new_columns
     matrix["rows"] = rows
     matrix["column_totals"] = col_tot
@@ -1434,7 +1478,8 @@ def _enrich_month_matrix_with_ams(
     matrix["markdown_hint"] = (
         f"Month-wise MT: rows={leaf_dim}, columns=months + "
         + " + ".join(ams_cols)
-        + " + Total; AMS = mean of prior full calendar months for the same filters."
+        + " + Total; AMS = mean of prior full calendar months; "
+        "AMS prior = the 3 months before that; AMS growth % = current vs prior."
     )
     return matrix
 
@@ -1877,10 +1922,13 @@ def query_sales(
                 if ng and ng not in groups:
                     groups.append(ng)
         if not row_override and prior_spec.get("row_dimension"):
-            # Keep prior row dim only when caller did not request a new one —
-            # follow-ups that only add a BU should preserve rows; drill-downs
-            # pass an explicit override.
-            pass
+            # Keep prior row dim when caller did not request a new one —
+            # follow-ups that only add a BU should preserve packing/SKU grain.
+            row_override = normalize_row_dimension(
+                prior_spec.get("row_dimension")
+            ) or str(prior_spec.get("row_dimension") or "").strip() or None
+            if row_override and row_override not in _VALID_ROW_DIMS:
+                row_override = None
         # Cumulative excludes (remove Lahore, remove distributors, …)
         for dim, vals in (prior_spec.get("excludes") or {}).items():
             key = normalize_row_dimension(dim) or str(dim).strip()
@@ -1899,6 +1947,19 @@ def query_sales(
         if not period and not date_from and prior_spec.get("period"):
             date_from = (prior_spec["period"] or {}).get("date_from")
             date_to = (prior_spec["period"] or {}).get("date_to")
+
+    # Never keep BUs that are actively excluded (exclude maan must drop Maan*)
+    drop_bus = {
+        _normalize_business_unit(v) or str(v).strip()
+        for v in (ex_map.get("business_unit") or [])
+        if v
+    }
+    if drop_bus:
+        units = [
+            u
+            for u in units
+            if (_normalize_business_unit(u) or str(u).strip()) not in drop_bus
+        ]
 
     # Apply clears after inherit (regroup promoted a filter to a dimension)
     if "city" in clear:
@@ -1934,9 +1995,9 @@ def query_sales(
         start_y, start_m = map(int, labels[0].split("-"))
         d0 = date(start_y, start_m, 1).isoformat()
         d1 = max_d.isoformat()
-        # Extend fetch to cover AMS(6) prior months so matrix + AMS share one query
+        # Extend fetch to cover AMS(3)+prior AMS(3) [and AMS(6)] so one query
         ams_as_of = max_d.replace(day=1)
-        ams_ranges = _prior_n_month_ranges(ams_as_of, 6 if mb >= 6 else 3)
+        ams_ranges = _prior_n_month_ranges(ams_as_of, 6)
         if ams_ranges:
             ams_lookback_start = ams_ranges[0][0].isoformat()
         period_info = {

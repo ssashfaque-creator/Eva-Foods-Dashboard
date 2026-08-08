@@ -1498,6 +1498,10 @@ def _looks_table_followup(text: str) -> bool:
         return True
     if _looks_row_drilldown(t):
         return True
+    if _looks_same_format(t):
+        return True
+    if _looks_hide_sku(t):
+        return True
     if _is_explicit_followup(t) and re.search(
         r"\b(add|include|combine|merge|bulk|consumer|group|city|wise|remove|exclude)\b", t
     ):
@@ -1608,8 +1612,59 @@ def _looks_regroup(text: str) -> bool:
     return resolve_regroup_request(text, prior_spec={"column_dimension": "_"}) is not None
 
 
+def _looks_hide_sku(text: str) -> bool:
+    """True for 'don't show individual sku' / 'hide skus' / 'no sku'."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"(don'?t|do\s+not|dont)\s+show(\s+individual)?\s+skus?|"
+            r"hide(\s+individual)?\s+skus?|"
+            r"without(\s+individual)?\s+skus?|"
+            r"no(\s+more)?(\s+individual)?\s+skus?|"
+            r"remove(\s+individual)?\s+skus?|"
+            r"drop(\s+individual)?\s+skus?|"
+            r"collapse\s+skus?"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_national_scope(text: str) -> bool:
+    """True for Pakistan / nationwide / all-over asks (clear city filter)."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"all\s+over\s+pakistan|across\s+pakistan|nationwide|national|"
+            r"country[- ]?wide|all\s+pakistan|pakistan[- ]?wide|"
+            r"all\s+over\s+the\s+country|across\s+the\s+country"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_same_format(text: str) -> bool:
+    """True for 'in the same format / same way / same table layout'."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"same\s+format|same\s+way|same\s+table|same\s+layout|"
+            r"same\s+structure|same\s+columns|as\s+above|like\s+above|"
+            r"same\s+style"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _looks_remove(text: str) -> bool:
     t = (text or "").lower()
+    if _looks_hide_sku(t):
+        return True
     return bool(
         re.search(
             r"\b(remove|exclude|drop|without|filter\s+out)\b.+"
@@ -1649,6 +1704,8 @@ _STRUCT_DIM_PHRASES: list[tuple[str, str]] = [
 
 def _extract_remove_phrase(text: str) -> str | None:
     t = (text or "").strip()
+    if _looks_hide_sku(t):
+        return "sku"
     m = re.search(
         r"\b(?:remove|exclude|drop|without|filter\s+out)\s+"
         r"(?:the\s+)?(.+?)(?:\s+from\s+(?:the\s+)?(?:table|view|this|that|above))?\s*$",
@@ -2076,6 +2133,10 @@ def resolve_row_dimension_request(
     t = (text or "").lower()
     if not t:
         return None
+
+    # Hide / collapse SKU layer → packing (must beat bare "sku" match below)
+    if _looks_hide_sku(t):
+        return "packing_category"
 
     # SKU / individual line items only when user says SKU (or item-wise)
     if re.search(
@@ -2574,11 +2635,13 @@ def _party_filters_from_prior(
         or _looks_sold_to_parties(user_text)
         or _looks_party_analytics(user_text)
         or _looks_client_list(user_text)
+        or _looks_party_growth_rank(user_text)
     ):
         return {}
     pf = prior_spec.get("filters") or {}
     out: dict[str, Any] = {}
-    if pf.get("city"):
+    # National / all-over Pakistan asks must not keep a sticky city
+    if pf.get("city") and not _looks_national_scope(user_text):
         out["city"] = pf["city"]
     if pf.get("oil_type"):
         out["oil_type"] = pf["oil_type"]
@@ -2590,7 +2653,13 @@ def _party_filters_from_prior(
     units = list(prior_spec.get("business_units") or [])
     if not bu and len(units) == 1:
         bu = units[0]
-    if bu:
+    # Growth / national ranking: only keep BU when the user named one
+    named_bus = _extract_business_units_from_text(user_text)
+    if named_bus:
+        out["business_unit"] = named_bus[0]
+    elif bu and not (
+        _looks_national_scope(user_text) or _looks_party_growth_rank(user_text)
+    ):
         out["business_unit"] = bu
     # Prefer explicit period phrase; else fixed dates from prior period
     if prior_spec.get("period_phrase"):
@@ -3268,6 +3337,25 @@ def _dispatch_channel_growth(
     )
 
 
+def _wants_party_month_matrix(
+    user_text: str,
+    prior_spec: dict[str, Any] | None,
+) -> bool:
+    """Selling-BU / buyers asks should mirror a prior month sales table."""
+    if not prior_spec:
+        return False
+    if str(prior_spec.get("column_dimension") or "") != "month":
+        return False
+    if _looks_party_rank_ask(user_text):
+        return False
+    t = (user_text or "").lower()
+    selling = bool(
+        re.search(r"\b(selling|sells|sold\s+to|buyers?|bought)\b", t)
+    )
+    has_bu = bool(_extract_business_units_from_text(user_text))
+    return selling and has_bu
+
+
 def _dispatch_which_parties(
     user_text: str,
     *,
@@ -3293,7 +3381,9 @@ def _dispatch_which_parties(
     )
     prior_ctype = normalize_client_type(prior_ctx.get("client_type"))
     # Switching client type (Distributors → Imtiaz) must not keep prior city
-    if city_from_text:
+    if _looks_national_scope(user_text):
+        city = None
+    elif city_from_text:
         city = city_from_text
     elif ctype and prior_ctype and ctype != prior_ctype:
         city = None
@@ -3304,8 +3394,7 @@ def _dispatch_which_parties(
         units[0]
         if len(units) == 1
         else (
-            args.get("business_unit")
-            or inferred.get("business_unit")
+            inferred.get("business_unit")
             or prior_ctx.get("business_unit")
         )
     )
@@ -3345,6 +3434,26 @@ def _dispatch_which_parties(
             sort="desc",
             limit=int(args.get("limit") or inferred.get("limit") or 10),
             group_by="party",
+        )
+
+    # Mirror prior month table: distributors as rows × months as columns
+    if _wants_party_month_matrix(user_text, prior_spec):
+        months_back = int((prior_spec or {}).get("months_back") or 6)
+        return query_sales(
+            city=city,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            columns="month",
+            months_back=months_back,
+            mode="matrix",
+            row_dimension="party",
+            lock_columns=True,
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            prior_spec=None,
         )
 
     return list_clients(
@@ -3526,6 +3635,9 @@ def _dispatch_tool(
         clear_filters: list[str] | None = None
         excludes: dict[str, list[str]] | None = None
         lock_columns = False
+        asked_dim = resolve_row_dimension_request(
+            user_text, prior_row_dimension=prior_row
+        )
         if remove:
             row_dim = remove.get("row_dimension")
             row_groups = list(remove.get("row_groups") or []) or None
@@ -3534,6 +3646,14 @@ def _dispatch_tool(
             columns = str(remove.get("columns") or columns)
             lock_columns = True
             mode = "matrix"
+            # "exclude maan and break down by product" → apply packing grain too
+            if asked_dim and asked_dim != row_dim:
+                row_dim = asked_dim
+                # Drop prior SKU groups when collapsing / changing leaf
+                if asked_dim != "product":
+                    row_groups = [
+                        g for g in (row_groups or []) if g != "product"
+                    ] or None
         elif regroup:
             row_dim = regroup.get("row_dimension")
             row_groups = list(regroup.get("row_groups") or []) or None
@@ -3542,17 +3662,21 @@ def _dispatch_tool(
             lock_columns = True
             mode = "matrix"
         else:
-            asked_dim = resolve_row_dimension_request(
-                user_text, prior_row_dimension=prior_row
-            )
             # Spoken product/SKU/drill language wins over model-supplied grain
             # ("product wise" must stay packing_category, not SKU).
             if asked_dim:
                 row_dim = asked_dim
             else:
                 row_dim = row_dim or None
+        is_same_format = _looks_same_format(user_text)
         is_drill = (not remove and not regroup) and (
-            bool(row_dim) or _looks_row_drilldown(user_text)
+            bool(asked_dim)
+            or (
+                bool(row_dim)
+                and not is_same_format
+                and not _looks_combine_tables(user_text)
+            )
+            or _looks_row_drilldown(user_text)
         )
         is_regroup = bool(regroup)
         is_remove = bool(remove)
@@ -3567,6 +3691,7 @@ def _dispatch_tool(
                 or is_yoy
                 or is_regroup
                 or is_remove
+                or is_same_format
                 or _is_explicit_followup(user_text)
             )
             and prior_spec
@@ -3622,6 +3747,30 @@ def _dispatch_tool(
                 columns = "month"
                 months_back = int(use_prior.get("months_back") or months_back)
 
+        # Include-BU / same-format: keep prior packing/SKU grain (ignore model product)
+        if use_prior and (
+            is_same_format
+            or (
+                (_looks_combine_tables(user_text) or _looks_table_followup(user_text))
+                and not asked_dim
+                and not is_remove
+                and not is_regroup
+                and not _looks_row_drilldown(user_text)
+            )
+        ):
+            prior_keep = normalize_row_dimension(
+                use_prior.get("row_dimension")
+            ) or use_prior.get("row_dimension")
+            if prior_keep:
+                row_dim = prior_keep
+            if use_prior.get("row_groups") and not row_groups:
+                row_groups = list(use_prior.get("row_groups") or []) or None
+            if use_prior.get("column_dimension") == "month":
+                columns = "month"
+                months_back = int(use_prior.get("months_back") or months_back)
+                lock_columns = True
+                mode = "matrix"
+
         # Dedupe units preserving order
         seen: set[str] = set()
         uniq: list[str] = []
@@ -3636,6 +3785,26 @@ def _dispatch_tool(
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
         city_arg = arguments.get("city") or extract_city_from_text(user_text)
         period_arg = arguments.get("period") or _extract_period_phrase(user_text)
+
+        # National / all-over Pakistan → drop sticky city
+        if _looks_national_scope(user_text):
+            city_arg = None
+            clear_filters = list(clear_filters or [])
+            if "city" not in clear_filters:
+                clear_filters.append("city")
+
+        # Same format with a new client type: keep grain, clear prior BU filter
+        if is_same_format and ctype and use_prior:
+            prior_ct = normalize_client_type(
+                (use_prior.get("filters") or {}).get("client_type")
+            )
+            if prior_ct and ctype != prior_ct and not _extract_business_units_from_text(
+                user_text
+            ):
+                uniq = []
+                clear_filters = list(clear_filters or [])
+                if "business_unit" not in clear_filters:
+                    clear_filters.append("business_unit")
 
         # Standalone "exclude online / without metro" → client_type excludes
         from eva_dashboard.advanced_routing import extract_exclude_client_types
@@ -3882,23 +4051,53 @@ def _dispatch_tool(
         mix_limit = int(arguments.get("limit") or inferred.get("limit") or 10)
         if per_party_mix and not arguments.get("limit") and not inferred.get("limit"):
             mix_limit = 16
+        named_bus = _extract_business_units_from_text(user_text)
+        # Prefer spoken BU; do not trust model-invented business_unit on growth asks
+        bu_arg = (
+            named_bus[0]
+            if named_bus
+            else (
+                inferred.get("business_unit")
+                or (
+                    None
+                    if (
+                        _looks_national_scope(user_text)
+                        or _looks_party_growth_rank(user_text)
+                    )
+                    else (
+                        arguments.get("business_unit")
+                        or prior_ctx.get("business_unit")
+                    )
+                )
+            )
+        )
+        city_arg = (
+            None
+            if _looks_national_scope(user_text)
+            else (
+                extract_city_from_text(user_text)
+                or inferred.get("city")
+                or (
+                    None
+                    if _looks_party_growth_rank(user_text)
+                    else arguments.get("city")
+                )
+                or prior_ctx.get("city")
+            )
+        )
         return analyze_parties(
             period=arguments.get("period")
             or inferred.get("period")
             or prior_ctx.get("period"),
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
-            city=arguments.get("city")
-            or inferred.get("city")
-            or prior_ctx.get("city"),
+            city=city_arg,
             client_type=normalize_client_type(
                 arguments.get("client_type")
                 or inferred.get("client_type")
                 or prior_ctx.get("client_type")
             ),
-            business_unit=arguments.get("business_unit")
-            or inferred.get("business_unit")
-            or prior_ctx.get("business_unit"),
+            business_unit=bu_arg,
             oil_type=arguments.get("oil_type")
             or inferred.get("oil_type")
             or extract_oil_type_from_text(user_text)
@@ -4067,6 +4266,7 @@ def _looks_factual(text: str) -> bool:
         "reactivat", "declin", "invoice", "dump", "silent", "group by",
         "oil type", "packing", "expected", "forecast", "yoy", "wow",
         "week over", "exclude", "without", "remove", "city wise", "sku wise",
+        "pakistan", "nationwide", "national", "all over",
         # All trade channels / client types
         "channel", "metro", "chase", "spar", "gelani", "panda", "food panda",
         "csd", "canteen", "online", "lmt", "active", "selling", "sells",
@@ -4375,6 +4575,8 @@ def suggest_preferred_tool(
         or _looks_combine_tables(text)
         or _looks_regroup(text)
         or _looks_remove(text)
+        or _looks_hide_sku(text)
+        or _looks_same_format(text)
     ) and (has_table_prior or is_followup)
 
     if _looks_named_party_sales(text):
@@ -4389,15 +4591,15 @@ def suggest_preferred_tool(
     if looks_advanced(text):
         return "advanced_query"
     if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
-        return (
-            "analyze_parties"
-            if (
-                _looks_party_rank_ask(text)
-                or extract_oil_type_from_text(text)
-                or extract_packing_from_text(text)
-            )
-            else "list_clients"
-        )
+        if (
+            _looks_party_rank_ask(text)
+            or extract_oil_type_from_text(text)
+            or extract_packing_from_text(text)
+        ):
+            return "analyze_parties"
+        if _wants_party_month_matrix(text, prior_table_spec):
+            return "query_sales"
+        return "list_clients"
     if _looks_party_breakdown(text):
         return "list_clients"
     if _looks_party_mix_query(text) or _looks_party_analytics(text):
@@ -4484,6 +4686,9 @@ def resolve_forced_tool(
             or extract_packing_from_text(text)
         ):
             return "analyze_parties"
+        # Selling a BU after a month table → party × month sales matrix
+        if _wants_party_month_matrix(text, prior_table_spec):
+            return "query_sales"
         return "list_clients"
 
     # 3) Reply / pinned-table follow-ups that must stay on the sales table
@@ -4492,6 +4697,8 @@ def resolve_forced_tool(
         or _looks_combine_tables(text)
         or _looks_regroup(text)
         or _looks_remove(text)
+        or _looks_hide_sku(text)
+        or _looks_same_format(text)
         or _looks_row_drilldown(text)
         or _looks_sales_yoy_compare(text)
     )

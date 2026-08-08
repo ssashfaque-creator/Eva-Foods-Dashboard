@@ -453,7 +453,7 @@ def test_sold_to_followup_filters_business_unit() -> None:
                 "business_units": [],
             }
             assert (
-                resolve_forced_tool(q, prior_table_spec=prior) == "list_clients"
+                resolve_forced_tool(q, prior_table_spec=prior) == "query_sales"
             )
             out = _dispatch_tool(
                 "query_sales",
@@ -462,14 +462,13 @@ def test_sold_to_followup_filters_business_unit() -> None:
                 prior_spec=prior,
             )
             assert out.get("ok") is True
-            assert out.get("mode") == "list_clients"
+            assert out.get("row_dimension") == "party"
+            assert out.get("column_dimension") == "month"
             assert out.get("filters", {}).get("business_unit") == "Maan Consumer"
             assert out.get("filters", {}).get("city") == "Karachi"
             assert out.get("filters", {}).get("client_type") == "Eva Distributors"
-            clients = {c["client"] for c in (out.get("clients") or [])}
-            assert "Gamma Dist" in clients
-            # Eva Consumer-only parties in Karachi must not dominate without Maan
             md = out.get("answer_markdown") or ""
+            assert "Gamma Dist" in md
             assert "Maan Consumer" in md or "BU" in md
         finally:
             if previous is None:

@@ -149,14 +149,16 @@ def test_extensive_offline_eval_bank() -> None:
                 q = f"{FOLLOWUP_MARKER}\n\nwhich distributors are selling maan"
                 out = run(
                     q,
-                    forced_exp="list_clients",
+                    forced_exp="query_sales",
                     tool="list_clients",
                     prior_spec=prior,
                 )
                 assert out.get("filters", {}).get("business_unit") == "Maan Consumer"
                 assert out.get("filters", {}).get("city") == "Karachi"
-                names = [c["client"] for c in out.get("clients") or []]
-                assert "Gamma Dist" in names
+                assert out.get("row_dimension") == "party"
+                assert out.get("column_dimension") == "month"
+                md = out.get("answer_markdown") or ""
+                assert "Gamma Dist" in md
             except Exception as exc:
                 failures.append(f"reply selling maan: {exc}")
 
@@ -166,8 +168,10 @@ def test_extensive_offline_eval_bank() -> None:
                     forced_exp="analyze_parties",
                     tool="analyze_parties",
                 )
-                assert out.get("metric") == "yoy"
-                assert "YoY" in (out.get("answer_markdown") or "")
+                assert out.get("metric") == "ams_growth"
+                md = out.get("answer_markdown") or ""
+                assert "YoY" in md
+                assert "AMS growth" in md
             except Exception as exc:
                 failures.append(f"grown VTF: {exc}")
 
@@ -330,7 +334,7 @@ def test_reply_selling_maan_fast_and_filtered() -> None:
             q = f"{FOLLOWUP_MARKER}\n\nwhich distributors are selling maan"
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "list_clients"
+                == "query_sales"
             )
             t0 = time.time()
             out = _dispatch_tool("list_clients", {}, user_text=q, prior_spec=prior)
@@ -338,10 +342,12 @@ def test_reply_selling_maan_fast_and_filtered() -> None:
             assert out["ok"] is True
             assert out["filters"]["business_unit"] == "Maan Consumer"
             assert out["filters"]["city"] == "Karachi"
-            names = [c["client"] for c in out["clients"]]
-            assert "Gamma Dist" in names
-            assert "Alpha Dist" in names
-            assert not any(n.startswith("Noise Dist") for n in names)
+            assert out["row_dimension"] == "party"
+            assert out["column_dimension"] == "month"
+            md = out.get("answer_markdown") or ""
+            assert "Gamma Dist" in md
+            assert "Alpha Dist" in md
+            assert "Noise Dist" not in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

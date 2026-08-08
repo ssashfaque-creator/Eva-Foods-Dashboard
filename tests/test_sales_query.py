@@ -205,7 +205,8 @@ def test_month_wise_and_add_followup() -> None:
                 "Eva Consumer",
                 "Eva Bulk",
             }
-            assert follow["row_dimension"] == "business_unit"
+            # Keep packing grain when adding a BU (do not jump to SKU / collapse)
+            assert follow["row_dimension"] == "packing_category"
             names = {r["business_unit"] for r in follow["matrix"]["rows"]}
             assert "Eva Consumer" in names and "Eva Bulk" in names
         finally:

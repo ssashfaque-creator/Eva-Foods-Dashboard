@@ -89,7 +89,7 @@ def test_routing_distributor_growth_not_matrix_or_list() -> None:
     assert suggest_preferred_tool(q2) == "analyze_parties"
 
     inf1 = infer_party_analytics_from_text(q1)
-    assert inf1["metric"] == "yoy"
+    assert inf1["metric"] == "ams_growth"
     assert inf1["oil_type"] == "Eva VTF"
     assert inf1["client_type"] == "Eva Distributors"
     assert inf1.get("grown_only") is True
@@ -112,7 +112,7 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
                 user_text=q1,
             )
             assert out["ok"] is True
-            assert out["metric"] == "yoy"
+            assert out["metric"] == "ams_growth"
             assert out["filters"]["oil_type"] == "Eva VTF"
             parties = [p["party"] for p in out["parties"]]
             assert "Alpha Dist" in parties
@@ -120,6 +120,7 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             assert "Beta Dist" not in parties
             md = out["answer_markdown"]
             assert "YoY" in md
+            assert "AMS growth" in md
             assert "Business Unit" not in md  # not a packing matrix
 
             # Wrong tool choice still redirects
@@ -128,7 +129,7 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
                 {},
                 user_text=q1,
             )
-            assert via_list.get("metric") == "yoy"
+            assert via_list.get("metric") == "ams_growth"
 
             q2 = (
                 "show individual distributor sales for VTF with growth "

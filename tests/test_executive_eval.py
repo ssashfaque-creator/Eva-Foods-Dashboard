@@ -231,7 +231,8 @@ EXEC_CASES: list[Case] = [
         "which distributor is selling maan",
         PRIOR_KHI_DIST,
         [
-            _expect_mode("list_clients"),
+            _expect_mode("matrix"),
+            _expect_row_dim("party"),
             _expect_filter("city", "Karachi"),
             _expect_filter("client_type", "Eva Distributors"),
             _expect_filter("business_unit", "Maan Consumer"),
