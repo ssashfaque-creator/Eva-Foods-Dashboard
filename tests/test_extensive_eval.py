@@ -204,10 +204,9 @@ def test_extensive_offline_eval_bank() -> None:
                     forced_exp="advanced_query",
                     tool="advanced_query",
                 )
-                # Metro + Chase Up both remap to IMT → Imtiaz Store + IMT
-                assert len(out.get("entities") or []) == 2
+                assert len(out.get("entities") or []) == 3
                 names = {e.get("name") for e in (out.get("entities") or [])}
-                assert names == {"Imtiaz Store", "IMT"}
+                assert names == {"Imtiaz Store", "METRO HABIB", "CHASE UP"}
             except Exception as exc:
                 failures.append(f"3-type: {exc}")
 

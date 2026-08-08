@@ -63,11 +63,11 @@ Every category upload **replaces** the whole table.
 | `inactive` | `Y` / blank |
 | `payload_json` | Full Excel row (Locality, Zone, CrDays, PaymentType, …) |
 
-**Client Type groups (app logic):** raw `type` / `sales.client_type` values
-are remapped via `eva_dashboard/client_type_map.py` to NEW groups
-(e.g. CHASE UP/METRO/CSD/SPAR → **IMT**; NORTH/CENTRAL/SOUTH LMT → **LMT**;
-Local Dealers/X-DEALERS → **Dealer**). Chatbot filters, pivots, and answers
-always use the new groups — never the old long-tail labels.
+**Client Type groups (app logic):** pivots by client type roll up via
+`eva_dashboard/client_type_map.py` to NEW groups (CHASE UP/METRO/CSD/SPAR →
+**IMT**; NORTH/CENTRAL/SOUTH LMT → **LMT**; dealers → **Dealer**). Asking
+for a specific old type (Chase Up, CSD, …) filters to that type only;
+asking for **IMT** / **LMT** uses the whole group.
 
 **Zones (app logic, not a DB column):** each City-Filter maps to
 `SOUTH` / `CENTRAL` / `NORTH` via `eva_dashboard/geo.py`.

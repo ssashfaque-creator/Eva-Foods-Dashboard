@@ -75,7 +75,7 @@ eva-dashboard update
 eva-dashboard app
 ```
 
-Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.4.19**).
+Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.4.20**).
 
 **First time only** (if `eva-dashboard update` is not available yet):
 

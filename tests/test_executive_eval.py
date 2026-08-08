@@ -255,7 +255,7 @@ EXEC_CASES: list[Case] = [
         "what Metro sells the most VTF",
         None,
         [
-            _expect_filter("client_type", "IMT"),
+            _expect_filter("client_type", "METRO HABIB"),
             _expect_filter("oil_type", "Eva VTF"),
             _expect_md_has("Metro Lhr"),
         ],
@@ -266,7 +266,7 @@ EXEC_CASES: list[Case] = [
         None,
         [
             _expect_mode("list_clients"),
-            _expect_filter("client_type", "IMT"),
+            _expect_filter("client_type", "CHASE UP"),
             _expect_filter("city", "Karachi"),
             _expect_md_has("Chase Up Gul"),
         ],
@@ -277,7 +277,7 @@ EXEC_CASES: list[Case] = [
         None,
         [
             _expect_mode("list_clients"),
-            _expect_filter("client_type", "IMT"),
+            _expect_filter("client_type", "Canteen Store Department"),
             _expect_md_has("CSD Depot"),
         ],
     ),
@@ -286,7 +286,7 @@ EXEC_CASES: list[Case] = [
         "which SPAR is selling canola",
         None,
         [
-            _expect_filter("client_type", "IMT"),
+            _expect_filter("client_type", "SPAR - IMT"),
             # oil filter → analyze_parties volume
             _expect_md_has("SPAR Outlet"),
         ],
@@ -306,7 +306,7 @@ EXEC_CASES: list[Case] = [
         "which Gelani sells the most",
         None,
         [
-            _expect_filter("client_type", "LMT"),
+            _expect_filter("client_type", "GELANI MART"),
             _expect_md_has("Gelani Main"),
         ],
     ),
@@ -327,7 +327,7 @@ EXEC_CASES: list[Case] = [
         None,
         [
             _expect_mode("list_clients"),
-            _expect_filter("client_type", "LMT"),
+            _expect_filter("client_type", "NORTH LMT"),
             _expect_md_has("North LMT 1"),
         ],
     ),

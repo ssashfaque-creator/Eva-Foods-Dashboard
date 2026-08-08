@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import os
 import re
 from datetime import date
 from typing import Any
@@ -27,8 +28,9 @@ from eva_dashboard.data import (
     weighted_avg,
 )
 from eva_dashboard.client_type_map import (
+    classify_client_type_filter,
     map_client_type,
-    raw_client_types_for_group,
+    sql_client_type_values,
 )
 from eva_dashboard.geo import (
     DEFAULT_CITY,
@@ -67,8 +69,10 @@ def _norm_party_key(value: str | None) -> str:
 
 
 def _clients_lookup() -> dict[str, dict[str, str]]:
-    """Map normalized client name → {city, zone, type, client}.
+    """Map normalized client name → {city, zone, type, type_raw, client}.
 
+    ``type`` is the NEW reporting group (for pivots). ``type_raw`` is the
+    existing Excel label (for specific filters like Chase Up / CSD).
     Blank / undefined City-Filter → Karachi + SOUTH.
     """
     global _CLIENTS_CACHE, _CLIENTS_CACHE_SIG
@@ -77,7 +81,13 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
         sig_row = conn.execute(
             "SELECT COUNT(*) AS n, MAX(updated_at) AS u FROM clients"
         ).fetchone()
-        sig = (sig_row["n"] if sig_row else 0, sig_row["u"] if sig_row else None)
+        # Include data dir so temp-DB tests cannot reuse another DB's cache
+        # when COUNT/updated_at collide.
+        sig = (
+            os.environ.get("EVA_DATA_DIR"),
+            sig_row["n"] if sig_row else 0,
+            sig_row["u"] if sig_row else None,
+        )
         if _CLIENTS_CACHE is not None and _CLIENTS_CACHE_SIG == sig:
             return _CLIENTS_CACHE
         rows = conn.execute(
@@ -90,14 +100,16 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
             continue
         raw_city = (r["city_filter"] or r["city"] or "").strip()
         city, zone = resolve_city_zone(raw_city)
-        ctype = map_client_type((r["type"] or "").strip()) or "Unmapped"
+        raw_type = (r["type"] or "").strip() or "Unmapped"
+        group = map_client_type(raw_type) or raw_type
         lookup.setdefault(
             key,
             {
                 "client": str(r["client"] or ""),
                 "city": city,
                 "zone": zone,
-                "type": ctype,
+                "type": group,
+                "type_raw": raw_type,
             },
         )
     _CLIENTS_CACHE = lookup
@@ -117,22 +129,29 @@ def _parties_matching(
     lookup = _clients_lookup()
     city_key = (city or "").strip().lower()
     zone_key = (zone or "").strip().lower()
-    type_key = (client_type or "").strip().lower()
+    classified = classify_client_type_filter(client_type) if client_type else None
     names: list[str] = []
     for meta in lookup.values():
         if city_key and meta["city"].strip().lower() != city_key:
             continue
         if zone_key and str(meta.get("zone") or "").strip().lower() != zone_key:
             continue
-        if type_key and meta["type"].strip().lower() != type_key:
-            continue
+        if classified:
+            mode, label = classified
+            needle = label.strip().lower()
+            if mode == "raw":
+                hay = str(meta.get("type_raw") or meta.get("type") or "").strip().lower()
+            else:
+                hay = str(meta.get("type") or "").strip().lower()
+            if hay != needle:
+                continue
         if meta["client"]:
             names.append(meta["client"])
     return names
 
 
 def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add city / zone / resolved client_type from the clients master."""
+    """Add city / zone / client_type (NEW group) + client_type_raw."""
     if frame.empty:
         work = frame.copy()
         if "city" not in work.columns:
@@ -141,6 +160,8 @@ def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
             work["zone"] = pd.Series(dtype=object)
         if "client_type" not in work.columns:
             work["client_type"] = pd.Series(dtype=object)
+        if "client_type_raw" not in work.columns:
+            work["client_type_raw"] = pd.Series(dtype=object)
         return work
     lookup = _clients_lookup()
     work = frame.copy()
@@ -153,18 +174,27 @@ def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
     cities: list[str] = []
     zones: list[str] = []
     types: list[str] = []
+    raws: list[str] = []
     for key, st in zip(keys.tolist(), sales_types.tolist()):
         meta = lookup.get(key) or {}
         city = meta.get("city") or DEFAULT_CITY
         zone = meta.get("zone") or zone_for_city(city) or DEFAULT_ZONE
         cities.append(city)
         zones.append(zone)
-        master_t = (meta.get("type") or "").strip()
-        sales_t = map_client_type(str(st or "").strip()) or ""
-        types.append(master_t or sales_t or "Unmapped")
+        sales_raw = str(st or "").strip()
+        master_raw = (meta.get("type_raw") or "").strip()
+        raw = master_raw or sales_raw or "Unmapped"
+        group = (
+            (meta.get("type") or "").strip()
+            or map_client_type(raw)
+            or raw
+        )
+        types.append(group)
+        raws.append(raw)
     work["city"] = cities
     work["zone"] = zones
     work["client_type"] = types
+    work["client_type_raw"] = raws
     if "sales_client_type" in work.columns:
         work = work.drop(columns=["sales_client_type"])
     return work
@@ -583,9 +613,9 @@ def _fetch_lines(
             city=city, zone=zone_n, client_type=client_type
         ) or []
         if client_type and not city and not zone_n:
-            # Prefer master list; also allow sales rows tagged with any raw
-            # source type that maps to this NEW group.
-            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            # Prefer master list; also allow sales rows tagged with matching
+            # raw labels (specific Chase Up, or all IMT sources for group IMT).
+            raw_types = sql_client_type_values(client_type) or [client_type]
             type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
@@ -721,8 +751,14 @@ def _fetch_lines(
         zk = zone_n.strip().lower()
         frame = frame[frame["zone"].astype(str).str.strip().str.lower() == zk]
     if client_type:
-        tk = client_type.strip().lower()
-        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+        classified = classify_client_type_filter(client_type)
+        if classified:
+            mode, label = classified
+            tk = label.strip().lower()
+            col = "client_type_raw" if mode == "raw" else "client_type"
+            if col not in frame.columns:
+                col = "client_type"
+            frame = frame[frame[col].astype(str).str.strip().str.lower() == tk]
     if post_ex_city:
         frame = frame[
             ~frame["city"].astype(str).str.strip().str.lower().isin(post_ex_city)
@@ -732,13 +768,18 @@ def _fetch_lines(
             ~frame["zone"].astype(str).str.strip().str.lower().isin(post_ex_zone)
         ]
     if post_ex_ctype:
-        frame = frame[
-            ~frame["client_type"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .isin(post_ex_ctype)
-        ]
+        for raw_ex in post_ex_ctype:
+            classified = classify_client_type_filter(raw_ex)
+            if not classified:
+                continue
+            mode, label = classified
+            tk = label.strip().lower()
+            col = "client_type_raw" if mode == "raw" else "client_type"
+            if col not in frame.columns:
+                col = "client_type"
+            frame = frame[
+                ~frame[col].astype(str).str.strip().str.lower().eq(tk)
+            ]
     return frame.reset_index(drop=True)
 
 

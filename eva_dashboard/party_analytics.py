@@ -16,7 +16,11 @@ from eva_dashboard.client_language import (
     normalize_oil_type,
     normalize_packing_category,
 )
-from eva_dashboard.client_type_map import map_client_type, raw_client_types_for_group
+from eva_dashboard.client_type_map import (
+    classify_client_type_filter,
+    map_client_type,
+    sql_client_type_values,
+)
 from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round
@@ -117,7 +121,7 @@ def _fetch_party_lines(
             city=city, zone=zone_n, client_type=client_type
         ) or []
         if client_type and not city and not zone_n:
-            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            raw_types = sql_client_type_values(client_type) or [client_type]
             type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
@@ -191,8 +195,14 @@ def _fetch_party_lines(
         zk = zone_n.strip().lower()
         frame = frame[frame["zone"].astype(str).str.strip().str.lower() == zk]
     if client_type:
-        tk = client_type.strip().lower()
-        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+        classified = classify_client_type_filter(client_type)
+        if classified:
+            mode, label = classified
+            tk = label.strip().lower()
+            col = "client_type_raw" if mode == "raw" else "client_type"
+            if col not in frame.columns:
+                col = "client_type"
+            frame = frame[frame[col].astype(str).str.strip().str.lower() == tk]
     return frame.reset_index(drop=True)
 
 
@@ -344,9 +354,9 @@ def list_clients(
     else:
         params: list[Any] = []
         where = ["cl.client IS NOT NULL", "trim(cl.client) != ''"]
-        # Match any raw source type that maps to the NEW group
+        # Specific old type → exact raw match; NEW group → all source types
         if ctype:
-            raw_types = raw_client_types_for_group(ctype) or [ctype]
+            raw_types = sql_client_type_values(ctype) or [ctype]
             placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 f"lower(trim(COALESCE(cl.type, ''))) IN ({placeholders})"
@@ -367,9 +377,15 @@ def list_clients(
         with connect() as conn:
             clients = pd.read_sql_query(sql, conn, params=params)
         if not clients.empty:
-            clients["client_type"] = clients["client_type"].map(
-                lambda t: map_client_type(t) or t
-            )
+            clients["client_type_raw"] = clients["client_type"]
+            classified = classify_client_type_filter(ctype) if ctype else None
+            if classified and classified[0] == "raw":
+                # Keep the specific old label when the user asked for it
+                clients["client_type"] = clients["client_type_raw"]
+            else:
+                clients["client_type"] = clients["client_type_raw"].map(
+                    lambda t: map_client_type(t) or t
+                )
             resolved = clients["city_filter"].map(resolve_city_zone)
             clients["city_filter"] = resolved.map(lambda x: x[0])
             clients["zone"] = resolved.map(lambda x: x[1])
@@ -383,10 +399,12 @@ def list_clients(
                 clients = clients[
                     clients["zone"].astype(str).str.strip().str.lower() == zk
                 ]
-            if ctype:
-                tk = ctype.strip().lower()
+            if ctype and classified:
+                mode, label = classified
+                tk = label.strip().lower()
+                col = "client_type_raw" if mode == "raw" else "client_type"
                 clients = clients[
-                    clients["client_type"].astype(str).str.strip().str.lower() == tk
+                    clients[col].astype(str).str.strip().str.lower() == tk
                 ]
 
     mt_map: dict[str, float] = {}

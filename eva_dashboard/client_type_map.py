@@ -149,3 +149,66 @@ def raw_client_types_for_group(group: str | None) -> list[str]:
         seen.add(k)
         out.append(s)
     return out
+
+
+def canonical_raw_client_type(value: str | None) -> str | None:
+    """Canonical spelling of an existing/source client type, if known."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    key = _norm_key(text)
+    for src in CLIENT_TYPE_GROUP:
+        if _norm_key(src) == key:
+            return src
+    return text
+
+
+def is_specific_raw_client_type(value: str | None) -> bool:
+    """True when ``value`` names an old/source type that rolls up into a broader group.
+
+    E.g. CHASE UP → IMT (specific). Eva Distributors → Eva Distributors (not specific).
+    Bare group names like IMT / LMT are not specific.
+    """
+    if not value:
+        return False
+    key = _norm_key(value)
+    if key in _NEW_GROUP_BY_KEY and key not in _GROUP_BY_KEY:
+        return False
+    if key not in _GROUP_BY_KEY:
+        return False
+    dest = _GROUP_BY_KEY[key]
+    return _norm_key(dest) != key
+
+
+def classify_client_type_filter(
+    value: str | None,
+) -> tuple[str, str] | None:
+    """How to apply a client-type filter.
+
+    Returns ``(\"raw\", label)`` for a specific old type (Chase Up, CSD, …)
+    or ``(\"group\", label)`` for a new reporting group (IMT, LMT, …).
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if is_specific_raw_client_type(text):
+        return ("raw", canonical_raw_client_type(text) or text)
+    mapped = map_client_type(text)
+    if mapped:
+        return ("group", mapped)
+    return ("raw", text)
+
+
+def sql_client_type_values(value: str | None) -> list[str]:
+    """Labels to match against raw ``sales.client_type`` / ``clients.type``."""
+    classified = classify_client_type_filter(value)
+    if not classified:
+        return []
+    mode, label = classified
+    if mode == "raw":
+        return [label]
+    return raw_client_types_for_group(label) or [label]

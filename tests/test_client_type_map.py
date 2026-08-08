@@ -38,16 +38,23 @@ def test_map_client_type_groups() -> None:
     assert map_client_type("Imtiaz Store") == "Imtiaz Store"
 
 
-def test_spoken_aliases_resolve_to_new_groups() -> None:
-    assert normalize_client_type("chase up") == "IMT"
-    assert normalize_client_type("metro") == "IMT"
-    assert normalize_client_type("csd") == "IMT"
-    assert normalize_client_type("north lmt") == "LMT"
-    assert normalize_client_type("gelani") == "LMT"
-    assert normalize_client_type("online") == "Online Customers"
+def test_spoken_aliases_keep_specific_or_broad_group() -> None:
+    # Specific old names stay specific
+    assert normalize_client_type("chase up") == "CHASE UP"
+    assert normalize_client_type("metro") == "METRO HABIB"
+    assert normalize_client_type("csd") == "Canteen Store Department"
+    assert normalize_client_type("north lmt") == "NORTH LMT"
+    assert normalize_client_type("gelani") == "GELANI MART"
+    # Broad group words → NEW groups
+    assert normalize_client_type("imt") == "IMT"
+    assert normalize_client_type("lmt") == "LMT"
     assert normalize_client_type("dealers") == "Dealer"
-    assert extract_client_type_from_text("who are the CSD stores") == "IMT"
-    assert extract_client_type_from_text("North LMT active") == "LMT"
+    assert normalize_client_type("online") == "Online Customers"
+    assert extract_client_type_from_text("who are the CSD stores") == (
+        "Canteen Store Department"
+    )
+    assert extract_client_type_from_text("North LMT active") == "NORTH LMT"
+    assert extract_client_type_from_text("show IMT sales") == "IMT"
 
 
 def test_query_sales_pivots_by_new_client_type() -> None:
@@ -117,28 +124,30 @@ def test_query_sales_pivots_by_new_client_type() -> None:
             assert "LMT" in labels
             assert "Eva Distributors" in labels
 
-            imt = query_sales(
+            chase = query_sales(
                 client_type="chase up",
                 columns="month",
                 months_back=3,
             )
-            assert imt["ok"] is True
-            assert imt["filters"]["client_type"] == "IMT"
-            # Chase + Metro + CSD = 35
-            total = float(imt["matrix"]["rows"][0].get("Total") or 0) if imt[
-                "matrix"
-            ]["rows"] else 0
-            # Month matrix may have Total column or sum months — use answer scope
-            assert "IMT" in (imt.get("answer_markdown") or "")
-            # Volume across months for filtered frame
+            assert chase["ok"] is True
+            assert chase["filters"]["client_type"] == "CHASE UP"
             from eva_dashboard.sales_query import _fetch_lines
 
-            frame = _fetch_lines(
+            # Specific Chase Up only
+            frame_chase = _fetch_lines(
+                date_from="2026-05-01",
+                date_to="2026-07-31",
+                client_type="CHASE UP",
+            )
+            assert float(frame_chase["mt"].sum()) == 10.0
+
+            # Broad IMT group = Chase + Metro + CSD
+            frame_imt = _fetch_lines(
                 date_from="2026-05-01",
                 date_to="2026-07-31",
                 client_type="IMT",
             )
-            assert float(frame["mt"].sum()) == 35.0
+            assert float(frame_imt["mt"].sum()) == 35.0
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

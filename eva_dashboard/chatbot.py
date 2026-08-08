@@ -258,11 +258,12 @@ DATA MODEL (filters you set; tools build tables):
   After a zone table, "city wise" → cities nested under Zone (first column Zone, then City).
 - Channel = Client Type (trade channel). "Which channels grew/declined" → client_type
   rows with Volume + AMS + % vs AMS (not packing, not party list).
-- Client Type = NEW groups only (never old labels). Chase Up/Metro/CSD/SPAR→IMT;
-  NORTH/CENTRAL/SOUTH LMT/Gelani→LMT; dealers→Dealer; USC*→USC; DGP/Navy→DGP.
-  Aliases: Imtiaz→Imtiaz Store; distributors→Eva Distributors; online→Online Customers.
-- which/what/who + client type/channel → parties in that NEW group
-  (list_clients / analyze_parties). Ex: "Metro VTF" / "CSD stores" → IMT.
+- Client Type pivots use NEW groups (Chase Up/Metro/CSD/SPAR→IMT; LMT sources→LMT;
+  dealers→Dealer). But if the user names a specific old type (Chase Up, CSD,
+  Metro, NORTH LMT, Gelani…), filter to that type only — not the whole group.
+  Broad words: imt→IMT, lmt→LMT, dealers→Dealer. Imtiaz→Imtiaz Store; distributors→Eva Distributors.
+- which/what/who + client type → parties in that filter
+  (specific Chase Up / CSD, or whole IMT if they said IMT).
 - Named party / "who is X?" → lookup_party (not a client-type filter).
 - "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
 - Which distributors grew / vs AMS / vs last year (VTF etc.) → analyze_parties with
@@ -731,10 +732,11 @@ TOOLS: list[dict[str, Any]] = [
                     "client_type": {
                         "type": "string",
                         "description": (
-                            "NEW client-type group only (never old labels). "
-                            "Imtiaz/store → Imtiaz Store; distributors → Eva "
-                            "Distributors; Chase Up/Metro/CSD/SPAR → IMT; "
-                            "NORTH/CENTRAL/SOUTH LMT/Gelani → LMT; dealers → Dealer."
+                            "Client type filter. Specific names stay specific "
+                            "(Chase Up, CSD, Metro, NORTH LMT). Broad groups: "
+                            "IMT, LMT, Dealer. Imtiaz→Imtiaz Store; "
+                            "distributors→Eva Distributors. Pivots by channel "
+                            "still roll up to NEW groups."
                         ),
                     },
                     "row_dimension": {

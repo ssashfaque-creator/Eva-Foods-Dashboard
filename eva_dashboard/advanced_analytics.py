@@ -16,7 +16,10 @@ from eva_dashboard.client_language import (
     normalize_oil_type,
     normalize_packing_category,
 )
-from eva_dashboard.client_type_map import raw_client_types_for_group
+from eva_dashboard.client_type_map import (
+    classify_client_type_filter,
+    sql_client_type_values,
+)
 from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round, mt_str, pct_round
@@ -102,7 +105,7 @@ def _fetch_filtered_lines(
     if city or client_type:
         matched = _parties_matching(city=city, client_type=client_type) or []
         if client_type and not city:
-            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            raw_types = sql_client_type_values(client_type) or [client_type]
             type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
@@ -172,13 +175,29 @@ def _fetch_filtered_lines(
         ck = city.strip().lower()
         frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
     if client_type:
-        tk = client_type.strip().lower()
-        frame = frame[frame["client_type"].astype(str).str.strip().str.lower() == tk]
+        classified = classify_client_type_filter(client_type)
+        if classified:
+            mode, label = classified
+            tk = label.strip().lower()
+            col = "client_type_raw" if mode == "raw" else "client_type"
+            if col not in frame.columns:
+                col = "client_type"
+            frame = frame[frame[col].astype(str).str.strip().str.lower() == tk]
     if exclude_client_types:
-        ex = {str(x).strip().lower() for x in exclude_client_types if x}
-        frame = frame[
-            ~frame["client_type"].astype(str).str.strip().str.lower().isin(ex)
-        ]
+        for x in exclude_client_types:
+            if not x:
+                continue
+            classified = classify_client_type_filter(str(x))
+            if not classified:
+                continue
+            mode, label = classified
+            tk = label.strip().lower()
+            col = "client_type_raw" if mode == "raw" else "client_type"
+            if col not in frame.columns:
+                col = "client_type"
+            frame = frame[
+                ~frame[col].astype(str).str.strip().str.lower().eq(tk)
+            ]
     if exclude_cities:
         ex = {str(x).strip().lower() for x in exclude_cities if x}
         frame = frame[~frame["city"].astype(str).str.strip().str.lower().isin(ex)]
