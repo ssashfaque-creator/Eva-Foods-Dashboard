@@ -7,9 +7,14 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from eva_dashboard.client_type_map import (
+    list_new_client_types,
+    map_client_type,
+    raw_client_types_for_group,
+)
 from eva_dashboard.db import connect, init_db
 
-# Spoken / shorthand → canonical clients.type labels (as used in reports)
+# Spoken / shorthand → NEW reporting groups (always remapped; never old long-tail)
 CLIENT_TYPE_ALIASES: dict[str, str] = {
     # Imtiaz Store
     "imtiaz": "Imtiaz Store",
@@ -26,30 +31,56 @@ CLIENT_TYPE_ALIASES: dict[str, str] = {
     "eva distributors": "Eva Distributors",
     "eva dist": "Eva Distributors",
     "dist": "Eva Distributors",
-    # Other common types from live data / reports
+    # Maan
     "maan distributor": "Maan Distributors",
     "maan distributors": "Maan Distributors",
-    "north lmt": "NORTH LMT",
-    "central lmt": "CENTRAL LMT",
-    "chase up": "CHASE UP",
-    "chaseup": "CHASE UP",
-    "metro": "METRO HABIB",
-    "metro habib": "METRO HABIB",
-    "csd": "Canteen Store Department",
-    "canteen": "Canteen Store Department",
-    "canteen store": "Canteen Store Department",
-    "canteen store department": "Canteen Store Department",
-    "spar": "SPAR - IMT",
-    "spar imt": "SPAR - IMT",
+    # LMT (was NORTH/CENTRAL/SOUTH LMT, Gelani, Al Fateh, modern trade, …)
+    "lmt": "LMT",
+    "north lmt": "LMT",
+    "central lmt": "LMT",
+    "south lmt": "LMT",
+    "gelani": "LMT",
+    "gelani mart": "LMT",
+    "al fateh": "LMT",
+    "modern trade": "LMT",
+    "modren trade": "LMT",
+    "modern trade customers": "LMT",
+    # IMT (Chase Up, Metro, CSD, SPAR, MAF, …)
+    "imt": "IMT",
+    "chase up": "IMT",
+    "chaseup": "IMT",
+    "metro": "IMT",
+    "metro habib": "IMT",
+    "csd": "IMT",
+    "canteen": "IMT",
+    "canteen store": "IMT",
+    "canteen store department": "IMT",
+    "spar": "IMT",
+    "spar imt": "IMT",
+    "maf": "IMT",
+    "maf hypermarkets": "IMT",
+    # Other new groups
     "food panda": "FOOD PANDA",
     "foodpanda": "FOOD PANDA",
-    "gelani": "GELANI MART",
-    "gelani mart": "GELANI MART",
-    "online": "Online Customer",
-    "online customer": "Online Customer",
-    "online custome": "Online Customer",
+    "online": "Online Customers",
+    "online customer": "Online Customers",
+    "online customers": "Online Customers",
+    "online custome": "Online Customers",
     "other clients": "Other Clients",
     "other client": "Other Clients",
+    "direct customers": "Direct Customers",
+    "direct customer": "Direct Customers",
+    "dealer": "Dealer",
+    "dealers": "Dealer",
+    "dgp": "DGP",
+    "dgp army": "DGP",
+    "pak navy": "DGP",
+    "usc": "USC",
+    "utility stores": "USC",
+    "utility store": "USC",
+    "donations": "DONATIONS",
+    "madarsa": "DONATIONS",
+    "madrasa": "DONATIONS",
 }
 
 PACKING_ALIASES: dict[str, str] = {
@@ -95,24 +126,28 @@ def _norm(text: str) -> str:
 
 
 def list_known_client_types() -> list[str]:
-    """Distinct client types from clients + sales (canonical spellings)."""
+    """Distinct NEW client-type groups from clients + sales + static map."""
     init_db()
-    names: set[str] = set()
+    names: set[str] = set(list_new_client_types())
     with connect() as conn:
         for row in conn.execute(
             "SELECT DISTINCT type FROM clients WHERE type IS NOT NULL AND trim(type) != ''"
         ):
-            names.add(str(row["type"]).strip())
+            mapped = map_client_type(str(row["type"]).strip())
+            if mapped:
+                names.add(mapped)
         for row in conn.execute(
             "SELECT DISTINCT client_type FROM sales "
             "WHERE client_type IS NOT NULL AND trim(client_type) != ''"
         ):
-            names.add(str(row["client_type"]).strip())
+            mapped = map_client_type(str(row["client_type"]).strip())
+            if mapped:
+                names.add(mapped)
     return sorted(names, key=lambda s: s.lower())
 
 
 def normalize_client_type(value: str | None) -> str | None:
-    """Map spoken client-type text to a canonical label when possible."""
+    """Map spoken / raw client-type text to a NEW reporting group."""
     if not value:
         return None
     text = str(value).strip()
@@ -120,15 +155,22 @@ def normalize_client_type(value: str | None) -> str | None:
         return None
     key = _norm(text)
     if key in CLIENT_TYPE_ALIASES:
-        return CLIENT_TYPE_ALIASES[key]
+        return map_client_type(CLIENT_TYPE_ALIASES[key]) or CLIENT_TYPE_ALIASES[key]
 
-    # Exact case-insensitive match against live types
+    # Existing → new map (and already-new labels)
+    mapped = map_client_type(text)
+    if mapped and _norm(mapped) != key:
+        return mapped
+    if mapped and mapped in list_new_client_types():
+        return mapped
+
+    # Exact case-insensitive match against known NEW groups
     known = list_known_client_types()
     for name in known:
         if _norm(name) == key:
             return name
 
-    # Fuzzy against known types (strong match only)
+    # Fuzzy against known NEW groups (strong match only)
     best_name = None
     best_score = 0.0
     for name in known:
@@ -138,7 +180,8 @@ def normalize_client_type(value: str | None) -> str | None:
             best_name = name
     if best_name and best_score >= 0.82:
         return best_name
-    return text
+    # Last resort: return mapped passthrough (unknown raw label)
+    return mapped or text
 
 
 def normalize_packing_category(value: str | None) -> str | None:
@@ -189,9 +232,13 @@ def extract_all_client_types_from_text(text: str) -> list[str]:
             start, end = m.start(), m.end()
             if any(not (end <= s or start >= e) for s, e, _ in hits):
                 continue
-            hits.append((start, end, CLIENT_TYPE_ALIASES[alias]))
+            canon = (
+                map_client_type(CLIENT_TYPE_ALIASES[alias])
+                or CLIENT_TYPE_ALIASES[alias]
+            )
+            hits.append((start, end, canon))
 
-    # Live type names not already covered
+    # Live NEW group names not already covered
     covered = {c for _, _, c in hits}
     try:
         known = list_known_client_types()
@@ -324,7 +371,8 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             extra = _payload_fields(row["payload_json"])
             candidates[name.lower()] = {
                 "client": name,
-                "client_type": str(row["type"] or "").strip() or None,
+                "client_type": map_client_type(str(row["type"] or "").strip())
+                or None,
                 "city_filter": str(row["city_filter"] or "").strip() or None,
                 "city": str(row["city"] or "").strip() or None,
                 "inactive": str(row["inactive"] or "").strip() or None,
@@ -380,7 +428,7 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
                 existing.update(sales_bits)
                 existing["match_score"] = max(existing["match_score"], round(score, 3))
                 if not existing.get("client_type"):
-                    existing["client_type"] = row["client_type"]
+                    existing["client_type"] = map_client_type(row["client_type"])
                 if not existing.get("city_filter"):
                     existing["city_filter"] = row["city_filter"]
                 if not existing.get("city"):
@@ -388,7 +436,7 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             else:
                 candidates[key] = {
                     "client": name,
-                    "client_type": row["client_type"],
+                    "client_type": map_client_type(row["client_type"]),
                     "city_filter": row["city_filter"],
                     "city": row["city"],
                     "source": "sales",

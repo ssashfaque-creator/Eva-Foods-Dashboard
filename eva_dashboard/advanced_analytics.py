@@ -16,6 +16,7 @@ from eva_dashboard.client_language import (
     normalize_oil_type,
     normalize_packing_category,
 )
+from eva_dashboard.client_type_map import raw_client_types_for_group
 from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round, mt_str, pct_round
@@ -101,6 +102,8 @@ def _fetch_filtered_lines(
     if city or client_type:
         matched = _parties_matching(city=city, client_type=client_type) or []
         if client_type and not city:
+            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
                 + (
@@ -108,12 +111,12 @@ def _fetch_filtered_lines(
                     if matched
                     else "0 OR "
                 )
-                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + f"lower(trim(COALESCE(s.client_type, ''))) IN ({type_placeholders})"
                 + ")"
             )
             if matched:
                 params.extend(matched)
-            params.append(client_type)
+            params.extend(t.lower().strip() for t in raw_types)
         elif matched:
             placeholders = ",".join("?" for _ in matched)
             where.append(f"s.party IN ({placeholders})")

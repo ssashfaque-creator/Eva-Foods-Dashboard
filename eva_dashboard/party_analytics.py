@@ -16,6 +16,7 @@ from eva_dashboard.client_language import (
     normalize_oil_type,
     normalize_packing_category,
 )
+from eva_dashboard.client_type_map import map_client_type, raw_client_types_for_group
 from eva_dashboard.data import _prior_three_month_ranges, pct_change
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.fmt import mt_round
@@ -116,6 +117,8 @@ def _fetch_party_lines(
             city=city, zone=zone_n, client_type=client_type
         ) or []
         if client_type and not city and not zone_n:
+            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
                 + (
@@ -123,12 +126,12 @@ def _fetch_party_lines(
                     if matched
                     else "0 OR "
                 )
-                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + f"lower(trim(COALESCE(s.client_type, ''))) IN ({type_placeholders})"
                 + ")"
             )
             if matched:
                 params.extend(matched)
-            params.append(client_type)
+            params.extend(t.lower().strip() for t in raw_types)
         elif matched:
             placeholders = ",".join("?" for _ in matched)
             where.append(f"s.party IN ({placeholders})")
@@ -341,10 +344,14 @@ def list_clients(
     else:
         params: list[Any] = []
         where = ["cl.client IS NOT NULL", "trim(cl.client) != ''"]
-        # City/zone resolved in Python (blank/undefined → Karachi/SOUTH)
+        # Match any raw source type that maps to the NEW group
         if ctype:
-            where.append("lower(trim(COALESCE(cl.type, ''))) = lower(trim(?))")
-            params.append(ctype)
+            raw_types = raw_client_types_for_group(ctype) or [ctype]
+            placeholders = ",".join("?" for _ in raw_types)
+            where.append(
+                f"lower(trim(COALESCE(cl.type, ''))) IN ({placeholders})"
+            )
+            params.extend(t.lower().strip() for t in raw_types)
 
         sql = f"""
         SELECT
@@ -360,6 +367,9 @@ def list_clients(
         with connect() as conn:
             clients = pd.read_sql_query(sql, conn, params=params)
         if not clients.empty:
+            clients["client_type"] = clients["client_type"].map(
+                lambda t: map_client_type(t) or t
+            )
             resolved = clients["city_filter"].map(resolve_city_zone)
             clients["city_filter"] = resolved.map(lambda x: x[0])
             clients["zone"] = resolved.map(lambda x: x[1])
@@ -372,6 +382,11 @@ def list_clients(
                 zk = zone_f.strip().lower()
                 clients = clients[
                     clients["zone"].astype(str).str.strip().str.lower() == zk
+                ]
+            if ctype:
+                tk = ctype.strip().lower()
+                clients = clients[
+                    clients["client_type"].astype(str).str.strip().str.lower() == tk
                 ]
 
     mt_map: dict[str, float] = {}

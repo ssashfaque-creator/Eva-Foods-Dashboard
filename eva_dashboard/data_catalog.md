@@ -57,11 +57,17 @@ Every category upload **replaces** the whole table.
 |---|---|
 | `client_id` | PK |
 | `client` | Party name (join to sales.party via normalize) |
-| `type` | Client type (Eva Distributors, …) |
+| `type` | Raw client type from Excel (remapped for reports — see below) |
 | `city_filter` | **Report geography** (use this, not `city`) |
 | `city` | Secondary city field — do **not** use for report city |
 | `inactive` | `Y` / blank |
 | `payload_json` | Full Excel row (Locality, Zone, CrDays, PaymentType, …) |
+
+**Client Type groups (app logic):** raw `type` / `sales.client_type` values
+are remapped via `eva_dashboard/client_type_map.py` to NEW groups
+(e.g. CHASE UP/METRO/CSD/SPAR → **IMT**; NORTH/CENTRAL/SOUTH LMT → **LMT**;
+Local Dealers/X-DEALERS → **Dealer**). Chatbot filters, pivots, and answers
+always use the new groups — never the old long-tail labels.
 
 **Zones (app logic, not a DB column):** each City-Filter maps to
 `SOUTH` / `CENTRAL` / `NORTH` via `eva_dashboard/geo.py`.

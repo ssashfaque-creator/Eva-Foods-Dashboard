@@ -101,7 +101,7 @@ def test_client_type_aliases() -> None:
     assert extract_client_type_from_text(
         "Canola standup price for Distributors last week"
     ) == "Eva Distributors"
-    assert extract_client_type_from_text("canteen store sales") == "Canteen Store Department"
+    assert extract_client_type_from_text("canteen store sales") == "IMT"
 
 
 def test_imtiaz_month_wise_filters_client_type() -> None:

@@ -164,11 +164,8 @@ def test_compare_silent_not_ordered_dumping_routing() -> None:
                 "Imtiaz vs Metro vs Chase Up this month"
             )
             assert multi_type["mode"] == "compare_client_types"
-            assert multi_type["entities"] == [
-                "Imtiaz Store",
-                "METRO HABIB",
-                "CHASE UP",
-            ]
+            # Metro + Chase Up both remap to IMT
+            assert multi_type["entities"] == ["Imtiaz Store", "IMT"]
             pairwise = infer_advanced_from_text(
                 "Compare Imtiaz vs distributors growth last month"
             )
@@ -191,9 +188,10 @@ def test_compare_silent_not_ordered_dumping_routing() -> None:
                 period="July",
             )
             assert type3["ok"] is True
-            assert len(type3["entities"]) == 3
+            # METRO HABIB + CHASE UP collapse to IMT
+            assert len(type3["entities"]) == 2
             names = {e["name"] for e in type3["entities"]}
-            assert names == {"Imtiaz Store", "METRO HABIB", "CHASE UP"}
+            assert names == {"Imtiaz Store", "IMT"}
 
             disp = _dispatch_tool(
                 "advanced_query",

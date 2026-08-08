@@ -258,14 +258,11 @@ DATA MODEL (filters you set; tools build tables):
   After a zone table, "city wise" → cities nested under Zone (first column Zone, then City).
 - Channel = Client Type (trade channel). "Which channels grew/declined" → client_type
   rows with Volume + AMS + % vs AMS (not packing, not party list).
-- Client-type aliases (set `client_type`, never invent a Business Unit for these):
-  Imtiaz/store → Imtiaz Store; distributors → Eva Distributors; else exact live type
-  (Chase Up, Metro, CSD, SPAR, Food Panda, Gelani, LMT, …).
-- which/what/who + ANY client type (Distributors, Imtiaz, Metro, Chase Up, CSD,
-  SPAR, Food Panda, Gelani, Online, LMT, …) → individual parties in that type
-  (list_clients or analyze_parties). Inherit prior city/type/period.
-  Examples: "which distributor is selling Maan"; "what Metro sells the most VTF";
-  "which Chase Up is active in Lahore"; "who are the CSD stores".
+- Client Type = NEW groups only (never old labels). Chase Up/Metro/CSD/SPAR→IMT;
+  NORTH/CENTRAL/SOUTH LMT/Gelani→LMT; dealers→Dealer; USC*→USC; DGP/Navy→DGP.
+  Aliases: Imtiaz→Imtiaz Store; distributors→Eva Distributors; online→Online Customers.
+- which/what/who + client type/channel → parties in that NEW group
+  (list_clients / analyze_parties). Ex: "Metro VTF" / "CSD stores" → IMT.
 - Named party / "who is X?" → lookup_party (not a client-type filter).
 - "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
 - Which distributors grew / vs AMS / vs last year (VTF etc.) → analyze_parties with
@@ -734,8 +731,10 @@ TOOLS: list[dict[str, Any]] = [
                     "client_type": {
                         "type": "string",
                         "description": (
-                            "Filter to one Client Type. Aliases: Imtiaz/store → "
-                            "Imtiaz Store; Distributor(s) → Eva Distributors"
+                            "NEW client-type group only (never old labels). "
+                            "Imtiaz/store → Imtiaz Store; distributors → Eva "
+                            "Distributors; Chase Up/Metro/CSD/SPAR → IMT; "
+                            "NORTH/CENTRAL/SOUTH LMT/Gelani → LMT; dealers → Dealer."
                         ),
                     },
                     "row_dimension": {

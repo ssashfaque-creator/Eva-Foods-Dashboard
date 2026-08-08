@@ -26,6 +26,10 @@ from eva_dashboard.data import (
     price_fetch_per_maund,
     weighted_avg,
 )
+from eva_dashboard.client_type_map import (
+    map_client_type,
+    raw_client_types_for_group,
+)
 from eva_dashboard.geo import (
     DEFAULT_CITY,
     DEFAULT_ZONE,
@@ -86,7 +90,7 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
             continue
         raw_city = (r["city_filter"] or r["city"] or "").strip()
         city, zone = resolve_city_zone(raw_city)
-        ctype = (r["type"] or "").strip()
+        ctype = map_client_type((r["type"] or "").strip()) or "Unmapped"
         lookup.setdefault(
             key,
             {
@@ -156,7 +160,7 @@ def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
         cities.append(city)
         zones.append(zone)
         master_t = (meta.get("type") or "").strip()
-        sales_t = str(st or "").strip()
+        sales_t = map_client_type(str(st or "").strip()) or ""
         types.append(master_t or sales_t or "Unmapped")
     work["city"] = cities
     work["zone"] = zones
@@ -579,8 +583,10 @@ def _fetch_lines(
             city=city, zone=zone_n, client_type=client_type
         ) or []
         if client_type and not city and not zone_n:
-            # Prefer master list; also allow sales rows tagged with that type
-            # even if the party is missing from clients.
+            # Prefer master list; also allow sales rows tagged with any raw
+            # source type that maps to this NEW group.
+            raw_types = raw_client_types_for_group(client_type) or [client_type]
+            type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
                 + (
@@ -588,12 +594,12 @@ def _fetch_lines(
                     if matched
                     else "0 OR "
                 )
-                + "lower(trim(COALESCE(s.client_type, ''))) = lower(trim(?))"
+                + f"lower(trim(COALESCE(s.client_type, ''))) IN ({type_placeholders})"
                 + ")"
             )
             if matched:
                 params.extend(matched)
-            params.append(client_type)
+            params.extend(t.lower().strip() for t in raw_types)
         elif matched:
             placeholders = ",".join("?" for _ in matched)
             where.append(f"s.party IN ({placeholders})")
