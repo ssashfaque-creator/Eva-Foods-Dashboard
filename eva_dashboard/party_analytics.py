@@ -291,11 +291,13 @@ def list_clients(
     date_to: str | None = None,
     limit: int = 200,
     include_zero: bool = False,
+    active_only: bool = False,
 ) -> dict[str, Any]:
     """List clients matching city / zone / client type / BU — not fuzzy name search.
 
     ``business_unit`` scopes the volume ranking (who bought that BU) while
     still listing clients in the city/type scope when provided.
+    ``active_only`` drops clients flagged inactive on the master.
     """
     from eva_dashboard.geo import normalize_zone, resolve_city_zone
 
@@ -303,6 +305,7 @@ def list_clients(
     zone_f = normalize_zone(zone) if zone else None
     ctype = normalize_client_type((client_type or "").strip() or None)
     bu = _normalize_business_unit(business_unit)
+    active_only_f = bool(active_only)
     if not city_f and not zone_f and not ctype and not bu:
         return {
             "ok": False,
@@ -427,8 +430,36 @@ def list_clients(
             }
 
     rows: list[dict[str, Any]] = []
+    inactive_lookup: dict[str, str] = {}
+    if active_only_f:
+        try:
+            from eva_dashboard.sales_query import _clients_lookup, _norm_party_key
+
+            inactive_lookup = {
+                _norm_party_key(meta.get("client") or key): str(
+                    meta.get("inactive") or ""
+                )
+                for key, meta in _clients_lookup().items()
+            }
+        except Exception:  # noqa: BLE001
+            inactive_lookup = {}
     for _, r in clients.iterrows():
         name = str(r["client"])
+        inactive_flag = str(r.get("inactive") or "").strip().upper()
+        if not inactive_flag and inactive_lookup:
+            from eva_dashboard.sales_query import _norm_party_key
+
+            inactive_flag = str(
+                inactive_lookup.get(_norm_party_key(name), "")
+            ).strip().upper()
+        if active_only_f and inactive_flag in {
+            "Y",
+            "YES",
+            "1",
+            "TRUE",
+            "INACTIVE",
+        }:
+            continue
         if from_sales_only:
             mt = round(float(r.get("mt") or 0.0), 3)
         else:
@@ -442,7 +473,7 @@ def list_clients(
                 "city_filter": (r.get("city_filter") or None) or None,
                 "city": (r.get("city") or None) or None,
                 "zone": (r.get("zone") or None) or None,
-                "inactive": (r.get("inactive") or None) or None,
+                "inactive": inactive_flag or (r.get("inactive") or None) or None,
                 "mt": mt,
             }
         )
@@ -517,6 +548,7 @@ def list_clients(
             "zone": zone_f,
             "client_type": ctype,
             "business_unit": bu,
+            "active_only": True if active_only_f else None,
         },
         "period_phrase": period,
         "period": {
@@ -526,6 +558,7 @@ def list_clients(
         },
         "limit": lim,
         "include_zero": include_zero,
+        "active_only": active_only_f,
     }
 
     return {
@@ -569,6 +602,7 @@ def analyze_parties(
     per_party_mix: bool = False,
     grown_only: bool = False,
     declined_only: bool = False,
+    active_only: bool = False,
 ) -> dict[str, Any]:
     """Rank / summarize parties or cities.
 
@@ -593,6 +627,7 @@ def analyze_parties(
     bu = _normalize_business_unit(business_unit)
     oil = normalize_oil_type((oil_type or "").strip() or None)
     pack = normalize_packing_category((packing_category or "").strip() or None)
+    active_only_f = bool(active_only)
     brand_prefix = None
     brand_n = (brand or "").strip().lower()
     if brand_n in {"eva", "eva foods"}:
@@ -1395,6 +1430,21 @@ def analyze_parties(
         }
         rows.append(entry)
 
+    if active_only_f and group == "party" and rows:
+        try:
+            from eva_dashboard.sales_query import _inactive_party_keys, _norm_party_key
+
+            inactive_keys = _inactive_party_keys()
+            rows = [
+                r
+                for r in rows
+                if _norm_party_key(str(r.get("party") or "")) not in inactive_keys
+            ]
+        except Exception:  # noqa: BLE001
+            pass
+    if active_only_f:
+        filters["active_only"] = True
+
     if metric_n == "doing_well":
         well = [r for r in rows if r["doing_well"] and (r["volume_mt"] or 0) > 0]
         not_well = [r for r in rows if not r["doing_well"] and (r["volume_mt"] or 0) > 0]
@@ -2173,36 +2223,29 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     if re.search(r"\bvtf\b|\bbanaspati\b", t):
         out["oil_type"] = "Eva VTF"
     else:
-        out["oil_type"] = normalize_oil_type(
-            next(
-                (
-                    a
-                    for a in ("canola", "cooking", "sunflower", "eva canola")
-                    if a in t
-                ),
-                None,
-            )
-        )
-    out["packing_category"] = normalize_packing_category(
-        next(
-            (
-                a
-                for a in (
-                    "pillow",
-                    "standup",
-                    "stand up",
-                    "pet bottle",
-                    "jerry can",
-                    "jerry",
-                    "pouch",
-                    "tin",
-                    "bucket",
-                )
-                if a in t
-            ),
-            None,
-        )
-    )
+        oil_hit = None
+        for a in ("eva canola", "canola", "cooking", "sunflower"):
+            if re.search(rf"\b{re.escape(a)}\b", t):
+                oil_hit = a
+                break
+        out["oil_type"] = normalize_oil_type(oil_hit)
+    # Word-boundary matches only — "marketing" must not become packing Tin
+    pack_hit = None
+    for a in (
+        "pillow",
+        "standup",
+        "stand up",
+        "pet bottle",
+        "jerry can",
+        "jerry",
+        "pouch",
+        "tin",
+        "bucket",
+    ):
+        if re.search(rf"\b{re.escape(a)}\b", t):
+            pack_hit = a
+            break
+    out["packing_category"] = normalize_packing_category(pack_hit)
 
     if re.search(r"\beva sales\b|\bfor eva\b|\beva vtf\b", t) and not re.search(
         r"\beva distributors?\b", t
@@ -2338,7 +2381,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
             out["sort"] = "asc"
     elif re.search(
         r"\b("
-        r"grown|grow|growth|grew|"
+        r"grown|grow|growth|grew|growing|"
         r"declined?|dropped|fallen|fell|"
         r"vs\.?\s*last year|versus last year|since last year|from last year|"
         r"year over year|\byoy\b"
@@ -2369,13 +2412,34 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         # else: last full month (handled in analyze_parties) + YoY prior year
         declining = bool(
             re.search(r"\b(declined?|dropped|fallen|fell)\b", t)
-        ) and not bool(re.search(r"\b(grown|grew|growth)\b", t))
-        growing = bool(re.search(r"\b(grown|grew|growth)\b", t)) and not declining
+        ) and not bool(re.search(r"\b(grown|grew|growth|growing)\b", t))
+        sort_only = bool(
+            re.search(
+                r"\b(sort|rank|order)\b.+\b(ams\s*growth|growth|ams)\b|"
+                r"\bby\s+ams\s*growth\b|\bsorted?\s+by\s+(ams\s*)?growth\b",
+                t,
+            )
+        )
+        only_growing = bool(
+            re.search(
+                r"\b("
+                r"only\s+(the\s+)?grow(?:n|ing)|show\s+only\s+grow|"
+                r"grown\s+only|growing\s+only|that\s+(have\s+)?grown"
+                r")\b",
+                t,
+            )
+        )
+        growing = bool(
+            re.search(r"\b(grown|grew|growth|growing)\b", t)
+        ) and not declining
         if declining:
             out["sort"] = "asc"
             out["declined_only"] = True
             out["limit"] = max(int(out.get("limit") or 10), 25)
-        elif growing:
+        elif sort_only and not only_growing:
+            # "sort by AMS growth" → rank by metric, do not filter growers
+            out["sort"] = "desc"
+        elif growing or only_growing:
             out["sort"] = "desc"
             out["grown_only"] = True
             out["limit"] = max(int(out.get("limit") or 10), 25)

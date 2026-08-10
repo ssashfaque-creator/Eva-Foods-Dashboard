@@ -297,13 +297,13 @@ DEFAULTS (tools also enforce these):
 - Columns: client_type | city | month. Tables include row + column totals.
 - Zones: SOUTH, CENTRAL, NORTH. "zone wise" / "by zone" → row_dimension=zone.
   "city wise" after a zone view → row_dimension=city with zone grouping.
-- [FOLLOW-UP …] / Reply: reuse that answer's filters via prior_spec (same grain unless asked
-  to regroup, drill, remove, include/combine, list individuals, sold-to, or YoY-compare).
+- [FOLLOW-UP …] / Reply: reuse filters via prior_spec unless regroup/drill/remove/YoY/etc.
+- Remove inactive → drop inactive clients (not the whole channel). Sample/marketing → party names.
+- Add city layer → nest City. Only growing → grown-only; sort by AMS growth → rank only.
 
 RESPONSE FORMAT:
-- Start with the tool's `answer_markdown` tables verbatim (keep column order).
-- Then ### Analysis: 2–3 one-line bullets from that table only (no bold labels).
-- No metric bullet lists outside ### Analysis.
+- Start with tool `answer_markdown` tables verbatim.
+- Then ### Analysis: 2–4 one-line executive bullets (no bold labels).
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -348,13 +348,21 @@ def _extract_analysis_bullets(text: str) -> str:
     return "\n".join(bullets[:6])
 
 
-def _compose_tables_plus_analysis(tool_md: str, model_reply: str) -> str:
+def _compose_tables_plus_analysis(
+    tool_md: str,
+    model_reply: str,
+    *,
+    fallback_facts: str | None = None,
+) -> str:
     """Deterministic tables + GPT analysis; omit canned tool bullets when AI writes."""
     tables = _strip_analysis_section(tool_md).rstrip()
     model_analysis = _extract_analysis_bullets(model_reply)
     if model_analysis:
         return f"{tables}\n\n### Analysis\n{model_analysis}\n"
-    # Last resort only — prefer no Analysis over repeating weak canned lines
+    # Fallback: heuristic facts beat a blank Analysis block
+    facts = (fallback_facts or "").strip() or _extract_analysis_bullets(tool_md)
+    if facts:
+        return f"{tables}\n\n### Analysis\n{facts}\n"
     return tables + "\n"
 
 
@@ -378,18 +386,20 @@ _FAST_RESPONSE_INSTRUCTIONS = (
 )
 
 _ANALYSIS_ONLY_SYSTEM = (
-    "You are Eva Foods' commercial analyst. Tables are already built — "
-    "do NOT rebuild or invent numbers.\n"
-    "Reply with ONLY ### Analysis and 2-3 one-line bullets. Keep it short.\n"
+    "You are Eva Foods' commercial analyst briefing an executive. "
+    "Tables are already built — do NOT rebuild or invent numbers.\n"
+    "Reply with ONLY ### Analysis and 2-4 one-line bullets.\n"
     "Rules:\n"
-    "- No bold headings / labels (not 'Sales Leader:' — just the insight).\n"
-    "- One fact per bullet; include the key number(s).\n"
-    "- Prefer: who leads + gap/share; volume vs AMS / % change when present; "
-    "one risk or soft spot.\n"
-    "- Skip obvious restatements of every row. No filler.\n"
-    "- Use only numbers visible in the tool tables.\n"
-    "- If the tool says no sales / no matching entities / empty table, say that "
-    "in one line — do NOT invent leaders or volumes."
+    "- No bold labels / section titles inside bullets.\n"
+    "- Interpret what matters: concentration, momentum (AMS/YoY), who is "
+    "pulling ahead or dragging, and one actionable risk or opportunity.\n"
+    "- Prefer comparisons (gap vs #2, % of total, AMS vs prior) over "
+    "restating the top row alone.\n"
+    "- Tie the insight to the user's question when possible.\n"
+    "- Use only numbers visible in the tool tables or Key facts.\n"
+    "- If the table is empty / no matching entities, say that in one line — "
+    "do NOT invent leaders or volumes.\n"
+    "- Skip filler and obvious restatements of every row."
 )
 
 
@@ -1689,6 +1699,19 @@ def _looks_national_scope(text: str) -> bool:
     )
 
 
+def _wants_active_only(text: str) -> bool:
+    """True for remove-inactive / active-only follow-ups."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(remove|exclude|drop|without|filter\s+out)\s+"
+            r"(the\s+)?inactive\b|"
+            r"\bactive\s+only\b|\bonly\s+active\b",
+            t,
+        )
+    )
+
+
 def _looks_same_format(text: str) -> bool:
     """True for 'in the same format / same way / same table layout'."""
     t = (text or "").lower()
@@ -1793,7 +1816,7 @@ def _split_remove_value_phrases(phrase: str) -> list[str]:
     found_units = _extract_business_units_from_text(raw)
     if len(found_units) >= 2:
         return found_units
-    parts = re.split(r"\s*,\s*|\s+and\s+|\s*&\s*", raw, flags=re.IGNORECASE)
+    parts = re.split(r"\s*,\s*|\s+and\s+|\s*&\s*|/", raw, flags=re.IGNORECASE)
     out: list[str] = []
     for p in parts:
         cleaned = re.sub(r"\s+", " ", p).strip(" .,!?")
@@ -1834,11 +1857,28 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
     raw = (phrase or "").strip()
     if not raw:
         return None
-    # Client types first (distributors, Imtiaz, …) — aliases / extract only,
+    key = re.sub(r"\s+", " ", raw.lower()).strip()
+
+    # Inactive clients master flag — before client_type aliases like "distributors"
+    if re.match(
+        r"^inactive(\s+(distributors?|parties|clients?|accounts?|rows?))?$",
+        key,
+    ) or key in {"inactives", "inactive only"}:
+        return ("inactive", "Y")
+
+    # Sample / marketing / test parties (name fragments, not packing Tin)
+    if re.search(
+        r"\b(sample(\s+for)?(\s+marketing)?|marketing(\s+sample)?|"
+        r"test\s*(client|party|distributor)?|dummy)\b",
+        key,
+    ):
+        frag = re.sub(r"[/]+", " ", key).strip()
+        return ("party_like", frag)
+
+    # Client types (distributors, Imtiaz, …) — aliases / extract only,
     # never passthrough unknown text as a client type.
     from eva_dashboard.client_language import CLIENT_TYPE_ALIASES, list_known_client_types
 
-    key = re.sub(r"\s+", " ", raw.lower()).strip()
     if key in CLIENT_TYPE_ALIASES:
         return ("client_type", CLIENT_TYPE_ALIASES[key])
     ctype = extract_client_type_from_text(raw)
@@ -1880,6 +1920,17 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
     pack = extract_packing_from_text(raw)
     if pack:
         return ("packing_category", pack)
+
+    # Exact party name from clients master (free-text exclude)
+    try:
+        from eva_dashboard.sales_query import _clients_lookup, _norm_party_key
+
+        needle = _norm_party_key(raw)
+        meta = _clients_lookup().get(needle)
+        if meta and meta.get("client"):
+            return ("party", str(meta["client"]))
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -1991,6 +2042,12 @@ def extract_regroup_dimension(text: str) -> str | None:
     t = (text or "").lower()
     patterns: list[tuple[str, str]] = [
         (
+            r"\b(add(ing)?(\s+a)?|include|with|nest)\s+"
+            r"(zones?|regions?)\s+layer\b|"
+            r"\badd(ing)?\s+(a\s+)?(zone|region)\b",
+            "zone",
+        ),
+        (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
             r"organise\s+by|organize\s+by)\s+(zones?|regions?)\b",
             "zone",
@@ -2001,11 +2058,28 @@ def extract_regroup_dimension(text: str) -> str | None:
             "zone",
         ),
         (
+            r"\b(add(ing)?(\s+a)?|include|with|nest)\s+"
+            r"(cities|city)\s+layer\b|"
+            r"\badd(ing)?\s+(a\s+)?city\b|\bnest\s+by\s+city\b",
+            "city",
+        ),
+        (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
             r"organise\s+by|organize\s+by)\s+(cities|city)\b",
             "city",
         ),
         (r"\b(city[- ]?wise|by\s+city|cities\s+wise|show\s+city\s+wise)\b", "city"),
+        (
+            r"\b(add(ing)?(\s+a)?|include|with)\s+"
+            r"(business\s*units?|bu)\s+layer\b|"
+            r"\badd(ing)?\s+(a\s+)?(business\s*unit|bu)\b",
+            "business_unit",
+        ),
+        (
+            r"\b(add(ing)?(\s+a)?|include|with)\s+"
+            r"(products?|packings?|packing\s+categor(?:y|ies))\s+layer\b",
+            "packing_category",
+        ),
         (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+"
             r"(client\s*types?|channels?)\b",
@@ -2643,7 +2717,7 @@ def _looks_party_growth_rank(text: str) -> bool:
     return bool(
         re.search(
             r"\b("
-            r"grown|grew|growth|grow|"
+            r"grown|grew|growth|grow|growing|"
             r"declined?|dropped|fallen|fell|"
             r"vs\.?\s*ams|against ams|relative to ams|"
             r"year over year|\byoy\b|vs\.?\s*last year|versus last year|"
@@ -2749,6 +2823,8 @@ def _party_filters_from_prior(
         out["packing_category"] = pf["packing_category"]
     if pf.get("client_type"):
         out["client_type"] = pf["client_type"]
+    if pf.get("active_only"):
+        out["active_only"] = True
     bu = pf.get("business_unit")
     units = list(prior_spec.get("business_units") or [])
     if not bu and len(units) == 1:
@@ -3853,6 +3929,8 @@ def _dispatch_tool(
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             limit=int(arguments.get("limit") or 200),
+            active_only=_wants_active_only(user_text)
+            or bool(prior_ctx.get("active_only")),
         )
 
     # v0.4.2: wrong tool under required → still honor show-me X sales defaults
@@ -4183,6 +4261,13 @@ def _dispatch_tool(
             if not extract_zone_from_text(user_text):
                 zone_arg = None
 
+        active_only = bool(
+            arguments.get("active_only")
+            or (excludes or {}).get("inactive")
+            or ((use_prior or {}).get("filters") or {}).get("active_only")
+            or _wants_active_only(user_text)
+        )
+
         return query_sales(
             period=period_arg,
             date_from=arguments.get("date_from"),
@@ -4204,6 +4289,7 @@ def _dispatch_tool(
             excludes=excludes,
             prior_spec=use_prior or model_prior,
             compare="yoy" if is_yoy else (arguments.get("compare") or None),
+            active_only=active_only,
         )
     if name == "lookup_party":
         # If language is clearly a city+type list, redirect
@@ -4296,6 +4382,9 @@ def _dispatch_tool(
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             limit=int(arguments.get("limit") or inferred.get("limit") or 200),
+            active_only=_wants_active_only(user_text)
+            or bool(arguments.get("active_only"))
+            or bool(prior_ctx.get("active_only")),
         )
     if name == "advanced_query":
         return _dispatch_advanced(arguments, user_text, prior_spec=prior_spec)
@@ -4491,6 +4580,12 @@ def _dispatch_tool(
             ),
             declined_only=bool(
                 arguments.get("declined_only") or inferred.get("declined_only")
+            ),
+            active_only=bool(
+                arguments.get("active_only")
+                or inferred.get("active_only")
+                or prior_ctx.get("active_only")
+                or _wants_active_only(user_text)
             ),
         )
     if name == "query_price":
@@ -5460,29 +5555,35 @@ def chat_completion(
             # Slow path: lean analysis-only call (no tools schema, short system)
             if on_status:
                 on_status("Writing analysis…")
+            facts = _extract_analysis_bullets(sales_markdown)
+            analysis_user = f"User question: {last_user}\n\n"
+            if facts:
+                analysis_user += (
+                    "Key facts from the numbers (use these; do not invent):\n"
+                    f"{facts}\n\n"
+                )
+            analysis_user += (
+                f"Tool tables:\n{_strip_analysis_section(sales_markdown)}"
+            )
             analysis_messages = [
                 {"role": "system", "content": _ANALYSIS_ONLY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"User question: {last_user}\n\n"
-                        f"Tool tables:\n{_strip_analysis_section(sales_markdown)}"
-                    ),
-                },
+                {"role": "user", "content": analysis_user},
             ]
             try:
                 analysis_resp = client.chat.completions.create(
                     model=model,
                     messages=analysis_messages,
-                    temperature=0.35,
-                    max_tokens=500,
+                    temperature=0.4,
+                    max_tokens=650,
                 )
                 model_reply = (
                     analysis_resp.choices[0].message.content or ""
                 ).strip()
             except Exception:  # noqa: BLE001
                 model_reply = ""
-            final = _compose_tables_plus_analysis(sales_markdown, model_reply)
+            final = _compose_tables_plus_analysis(
+                sales_markdown, model_reply, fallback_facts=facts
+            )
             working.append({"role": "assistant", "content": final})
             _attach_followup_meta(working, **follow_meta)
             return final, _prune_session_messages(working)

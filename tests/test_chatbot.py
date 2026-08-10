@@ -79,9 +79,10 @@ def test_compose_tables_plus_gpt_analysis() -> None:
     assert "Distributors lead Lahore at 42 MT" in composed
     assert "Canned insight" not in composed
 
-    # No AI analysis → keep tables only (do not resurface canned bullets)
+    # No AI bullets → fall back to heuristic facts (better than blank Analysis)
     fallback = _compose_tables_plus_analysis(tool_md, "Thanks!")
-    assert "Canned insight from the tool." not in fallback
+    assert "### Analysis" in fallback
+    assert "Canned insight from the tool." in fallback
     assert "eva-mtx" in fallback
 
 

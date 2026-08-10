@@ -91,7 +91,7 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
         if _CLIENTS_CACHE is not None and _CLIENTS_CACHE_SIG == sig:
             return _CLIENTS_CACHE
         rows = conn.execute(
-            "SELECT client, type, city_filter, city FROM clients"
+            "SELECT client, type, city_filter, city, inactive FROM clients"
         ).fetchall()
     lookup: dict[str, dict[str, str]] = {}
     for r in rows:
@@ -102,6 +102,8 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
         city, zone = resolve_city_zone(raw_city)
         raw_type = (r["type"] or "").strip() or "Unmapped"
         group = map_client_type(raw_type) or raw_type
+        inactive_raw = str(r["inactive"] or "").strip().upper()
+        inactive = "Y" if inactive_raw in {"Y", "YES", "1", "TRUE", "INACTIVE"} else ""
         lookup.setdefault(
             key,
             {
@@ -110,6 +112,7 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
                 "zone": zone,
                 "type": group,
                 "type_raw": raw_type,
+                "inactive": inactive,
             },
         )
     _CLIENTS_CACHE = lookup
@@ -122,9 +125,10 @@ def _parties_matching(
     city: str | None = None,
     zone: str | None = None,
     client_type: str | None = None,
+    active_only: bool = False,
 ) -> list[str] | None:
     """Raw client names matching city/zone/type, or None if no such filter."""
-    if not city and not zone and not client_type:
+    if not city and not zone and not client_type and not active_only:
         return None
     lookup = _clients_lookup()
     city_key = (city or "").strip().lower()
@@ -132,6 +136,8 @@ def _parties_matching(
     classified = classify_client_type_filter(client_type) if client_type else None
     names: list[str] = []
     for meta in lookup.values():
+        if active_only and str(meta.get("inactive") or "").strip().upper() == "Y":
+            continue
         if city_key and meta["city"].strip().lower() != city_key:
             continue
         if zone_key and str(meta.get("zone") or "").strip().lower() != zone_key:
@@ -148,6 +154,29 @@ def _parties_matching(
         if meta["client"]:
             names.append(meta["client"])
     return names
+
+
+def _inactive_party_keys() -> set[str]:
+    """Normalized party keys flagged inactive on the clients master."""
+    return {
+        key
+        for key, meta in _clients_lookup().items()
+        if str(meta.get("inactive") or "").strip().upper() == "Y"
+    }
+
+
+def _party_keys_matching_fragments(fragments: list[str]) -> set[str]:
+    """Normalized party keys whose display name contains any fragment."""
+    frags = [re.sub(r"\s+", " ", str(f)).strip().lower() for f in fragments if f]
+    frags = [f for f in frags if len(f) >= 3]
+    if not frags:
+        return set()
+    keys: set[str] = set()
+    for key, meta in _clients_lookup().items():
+        name = _norm_party_key(meta.get("client") or key)
+        if any(f in name for f in frags):
+            keys.add(key)
+    return keys
 
 
 def _attach_client_dims(frame: pd.DataFrame) -> pd.DataFrame:
@@ -595,6 +624,7 @@ def _fetch_lines(
     client_type: str | None = None,
     party: str | None = None,
     excludes: dict[str, list[str]] | None = None,
+    active_only: bool = False,
 ) -> pd.DataFrame:
     """Pull line-level MT with taxonomy + geography + client type.
 
@@ -715,6 +745,33 @@ def _fetch_lines(
         params.extend(
             re.sub(r"\s+", " ", str(v)).strip().lower() for v in ex["party"]
         )
+
+    drop_inactive = bool(active_only) or bool(ex.get("inactive"))
+    party_like_frags = [
+        str(v).strip()
+        for v in (ex.get("party_like") or [])
+        if str(v).strip()
+    ]
+    # Prefer master-driven party exclusions when we can resolve names.
+    drop_party_keys: set[str] = set()
+    if drop_inactive:
+        drop_party_keys |= _inactive_party_keys()
+    if party_like_frags:
+        drop_party_keys |= _party_keys_matching_fragments(party_like_frags)
+    if drop_party_keys:
+        # Also drop by exact display names when available
+        drop_names = [
+            meta.get("client") or key
+            for key, meta in _clients_lookup().items()
+            if key in drop_party_keys
+        ]
+        if drop_names:
+            placeholders = ",".join("?" for _ in drop_names)
+            where.append(
+                f"lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
+                f"NOT IN ({placeholders})"
+            )
+            params.extend(_norm_party_key(n) for n in drop_names)
 
     sql = f"""
     SELECT
@@ -1916,6 +1973,7 @@ def query_sales(
     excludes: dict[str, list[str]] | None = None,
     prior_spec: dict[str, Any] | None = None,
     compare: str | None = None,
+    active_only: bool = False,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -1990,6 +2048,7 @@ def query_sales(
             vs = str(v).strip()
             if vs and vs not in bucket:
                 bucket.append(vs)
+    active_only_f = bool(active_only)
 
     if prior_spec and not party_f:
         # Carry forward dimensions; merge new business units
@@ -2050,6 +2109,8 @@ def query_sales(
                 vs = str(v).strip()
                 if vs and vs not in bucket:
                     bucket.append(vs)
+        if prior_filters.get("active_only") or ex_map.get("inactive"):
+            active_only_f = True
 
     elif prior_spec and party_f:
         # Named-party query: only reuse period from prior if caller omitted one
@@ -2159,6 +2220,8 @@ def query_sales(
     if ams_lookback_start and ams_lookback_start < d0:
         fetch_from = ams_lookback_start
 
+    if ex_map.get("inactive"):
+        active_only_f = True
     frame = _fetch_lines(
         date_from=fetch_from,
         date_to=d1,
@@ -2171,6 +2234,7 @@ def query_sales(
         client_type=ctype,
         party=party_f,
         excludes=ex_map or None,
+        active_only=active_only_f,
     )
 
     if col == "month":
@@ -2235,6 +2299,7 @@ def query_sales(
             "packing_category": pack,
             "client_type": ctype,
             "party": party_f,
+            "active_only": True if active_only_f else None,
         },
         "business_units": units,
         "column_dimension": col,
