@@ -216,12 +216,14 @@
     {
       "id": "followup-individual-distributors",
       "q": "By individual distributors",
-      "expected_forced": "list_clients",
-      "preferred_tool": "list_clients",
+      "expected_forced": "query_sales",
+      "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {"city": "Lahore", "client_type": "Eva Distributors"},
         "period_phrase": "July",
-        "column_dimension": "month"
+        "column_dimension": "month",
+        "months_back": 6,
+        "row_dimension": "business_unit"
       }
     },
     {

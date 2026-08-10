@@ -715,18 +715,65 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
         with st.chat_message(role):
             _chat_markdown(display)
             if role == "assistant" and content.strip():
+                follow = msg.get("_eva_followup") or {}
+                can_export = bool(
+                    follow.get("export")
+                    or follow.get("table_spec")
+                    or follow.get("party_spec")
+                )
                 st.markdown(
-                    '<p class="eva-reply-hint">Follow up on this table / answer:</p>',
+                    '<p class="eva-reply-hint">Follow up or export this table:</p>',
                     unsafe_allow_html=True,
                 )
-                if st.button(
-                    "↩ Reply",
-                    key=f"eva_reply_btn_{i}",
-                    type="primary",
-                    help="Your next question reuses this answer’s filters and table layout",
-                ):
-                    st.session_state["eva_reply_to"] = i
-                    st.rerun()
+                b_reply, b_xlsx, b_pdf = st.columns([1.2, 1, 1])
+                with b_reply:
+                    if st.button(
+                        "↩ Reply",
+                        key=f"eva_reply_btn_{i}",
+                        type="primary",
+                        help="Your next question reuses this answer’s filters and table layout",
+                    ):
+                        st.session_state["eva_reply_to"] = i
+                        st.rerun()
+                if can_export:
+                    from eva_dashboard.table_export import (
+                        export_excel_from_followup,
+                        export_pdf_from_followup,
+                    )
+
+                    with b_xlsx:
+                        try:
+                            xlsx = export_excel_from_followup(follow)
+                        except Exception as exc:  # noqa: BLE001
+                            xlsx = None
+                            st.caption(f"Excel export unavailable: {exc}")
+                        if xlsx:
+                            st.download_button(
+                                "⬇ Excel",
+                                data=xlsx[0],
+                                file_name=xlsx[1],
+                                mime=(
+                                    "application/vnd.openxmlformats-officedocument"
+                                    ".spreadsheetml.sheet"
+                                ),
+                                key=f"eva_xlsx_{i}",
+                                help="Download this table as a readable Excel file",
+                            )
+                    with b_pdf:
+                        try:
+                            pdf = export_pdf_from_followup(follow)
+                        except Exception as exc:  # noqa: BLE001
+                            pdf = None
+                            st.caption(f"PDF export unavailable: {exc}")
+                        if pdf:
+                            st.download_button(
+                                "⬇ PDF",
+                                data=pdf[0],
+                                file_name=pdf[1],
+                                mime="application/pdf",
+                                key=f"eva_pdf_{i}",
+                                help="Download this table as a landscape PDF",
+                            )
 
     prompt = st.chat_input(
         "Ask about Eva Foods data… (or click ↩ Reply under an answer first)"

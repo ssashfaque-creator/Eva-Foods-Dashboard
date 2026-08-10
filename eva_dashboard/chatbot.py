@@ -265,12 +265,14 @@ DATA MODEL (filters you set; tools build tables):
 - which/what/who + client type → parties in that filter
   (specific Chase Up / CSD, or whole IMT if they said IMT).
 - Named party / "who is X?" → lookup_party (not a client-type filter).
-- "Who/list/individual distributors" → list_clients. "Distributor sales" → query_sales.
+- Cold "who are distributors in Lahore?" → list_clients.
+- After a month sales table, "individual distributor breakdown" / distributors-wise
+  → same month grid with party rows (query_sales), not a flat client list.
 - Which distributors grew / vs AMS / vs last year (VTF etc.) → analyze_parties with
   YoY % (+ AMS columns when both asked). Never a packing matrix or bare MT list.
 
 TOOL CHOICE:
-- Volume pivots / month grids / regroup / include-bulk / remove / YoY on a table → query_sales
+- Volume pivots / month grids / regroup / include-bulk / remove / add layer / YoY → query_sales
 - Party rankings, growth, AMS, share, mix, new/lost/silent → analyze_parties
 - Rate / price / Price Fetch / cost factor / packing cost / factor breakdown → query_price
 - City/client compares (2+ sides: Lahore vs Karachi vs Islamabad; Imtiaz vs Metro
@@ -2047,6 +2049,21 @@ def extract_regroup_dimension(text: str) -> str | None:
             r"\b(as|into)\s+columns?\s+(by\s+)?(business\s*units?|bu)\b",
             "business_unit",
         ),
+        (
+            r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by|"
+            r"organise\s+by|organize\s+by)\s+"
+            r"(individual\s+)?(distributors?|parties|clients?|party)\b",
+            "party",
+        ),
+        (
+            r"\b("
+            r"(distributors?|parties|clients?)[- ]wise|"
+            r"by\s+(individual\s+)?(distributors?|parties|clients?|party)|"
+            r"individual\s+distributors?|"
+            r"(distributors?|parties)\s+break(\s*down|down)?"
+            r")\b",
+            "party",
+        ),
     ]
     for pat, dim in patterns:
         if re.search(pat, t):
@@ -2101,6 +2118,10 @@ def resolve_regroup_request(
 
     t = (text or "").lower()
     prior_col = str(prior_spec.get("column_dimension") or "client_type")
+    # Distributor/party layer only makes sense on a month grid (same AMS columns).
+    # Non-month priors keep the list_clients / party-breakdown path.
+    if dim == "party" and prior_col != "month":
+        return None
     prior_row = normalize_row_dimension(prior_spec.get("row_dimension")) or prior_spec.get(
         "row_dimension"
     )
@@ -2161,6 +2182,10 @@ def resolve_regroup_request(
         if prior_row == "zone" and dim == "city":
             out["row_dimension"] = "city"
             out["row_groups"] = ["zone"]
+        # Add distributor layer under the prior grain (BU → Party × months)
+        elif dim == "party" and prior_row and prior_row not in {"party", "client_type"}:
+            out["row_dimension"] = "party"
+            out["row_groups"] = [prior_row]
         elif (
             prior_row
             and prior_row != dim
@@ -2859,9 +2884,12 @@ def _looks_party_breakdown(text: str) -> bool:
             r"individual\s+distributors?|"
             r"by\s+(individual\s+)?(distributors?|parties|clients?|party)|"
             r"(distributors?|parties|clients?)[- ]wise|"
+            r"(distributors?|parties|clients?)\s+break(\s*down|down)?|"
             r"break(\s*down|down)?\s+(by|of)\s+(the\s+)?"
             r"(distributors?|parties|clients?)|"
-            r"break\s+of\s+(the\s+)?(distributors?|parties|clients?)"
+            r"break\s+of\s+(the\s+)?(distributors?|parties|clients?)|"
+            r"add(ing)?\s+(a\s+)?(distributor|party|client)\s+layer|"
+            r"(distributor|party|client)\s+layer"
             r")\b",
             t,
         )
@@ -3413,19 +3441,123 @@ def _wants_party_month_matrix(
     user_text: str,
     prior_spec: dict[str, Any] | None,
 ) -> bool:
-    """Selling-BU / buyers asks should mirror a prior month sales table."""
+    """Party rows should keep the prior month sales grid (not a flat client list).
+
+    Covers: selling-BU / buyers asks, and individual-distributor / party-wise
+    breakdown follow-ups on a month table.
+    """
     if not prior_spec:
         return False
     if str(prior_spec.get("column_dimension") or "") != "month":
         return False
     if _looks_party_rank_ask(user_text):
         return False
+    if _looks_party_growth_rank(user_text) or _looks_party_mix_query(user_text):
+        return False
     t = (user_text or "").lower()
     selling = bool(
         re.search(r"\b(selling|sells|sold\s+to|buyers?|bought)\b", t)
     )
     has_bu = bool(_extract_business_units_from_text(user_text))
-    return selling and has_bu
+    if selling and has_bu:
+        return True
+    # "individual distributor breakdown" / distributors-wise on the same table
+    return _looks_party_breakdown(user_text)
+
+
+def _party_month_matrix_from_prior(
+    user_text: str,
+    *,
+    prior_spec: dict[str, Any],
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Replay prior month filters with party (distributor) as the row layer."""
+    args = arguments or {}
+    inferred = infer_party_analytics_from_text(user_text)
+    prior_ctx = _party_filters_from_prior(prior_spec, user_text)
+    prior_row = normalize_row_dimension(prior_spec.get("row_dimension")) or str(
+        prior_spec.get("row_dimension") or ""
+    ).strip()
+    row_groups: list[str] | None = None
+    # Keep prior grain as a leading group when adding a distributor layer
+    if prior_row and prior_row not in {"party", "client_type", ""}:
+        row_groups = [prior_row]
+
+    units = _extract_business_units_from_text(user_text)
+    bu = (
+        units[0]
+        if len(units) == 1
+        else (
+            args.get("business_unit")
+            or inferred.get("business_unit")
+            or prior_ctx.get("business_unit")
+        )
+    )
+    ctype = normalize_client_type(
+        args.get("client_type")
+        or inferred.get("client_type")
+        or _client_type_mentioned(user_text)
+        or prior_ctx.get("client_type")
+        or (
+            "Eva Distributors"
+            if re.search(r"\bdistributors?\b", (user_text or "").lower())
+            else None
+        )
+    )
+    city = (
+        None
+        if _looks_national_scope(user_text)
+        else (
+            args.get("city")
+            or inferred.get("city")
+            or extract_city_from_text(user_text)
+            or prior_ctx.get("city")
+        )
+    )
+    zone = (
+        None
+        if _looks_national_scope(user_text)
+        else normalize_zone(
+            args.get("zone")
+            or inferred.get("zone")
+            or extract_zone_from_text(user_text)
+            or prior_ctx.get("zone")
+        )
+    )
+    months_back = int(prior_spec.get("months_back") or 6)
+    return query_sales(
+        city=city,
+        zone=zone,
+        client_type=ctype,
+        business_unit=bu,
+        oil_type=(
+            args.get("oil_type")
+            or inferred.get("oil_type")
+            or extract_oil_type_from_text(user_text)
+            or prior_ctx.get("oil_type")
+        ),
+        packing_category=(
+            args.get("packing_category")
+            or inferred.get("packing_category")
+            or extract_packing_from_text(user_text)
+            or prior_ctx.get("packing_category")
+        ),
+        columns="month",
+        months_back=months_back,
+        mode="matrix",
+        row_dimension="party",
+        row_groups=row_groups,
+        lock_columns=True,
+        period=(
+            args.get("period")
+            or _extract_period_phrase(user_text)
+            or inferred.get("period")
+            or prior_ctx.get("period")
+        ),
+        date_from=args.get("date_from") or prior_ctx.get("date_from"),
+        date_to=args.get("date_to") or prior_ctx.get("date_to"),
+        prior_spec=prior_spec,
+    )
 
 
 def _dispatch_which_parties(
@@ -3519,24 +3651,9 @@ def _dispatch_which_parties(
         )
 
     # Mirror prior month table: distributors as rows × months as columns
-    if _wants_party_month_matrix(user_text, prior_spec):
-        months_back = int((prior_spec or {}).get("months_back") or 6)
-        return query_sales(
-            city=city,
-            zone=zone,
-            client_type=ctype,
-            business_unit=bu,
-            oil_type=oil,
-            packing_category=pack,
-            columns="month",
-            months_back=months_back,
-            mode="matrix",
-            row_dimension="party",
-            lock_columns=True,
-            period=period,
-            date_from=date_from,
-            date_to=date_to,
-            prior_spec=None,
+    if prior_spec and _wants_party_month_matrix(user_text, prior_spec):
+        return _party_month_matrix_from_prior(
+            user_text, prior_spec=prior_spec, arguments=args
         )
 
     return list_clients(
@@ -3604,13 +3721,17 @@ def _dispatch_tool(
         new_period = _extract_period_phrase(user_text)
         return _replay_party_spec(prior_party_spec, period=new_period)
 
-    # Individual distributors / "sold to" / buyers of a BU → party list
+    # Individual distributors / party breakdown — keep month grid when prior is months
     if (
         name
         in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
         and _looks_party_breakdown(user_text)
         and (prior_spec or _extract_business_units_from_text(user_text))
     ):
+        if prior_spec and _wants_party_month_matrix(user_text, prior_spec):
+            return _party_month_matrix_from_prior(
+                user_text, prior_spec=prior_spec, arguments=arguments
+            )
         prior_ctx = _party_filters_from_prior(prior_spec, user_text) if prior_spec else {}
         units = _extract_business_units_from_text(user_text)
         bu = (
@@ -4488,6 +4609,7 @@ def _attach_followup_meta(
     table_spec: dict[str, Any] | None = None,
     price_spec: dict[str, Any] | None = None,
     party_spec: dict[str, Any] | None = None,
+    export_snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Stamp the last assistant turn so the Reply button can pin prior filters."""
     for m in reversed(messages):
@@ -4499,6 +4621,8 @@ def _attach_followup_meta(
                 meta["price_spec"] = price_spec
             if party_spec:
                 meta["party_spec"] = party_spec
+            if export_snapshot:
+                meta["export"] = export_snapshot
             if meta:
                 m["_eva_followup"] = meta
             return
@@ -4739,6 +4863,8 @@ def suggest_preferred_tool(
             return "query_sales"
         return "list_clients"
     if _looks_party_breakdown(text):
+        if _wants_party_month_matrix(text, prior_table_spec):
+            return "query_sales"
         return "list_clients"
     if _looks_party_mix_query(text) or _looks_party_analytics(text):
         return "analyze_parties"
@@ -4843,8 +4969,10 @@ def resolve_forced_tool(
     if (has_table_prior or is_followup) and table_ops:
         return "query_sales"
 
-    # 4) "By individual distributors" after a sales table → list those parties
+    # 4) Individual distributor breakdown — month prior keeps the same grid
     if (has_table_prior or is_followup) and _looks_party_breakdown(text):
+        if _wants_party_month_matrix(text, prior_table_spec):
+            return "query_sales"
         return "list_clients"
 
     # 5) Reply follow-up: only force sales when it still looks like a matrix ask.
@@ -4906,6 +5034,7 @@ def chat_completion(
         {"role": "system", "content": system_prompt()},
         *history,
     ]
+    export_snapshot_acc: dict[str, Any] | None = None
 
     last_user = ""
     for m in reversed(history):
@@ -5013,6 +5142,7 @@ def chat_completion(
                 table_spec=forced_prior_spec or _last_table_spec(working),
                 price_spec=forced_prior_price_spec or _last_price_spec(working),
                 party_spec=forced_prior_party_spec or _last_party_spec(working),
+                export_snapshot=export_snapshot_acc,
             )
             return text, _prune_session_messages(working)
 
@@ -5021,6 +5151,7 @@ def chat_completion(
         last_table_spec: dict[str, Any] | None = None
         last_price_spec: dict[str, Any] | None = None
         last_party_spec: dict[str, Any] | None = None
+        last_export_snapshot: dict[str, Any] | None = None
         for tc in tool_calls:
             name = tc.function.name
             if on_status:
@@ -5077,6 +5208,71 @@ def chat_completion(
                 )
                 if result.get("party_spec"):
                     last_party_spec = result["party_spec"]
+                # Snapshot table cells for Excel/PDF export (before payload shrink)
+                try:
+                    from eva_dashboard.table_export import (
+                        matrix_to_records,
+                        rows_to_records,
+                    )
+
+                    if name == "query_sales" and result.get("matrix"):
+                        headers, data, dim_count = matrix_to_records(
+                            result["matrix"]
+                        )
+                        period_lbl = (result.get("period") or {}).get("label") or ""
+                        filters = result.get("filters") or {}
+                        bits = [period_lbl] if period_lbl else []
+                        for key in ("city", "zone", "client_type", "business_unit"):
+                            if filters.get(key):
+                                bits.append(f"{key}={filters[key]}")
+                        last_export_snapshot = {
+                            "title": "Eva Foods sales table",
+                            "subtitle": " · ".join(bits),
+                            "headers": headers,
+                            "data": data,
+                            "dim_count": dim_count,
+                            "filename_stem": "eva_sales_table",
+                        }
+                        export_snapshot_acc = last_export_snapshot
+                    elif name in {"list_clients", "analyze_parties", "advanced_query"}:
+                        rows = list(
+                            result.get("clients")
+                            or result.get("parties")
+                            or result.get("entities")
+                            or []
+                        )
+                        if rows:
+                            prefer = [
+                                "party",
+                                "client",
+                                "name",
+                                "client_type",
+                                "zone",
+                                "city_filter",
+                                "city",
+                                "mt",
+                                "volume_mt",
+                                "ams_mt",
+                                "score",
+                                "yoy_pct",
+                            ]
+                            cols = [c for c in prefer if c in rows[0]]
+                            if not cols:
+                                cols = list(rows[0].keys())
+                            headers, data = rows_to_records(rows, cols)
+                            last_export_snapshot = {
+                                "title": "Eva Foods table",
+                                "subtitle": (
+                                    (result.get("period") or {}).get("label") or None
+                                ),
+                                "headers": headers,
+                                "data": data,
+                                "dim_count": 1,
+                                "filename_stem": "eva_table",
+                            }
+                            export_snapshot_acc = last_export_snapshot
+                except Exception:
+                    pass
                 if name == "query_sales":
                     if result.get("table_spec"):
                         last_table_spec = result["table_spec"]
@@ -5144,6 +5340,7 @@ def chat_completion(
                 party_spec=last_party_spec
                 or forced_prior_party_spec
                 or _last_party_spec(working),
+                export_snapshot=last_export_snapshot,
             )
             # Fast path: simple show-me → return tool markdown immediately
             # (OpenAI already chose the tool; skip a second narrative round.)
