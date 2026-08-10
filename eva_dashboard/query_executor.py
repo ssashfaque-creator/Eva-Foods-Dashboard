@@ -43,6 +43,47 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _fill_spoken_period_and_month_grain(
+    *,
+    user_text: str,
+    period: dict[str, Any],
+    grain: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fill blank period/grain from spoken text — never override explicit values.
+
+    Critical for plan_query: the model often sets city/client_type/BUs but omits
+    ``period`` / ``grain.column_dimension``. An empty period then falls through
+    ``resolve_period(None)`` → current data month MTD (e.g. Aug 2026 MTD),
+    wiping an explicit user window like "last 6 months".
+    """
+    from eva_dashboard.chatbot import (
+        _extract_period_phrase,
+        _looks_month_wise,
+        _months_back_from_text,
+    )
+
+    period = dict(period or {})
+    grain = dict(grain or {})
+    phrase = (period.get("phrase") or "").strip() or None
+    date_from = period.get("date_from")
+    date_to = period.get("date_to")
+
+    # Period: fill only when the plan left phrase and ISO bounds blank.
+    if user_text and not phrase and not date_from and not date_to:
+        spoken = _extract_period_phrase(user_text)
+        if spoken:
+            period["phrase"] = spoken
+
+    # last N months / month-wise → month columns (only when grain blank).
+    # columns=month ignores a wrong single-month period phrase and uses months_back.
+    if user_text and not grain.get("column_dimension") and _looks_month_wise(user_text):
+        grain["column_dimension"] = "month"
+        if grain.get("months_back") is None:
+            grain["months_back"] = _months_back_from_text(user_text, 6)
+
+    return period, grain
+
+
 def execute_query_spec(
     raw_spec: dict[str, Any],
     *,
@@ -55,9 +96,6 @@ def execute_query_spec(
     filters = _canon_filters(spec.get("filters") or {})
     grain = dict(spec.get("grain") or {})
     period = dict(spec.get("period") or {})
-    phrase = period.get("phrase")
-    date_from = period.get("date_from")
-    date_to = period.get("date_to")
     intent = spec["intent"]
     bus = list(spec.get("business_units") or filters.get("business_units") or [])
     if filters.get("business_unit") and not bus:
@@ -65,6 +103,7 @@ def execute_query_spec(
 
     # Light vocab fill ONLY when the model left a filter blank but spoke it.
     # Never invent Eva Distributors from "distributor-wise" grain language.
+    # Never override an explicit period (e.g. last 6 months) with MTD defaults.
     if user_text:
         if not filters.get("city"):
             filters["city"] = extract_city_from_text(user_text)
@@ -83,6 +122,13 @@ def execute_query_spec(
         # Grain language must never keep a sticky Eva Distributors channel.
         if is_distributor_party_grain(user_text):
             filters["client_type"] = None
+        period, grain = _fill_spoken_period_and_month_grain(
+            user_text=user_text, period=period, grain=grain
+        )
+
+    phrase = (period.get("phrase") or "").strip() or None
+    date_from = period.get("date_from")
+    date_to = period.get("date_to")
 
     # Safety: city league cannot keep a city filter
     if (grain.get("group_by") or "") == "city":
@@ -231,7 +277,12 @@ def execute_query_spec(
 
     if isinstance(result, dict):
         result = dict(result)
-        result["query_spec"] = spec
+        # Persist filled period/grain so follow-ups see what was actually run.
+        filled_spec = dict(spec)
+        filled_spec["period"] = period
+        filled_spec["grain"] = grain
+        filled_spec["filters"] = filters
+        result["query_spec"] = filled_spec
         result.setdefault("ok", True)
     return result
 
@@ -340,8 +391,17 @@ def heuristic_plan_query(
     if intent == "party_rank":
         grain["group_by"] = reshape.get("group_by") or inf.get("group_by") or "party"
     if intent.startswith("sales"):
-        if "month" in text_l and "wise" in text_l:
+        from eva_dashboard.chatbot import _looks_month_wise, _months_back_from_text
+
+        # last N months / month-wise → month grid (not a single-month analytical pack)
+        if _looks_month_wise(user_text) or (
+            "month" in text_l and "wise" in text_l
+        ):
             grain["column_dimension"] = "month"
+            grain["months_back"] = _months_back_from_text(user_text, 6)
+            # Month columns force matrix mode in query_sales; prefer matrix intent.
+            if intent == "sales_analytical":
+                intent = "sales_matrix"
         if "city wise" in text_l or "city-wise" in text_l:
             grain["row_dimension"] = "city"
         if "channel" in text_l:
@@ -352,6 +412,11 @@ def heuristic_plan_query(
         metric = "ams"
     sort = reshape.get("sort") or inf.get("sort") or "desc"
     title_mode = reshape.get("title_mode") or inf.get("title_mode")
+
+    # Prefer spoken period (incl. last N months); fall back to party-analytics infer.
+    from eva_dashboard.chatbot import _extract_period_phrase
+
+    period_phrase = _extract_period_phrase(user_text) or inf.get("period")
 
     spec: dict[str, Any] = {
         "intent": intent,
@@ -365,7 +430,7 @@ def heuristic_plan_query(
         "declined_only": bool(reshape.get("declined_only") or False),
         "title_mode": title_mode,
         "business_units": bus,
-        "period": {"phrase": inf.get("period")} if inf.get("period") else {},
+        "period": {"phrase": period_phrase} if period_phrase else {},
         "rationale": f"heuristic plan via {preferred}",
     }
     if intent == "party_lookup" and _looks_named_party_sales(user_text):

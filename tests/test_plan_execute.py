@@ -166,6 +166,94 @@ def test_prompt_teaches_eva_maan_consumer_brands() -> None:
     assert "eva" in low and "bulk" in low
 
 
+def test_plan_omitted_period_does_not_become_mtd_when_last_n_months() -> None:
+    """Model plan with filters but blank period must not fall through to MTD.
+
+    Regression: "how Eva distributor sales in lahore are doing last 6 months"
+    became Sales for Aug 2026 MTD → _No data._ because execute_query_spec
+    filled city/client_type but not period, and resolve_period(None) → MTD.
+    Helpers must ONLY fill blanks — never override an explicit period.
+    """
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            # Extend seed with early Aug (max sales date) but no Lahore Aug rows
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, client_type, payload_json
+                    ) VALUES (NULL, 'pe-aug-khi', datetime('now'), '2026-08-03',
+                              'B Dist', 'P', 1, 'MT', 1, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+
+            q = (
+                "show me how Eva distributor sales in lahore are doing "
+                "last 6 months"
+            )
+            # Exact failure shape: analytical + filters + Eva BUs, empty period
+            bad_plan = {
+                "intent": "sales_analytical",
+                "base": "none",
+                "filters": {
+                    "city": "Lahore",
+                    "client_type": "Eva Distributors",
+                },
+                "business_units": ["Eva Consumer", "Eva Bulk"],
+                "period": {},
+                "grain": {},
+            }
+            out = execute_query_spec(bad_plan, user_text=q)
+            assert out["ok"] is True
+            label = str((out.get("period") or {}).get("label") or "")
+            assert "MTD" not in label or "Last 6" in label
+            assert "Aug 2026 MTD" not in label
+            assert out.get("column_dimension") == "month"
+            assert int((out.get("table_spec") or {}).get("months_back") or 0) == 6
+            md = out.get("answer_markdown") or ""
+            assert "Aug 2026 MTD" not in md
+            assert "_No data._" not in md
+            assert "Last 6 months" in md or "Mar 2026" in md
+
+            # Explicit period + explicit grain must not be rewritten by helpers
+            keep = execute_query_spec(
+                {
+                    "intent": "sales_analytical",
+                    "base": "none",
+                    "filters": {
+                        "city": "Lahore",
+                        "client_type": "Eva Distributors",
+                    },
+                    "period": {"phrase": "last 6 months"},
+                    "grain": {"column_dimension": "client_type"},
+                },
+                user_text=q,
+            )
+            assert keep["ok"] is True
+            assert (keep.get("query_spec") or {}).get("period", {}).get(
+                "phrase"
+            ) == "last 6 months"
+            assert keep.get("column_dimension") == "city"  # ctype filter flips cols
+            keep_label = str((keep.get("period") or {}).get("label") or "")
+            assert "Last 6 months" in keep_label
+            assert "Aug 2026 MTD" not in keep_label
+
+            hp = heuristic_plan_query(q)
+            assert hp["period"].get("phrase") == "last 6 months"
+            assert hp["grain"].get("column_dimension") == "month"
+            assert hp["intent"] == "sales_matrix"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_heuristic_plan_least_gains_and_other_cities() -> None:
     prior = prior_context_payload(
         party_spec={

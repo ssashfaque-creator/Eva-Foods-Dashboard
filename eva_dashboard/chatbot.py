@@ -3179,6 +3179,13 @@ def _extract_period_phrase(text: str) -> str | None:
     import calendar as _cal
 
     t = (text or "").lower()
+    # Multi-month windows before short "this/last month" tokens — "last 6 months"
+    # must not be swallowed by a bare "last month" substring check.
+    m_n = re.search(r"\b(last|past|previous)\s+(\d{1,2})\s+months?\b", t)
+    if m_n:
+        return f"last {m_n.group(2)} months"
+    if re.search(r"\b(last|past|previous)\s+quarter\b", t):
+        return "last quarter"
     for phrase in (
         "this month",
         "last month",
