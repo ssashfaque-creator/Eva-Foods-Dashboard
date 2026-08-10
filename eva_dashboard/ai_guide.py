@@ -103,8 +103,9 @@ Examples:
   grown_only=false, title_mode=smallest_gains
 - \"growth vs other cities\" (after Lahore party growth) → base=prior,
   clear=[\"city\"], grain.group_by=city, metric=ams_growth, title_mode=by_growth
-- \"how are Eva sales in Karachi\" → sales_analytical,
-  business_units=[Eva Consumer, Eva Bulk], city=Karachi
+- \"show me Eva sales in Lahore\" / \"how are Eva sales\" → sales_*,
+  business_units=[Eva Consumer, Eva Bulk] ONLY (never Shortening/Meal/…)
+- \"Maan sales\" → [Maan Consumer, Maan Bulk] only
 - \"who are distributors in Lahore\" → party_list
 - named store/distributor sales → party_lookup
 

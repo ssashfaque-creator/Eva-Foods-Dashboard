@@ -155,6 +155,74 @@ def test_execute_growth_vs_other_cities() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_eva_brand_fill_when_model_omits_business_units() -> None:
+    """'Eva sales' must not pull Shortening / other non-Eva BUs."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            init_db()
+            with connect() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "(?, ?, ?, ?, '{}', datetime('now'))",
+                    [
+                        ("E1", "Eva Consumer", "Eva Canola", "Stand up"),
+                        ("E2", "Eva Bulk", "Eva VTF", "Tin"),
+                        ("S1", "Shortening", "Shortening", "Tin"),
+                    ],
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('1','A Dist','Direct Customers','Lahore','Lahore','',"
+                    "'{}', datetime('now'))"
+                )
+                for i, (dt, prod, mt) in enumerate(
+                    [
+                        ("2026-08-01", "E1", 1),
+                        ("2026-08-02", "E2", 13),
+                        ("2026-08-03", "S1", 30),
+                    ]
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO sales (
+                          source_file_id, row_hash, imported_at, date, party,
+                          product, qty, unit, mt_qty, client_type, payload_json
+                        ) VALUES (NULL, ?, datetime('now'), ?, 'A Dist', ?, ?,
+                                  'MT', ?, 'Direct Customers', '{}')
+                        """,
+                        (f"eva-{i}", dt, prod, mt, mt),
+                    )
+                conn.commit()
+
+            q = "show me Eva sales in lahore"
+            # Model-style plan that forgot the brand → executor must fill
+            out = execute_query_spec(
+                {
+                    "intent": "sales_analytical",
+                    "base": "none",
+                    "filters": {"city": "Lahore"},
+                },
+                user_text=q,
+            )
+            assert out["ok"] is True
+            bus = set(out.get("business_units") or [])
+            assert bus == {"Eva Consumer", "Eva Bulk"}
+            md = out.get("answer_markdown") or ""
+            assert "Shortening" not in md
+            assert "Eva Consumer" in md or "Eva Bulk" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_heuristic_plan_least_gains_and_other_cities() -> None:
     prior = prior_context_payload(
         party_spec={

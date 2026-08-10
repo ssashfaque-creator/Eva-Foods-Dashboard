@@ -261,7 +261,9 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
         "clear=['city'], keep metric (often ams_growth).\n"
         "- 'least/lowest gains' → sort=asc, grown_only=false, "
         "title_mode=smallest_gains.\n"
-        "- Brand Eva/Maan sales → intent=sales_*, business_units both Consumer+Bulk.\n"
+        "- Brand Eva sales → intent=sales_*, business_units=["
+        "Eva Consumer, Eva Bulk] only (never Shortening / other BUs).\n"
+        "- Brand Maan sales → [Maan Consumer, Maan Bulk] only.\n"
     )
 
 
