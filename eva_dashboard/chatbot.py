@@ -245,19 +245,22 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.34 plan→execute):
-1. For factual data asks, call ``plan_query`` FIRST with a complete QuerySpec.
-   The server executes it and returns tables. Never invent figures or cite a cutoff.
-2. Read PRIOR_QUERY_CONTEXT when present. Use base='prior' + clear[] for follow-ups
-   (e.g. other cities → clear city, group_by=city, keep metric). Fresh ask → base='none'.
-3. After tables arrive, paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
-4. Joins: sales.party↔clients.client; sales.product↔category.product
-   (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
+HOW YOU WORK (v0.4.35 — you decide; helpers only fill blanks):
+1. Read LIVE DATABASE STATE + DATA CATALOG + VOCABULARY. You know what exists.
+2. Interpret the user ask. Choose filters, groupings, period, and metric yourself.
+3. Call ``plan_query`` with a COMPLETE QuerySpec for the information you need:
+   - period.phrase (e.g. "last 6 months", "July", "this month") — NEVER omit when spoken
+   - grain.column_dimension="month" + months_back=N when they ask last N months
+   - filters (city / client_type / oil / packing) only when the user means them
+   - business_units from brand shorthand (Eva / Maan / Consumer)
+4. Server helpers may fill a blank you left empty from spoken text. They must NOT
+   override values you set. Empty period is NOT "this month" — put the real window.
+5. After tables arrive: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
+6. Follow-ups: PRIOR_QUERY_CONTEXT + base='prior' + clear[] what no longer applies.
+   Fresh complete ask → base='none'.
 
-=== DATA MODEL ===
-sales lines join clients on party=client; join category on product for BU/oil/packing.
-Filters live on clients (city_filter, type) and category (category_1/2, packing).
-plan_query decides WHAT to fetch; the executor builds deterministic tables.
+Joins: sales.party↔clients.client; sales.product↔category.product
+(BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -3420,15 +3423,31 @@ def _extract_business_units_from_text(text: str) -> list[str]:
     for needle, label in informal:
         if needle in lower and label not in found:
             found.append(label)
-    # Bare Eva brand sales ("how are Eva sales in Karachi") → both Eva BUs
-    # — not Eva Distributors (client type) and not a party named "Eva".
+    # Eva brand sales → both Eva BUs. "Eva distributor sales" is brand + channel
+    # (keep Eva Consumer+Bulk AND Eva Distributors). Pure channel lists
+    # ("who are Eva Distributors") do not expand brand.
+    eva_channel_list_only = bool(
+        re.search(
+            r"\b(who are|list|which|show me the)\s+eva\s+distributors?\b",
+            lower,
+        )
+        and not re.search(r"\b(sales|performance|volume|doing)\b", lower)
+    )
+    maan_channel_list_only = bool(
+        re.search(
+            r"\b(who are|list|which|show me the)\s+maan\s+distributors?\b",
+            lower,
+        )
+        and not re.search(r"\b(sales|performance|volume|doing)\b", lower)
+    )
     if (
         re.search(r"\beva\b", lower)
-        and not re.search(r"\beva\s+distributors?\b", lower)
+        and not eva_channel_list_only
         and not any(str(x).lower().startswith("eva") for x in found)
         and re.search(
             r"\b("
-            r"eva\s+sales|eva\s+performance|eva\s+volume|"
+            r"eva(?:\s+\w+){0,2}\s+sales|"
+            r"eva\s+performance|eva\s+volume|"
             r"how\s+(are|were|is|did|do|have|has)\s+eva|"
             r"for\s+eva\b|eva\s+in\b|eva\s+brand"
             r")\b",
@@ -3436,15 +3455,14 @@ def _extract_business_units_from_text(text: str) -> list[str]:
         )
     ):
         found.extend(["Eva Consumer", "Eva Bulk"])
-    # Bare Maan brand sales → both Maan BUs (mirror Eva). Sold-to shorthand
-    # ("selling maan") still resolves to Maan Consumer only below.
     elif (
         re.search(r"\bmaan\b", lower)
-        and not re.search(r"\bmaan\s+distributors?\b", lower)
+        and not maan_channel_list_only
         and not any(str(x).lower().startswith("maan") for x in found)
         and re.search(
             r"\b("
-            r"maan\s+sales|maan\s+performance|maan\s+volume|"
+            r"maan(?:\s+\w+){0,2}\s+sales|"
+            r"maan\s+performance|maan\s+volume|"
             r"how\s+(are|were|is|did|do|have|has)\s+maan|"
             r"for\s+maan\b|maan\s+in\b|maan\s+brand"
             r")\b",

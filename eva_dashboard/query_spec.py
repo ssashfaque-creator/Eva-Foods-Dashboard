@@ -80,6 +80,11 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 },
                 "period": {
                     "type": "object",
+                    "description": (
+                        "REQUIRED when the user names a window. "
+                        "phrase examples: 'last 6 months', 'July', 'this month'. "
+                        "Omitting period when they said last N months is wrong."
+                    ),
                     "properties": {
                         "phrase": {"type": "string"},
                         "date_from": {"type": "string"},

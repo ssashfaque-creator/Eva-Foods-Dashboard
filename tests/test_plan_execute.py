@@ -166,6 +166,24 @@ def test_prompt_teaches_eva_maan_consumer_brands() -> None:
     assert "eva" in low and "bulk" in low
 
 
+def test_eva_distributor_sales_expands_brand_and_channel() -> None:
+    """Eva distributor sales = Eva Consumer+Bulk brand AND Eva Distributors channel."""
+    from eva_dashboard.chatbot import _extract_business_units_from_text
+    from eva_dashboard.client_language import extract_client_type_from_text
+
+    q = "show me how Eva distributor sales in lahore are doing last 6 months"
+    assert set(_extract_business_units_from_text(q)) == {
+        "Eva Consumer",
+        "Eva Bulk",
+    }
+    assert extract_client_type_from_text(q) == "Eva Distributors"
+    hp = heuristic_plan_query(q)
+    assert set(hp.get("business_units") or []) == {"Eva Consumer", "Eva Bulk"}
+    assert (hp.get("filters") or {}).get("client_type") == "Eva Distributors"
+    assert hp["period"].get("phrase") == "last 6 months"
+    assert hp["grain"].get("column_dimension") == "month"
+
+
 def test_plan_omitted_period_does_not_become_mtd_when_last_n_months() -> None:
     """Model plan with filters but blank period must not fall through to MTD.
 

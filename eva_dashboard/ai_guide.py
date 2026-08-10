@@ -83,6 +83,14 @@ def vocabulary_for_prompt() -> str:
         "- YoY / last year volume → yoy or yoy_ams",
         "- invoices / invoice size → invoices / invoice_mt",
         "",
+        "Period language (ALWAYS set period.phrase when spoken — never omit):",
+        "- \"last 6 months\" / \"past N months\" → period=\"last N months\" AND "
+        "grain.column_dimension=month, months_back=N (month grid through latest "
+        "sales date). Omitting period falls through to useless MTD — do not.",
+        "- \"this month\" / MTD / so far → period=\"this month\"",
+        "- named month (\"for July\") → that month Volume + AMS + %",
+        "- \"last month\" / \"last week\" → those phrases",
+        "",
         "Table shape language (query_sales):",
         "- channel / client type wise → row_dimension=client_type",
         "- city wise → row_dimension=city",
@@ -90,9 +98,8 @@ def vocabulary_for_prompt() -> str:
         "- product wise / by product → row_dimension=packing_category "
         "(SKU only if user says SKU)",
         "- month wise / last N months → columns=month",
-        "- named month (\"for July\") → that month Volume + AMS + % "
-        "(mode=trend is fine)",
-        "- how are / performance → analytical tone is OK; still use a tool",
+        "- how are / performance → still use a tool; with last N months keep "
+        "the month grid (do not collapse to a single MTD month)",
         "",
         "Follow-up reshape (analyze_parties):",
         "- \"show this … wise\" / \"this distributor wise\" → base=prior, "
@@ -124,6 +131,11 @@ Examples:
   clear=[\"city\"], grain.group_by=city, metric=ams_growth, title_mode=by_growth
 - \"show me Eva sales in Lahore\" → sales_*, city=Lahore,
   business_units=[\"Eva Consumer\", \"Eva Bulk\"]  ← Eva means both; not Shortening
+- \"how Eva distributor sales in Lahore are doing last 6 months\" →
+  sales_matrix, city=Lahore, client_type=Eva Distributors,
+  business_units=[Eva Consumer, Eva Bulk], period=\"last 6 months\",
+  grain.column_dimension=month, months_back=6
+  (NOT Aug MTD; NOT empty period)
 - \"Maan sales\" → business_units=[\"Maan Consumer\", \"Maan Bulk\"]
 - \"Consumer sales\" → business_unit=\"Eva Consumer\"
 - After Eva Consumer vs Eva Bulk: \"show this distributor wise, lowest

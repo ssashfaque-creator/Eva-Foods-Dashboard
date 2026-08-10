@@ -101,9 +101,9 @@ def execute_query_spec(
     if filters.get("business_unit") and not bus:
         bus = [filters["business_unit"]]
 
-    # Light vocab fill ONLY when the model left a filter blank but spoke it.
+    # Helpers ONLY fill blanks the model left empty from spoken text.
     # Never invent Eva Distributors from "distributor-wise" grain language.
-    # Never override an explicit period (e.g. last 6 months) with MTD defaults.
+    # Never override an explicit period / grain / business_units the plan set.
     if user_text:
         if not filters.get("city"):
             filters["city"] = extract_city_from_text(user_text)
@@ -125,6 +125,12 @@ def execute_query_spec(
         period, grain = _fill_spoken_period_and_month_grain(
             user_text=user_text, period=period, grain=grain
         )
+        if not bus and not filters.get("business_unit"):
+            from eva_dashboard.chatbot import _extract_business_units_from_text
+
+            spoken_bus = _extract_business_units_from_text(user_text)
+            if spoken_bus:
+                bus = list(spoken_bus)
 
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")

@@ -96,12 +96,12 @@ def test_system_prompt_includes_live_briefing() -> None:
 
             text = system_prompt()
             assert "LIVE DATABASE STATE" in text
-            assert "query_sales" in text
+            assert "query_sales" in text or "plan_query" in text
             assert "knowledge cutoff" in text.lower() or "OpenAI knowledge cutoff" in text
-            assert "SPEED" in text or "TOOL RULES" in text
-            assert "DATA MODEL" in text
-            # v0.4.1: static rules stay short; live/glossary/catalog may be large
-            static_marker = "SPEED & TOOL RULES"
+            assert "HOW YOU WORK" in text or "plan_query" in text
+            assert "VOCABULARY" in text
+            # Static rules stay short; live/glossary/catalog may be large
+            static_marker = "HOW YOU WORK"
             start = text.find(static_marker)
             end = text.find("=== PRODUCT LANGUAGE")
             assert start >= 0 and end > start
