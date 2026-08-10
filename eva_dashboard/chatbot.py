@@ -1472,15 +1472,20 @@ def _should_redirect_scoped_sales(name: str, user_text: str) -> bool:
     if _looks_scoped_entity_sales(user_text):
         return True
     t = (user_text or "").lower()
+    # "how are Eva sales in Karachi" is analytical + city/brand → still sales
+    if re.search(r"\b(sales?|volume|mt)\b", t) and (
+        extract_city_from_text(user_text)
+        or extract_client_type_from_text(user_text)
+        or _extract_business_units_from_text(user_text)
+        or extract_oil_type_from_text(user_text)
+        or extract_packing_from_text(user_text)
+    ):
+        if _looks_party_analytics(t) or _looks_client_list(t):
+            return False
+        return True
     if _looks_analytical(t) or _looks_party_analytics(t) or _looks_client_list(t):
         return False
-    return bool(
-        (
-            extract_client_type_from_text(user_text)
-            or extract_city_from_text(user_text)
-        )
-        and re.search(r"\b(sales?|volume|mt)\b", t)
-    )
+    return False
 
 
 FOLLOWUP_MARKER = "[FOLLOW-UP on the answer you just gave]"
@@ -2419,6 +2424,15 @@ def _extract_named_party_query(text: str) -> str | None:
         "",
         name,
     ).strip(" ?.,\"'")
+    # Strip trailing city scopes ("Eva in Karachi" → "Eva")
+    name = re.sub(
+        r"(?i)\s+(?:in|for|of)\s+"
+        r"(?:lahore|karachi|islamabad|faisalabad|multan|peshawar|"
+        r"rawalpindi|gujranwala|sialkot|hyderabad|quetta)"
+        r"(?:\s+city)?\s*$",
+        "",
+        name,
+    ).strip(" ?.,\"'")
     name = re.sub(
         r"(?i)^(the\s+)?(client|party|distributor|customer)\s+",
         "",
@@ -2456,6 +2470,18 @@ def _extract_named_party_query(text: str) -> str | None:
     if re.match(r"^(a|an|the|our|your|my)\s+", low):
         return None
     if low in {"our", "your", "my"}:
+        return None
+    # Brands / BU shorthands are sales scopes — never party lookups
+    # ("how are Eva sales in Karachi" must not become lookup_party("Eva"))
+    if low in {
+        "eva",
+        "maan",
+        "cusine",
+        "cuisine",
+        "eva foods",
+        "eva brand",
+        "maan brand",
+    }:
         return None
     # Reject only when the *entire* name is a client-type alias/label.
     # Party names like "Alpha Dist" contain "dist" but are not types.
@@ -3216,6 +3242,22 @@ def _extract_business_units_from_text(text: str) -> list[str]:
             found.append("Maan Bulk")
         else:
             found.append("Maan Consumer")
+    # Bare Eva brand sales ("how are Eva sales in Karachi") → both Eva BUs
+    # — not Eva Distributors (client type) and not a party named "Eva".
+    if (
+        re.search(r"\beva\b", lower)
+        and not re.search(r"\beva\s+distributors?\b", lower)
+        and not any(str(x).lower().startswith("eva") for x in found)
+        and re.search(
+            r"\b("
+            r"eva\s+sales|eva\s+performance|eva\s+volume|"
+            r"how\s+(are|were|is|did|do|have|has)\s+eva|"
+            r"for\s+eva\b|eva\s+in\b|eva\s+brand"
+            r")\b",
+            lower,
+        )
+    ):
+        found.extend(["Eva Consumer", "Eva Bulk"])
     return found
 
 
@@ -3997,6 +4039,12 @@ def _dispatch_tool(
                 else None
             )
         )
+        # Fresh asks: honor spoken BUs / brand shorthands ("Eva sales" → Eva BUs)
+        # Remove/exclude must not re-add the excluded unit as a positive filter.
+        if not remove:
+            for u in _extract_business_units_from_text(user_text):
+                if u not in units:
+                    units.append(u)
         # Prefer remove / regroup over packing/SKU drill language when both could match
         row_dim = arguments.get("row_dimension")
         row_groups: list[str] | None = None
@@ -5202,6 +5250,18 @@ def resolve_forced_tool(
         ):
             return "query_sales"
         return "required"
+
+    # Brand / city / "how are … sales" scopes → sales table (not party lookup)
+    if (
+        _looks_analytical(text) or _wants_scoped_month_ams(text)
+    ) and (
+        extract_city_from_text(text)
+        or _extract_business_units_from_text(text)
+        or extract_client_type_from_text(text)
+        or extract_oil_type_from_text(text)
+        or extract_packing_from_text(text)
+    ):
+        return "query_sales"
 
     # Default factual ask: require a tool; model chooses which one
     return "required"
