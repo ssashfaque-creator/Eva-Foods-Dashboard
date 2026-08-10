@@ -254,22 +254,15 @@ DATA MODEL (filters you set; tools build tables):
 - Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
 - Client hierarchy: Client Type → Party (named client).
   City = City-Filter on clients; Zone = SOUTH/CENTRAL/NORTH mapped from city.
-- Geography: use `city` or `zone` like each other. "South zone sales" → filter zone=SOUTH.
-  After a zone table, "city wise" → cities nested under Zone (first column Zone, then City).
-- Channel = Client Type (trade channel). "Which channels grew/declined" → client_type
-  rows with Volume + AMS + % vs AMS (not packing, not party list).
-- Client Type pivots use NEW groups (Chase Up/Metro/CSD/SPAR→IMT; LMT sources→LMT;
-  dealers→Dealer). But if the user names a specific old type (Chase Up, CSD,
-  Metro, NORTH LMT, Gelani…), filter to that type only — not the whole group.
-  Broad words: imt→IMT, lmt→LMT, dealers→Dealer. Imtiaz→Imtiaz Store; distributors→Eva Distributors.
-- which/what/who + client type → parties in that filter
-  (specific Chase Up / CSD, or whole IMT if they said IMT).
-- Named party / "who is X?" → lookup_party (not a client-type filter).
-- Cold "who are distributors in Lahore?" → list_clients.
-- After a month sales table, "individual distributor breakdown" / distributors-wise
-  → same month grid with party rows (query_sales), not a flat client list.
-- Which distributors grew / vs AMS / vs last year (VTF etc.) → analyze_parties with
-  YoY % (+ AMS columns when both asked). Never a packing matrix or bare MT list.
+- Geography: city/zone alike. After a zone table, "city wise" → Zone then City.
+- Channel = Client Type. "Channel wise sales for Karachi" → client_type × month,
+  all BUs (no sticky Maan/Eva). Full new asks reset sticky filters; short mutations
+  ("city wise", "remove BU", "same format") keep prior.
+- Client Type groups: Chase Up/Metro/CSD/SPAR→IMT; LMT sources→LMT; dealers→Dealer.
+  Named old type stays specific. imt→IMT, distributors→Eva Distributors, Imtiaz→Imtiaz Store.
+- which/what + client type → parties; "who is X?" → lookup_party; cold distributor
+  list → list_clients. Month-table "individual distributors" → party×month grid.
+- Distributor growth / AMS / last year → analyze_parties (not packing matrix).
 
 TOOL CHOICE:
 - Volume pivots / month grids / regroup / include-bulk / remove / add layer / YoY → query_sales
@@ -297,7 +290,7 @@ DEFAULTS (tools also enforce these):
 - Columns: client_type | city | month. Tables include row + column totals.
 - Zones: SOUTH, CENTRAL, NORTH. "zone wise" / "by zone" → row_dimension=zone.
   "city wise" after a zone view → row_dimension=city with zone grouping.
-- [FOLLOW-UP …] / Reply: reuse filters via prior_spec unless regroup/drill/remove/YoY/etc.
+- [FOLLOW-UP …] / Reply: short mutations keep filters; complete new sales asks reset sticky BU/period/channel.
 - Remove inactive → drop inactive clients (not the whole channel). Sample/marketing → party names.
 - Add city layer → nest City. Only growing → grown-only; sort by AMS growth → rank only.
 
@@ -391,6 +384,7 @@ _ANALYSIS_ONLY_SYSTEM = (
     "Reply with ONLY ### Analysis and 2-4 one-line bullets.\n"
     "Rules:\n"
     "- No bold labels / section titles inside bullets.\n"
+    "- Answer the user's actual question (including casual follow-ups).\n"
     "- Interpret what matters: concentration, momentum (AMS/YoY), who is "
     "pulling ahead or dragging, and one actionable risk or opportunity.\n"
     "- Prefer comparisons (gap vs #2, % of total, AMS vs prior) over "
@@ -1419,8 +1413,87 @@ def _looks_scoped_entity_sales(text: str) -> bool:
     return False
 
 
+def _strip_followup_marker(text: str) -> str:
+    """Drop the Reply UI prefix so heuristics don't match words inside it."""
+    t = (text or "").lstrip()
+    if t.startswith(FOLLOWUP_MARKER):
+        return t[len(FOLLOWUP_MARKER) :].lstrip(" \n:-")
+    if t.startswith("[FOLLOW-UP"):
+        return re.sub(r"^\[FOLLOW-UP[^\]]*\]\s*", "", t, flags=re.IGNORECASE).lstrip(
+            " \n:-"
+        )
+    return text or ""
+
+
+def _looks_complete_sales_ask(text: str) -> bool:
+    """Full new sales question — do not mutate sticky prior filters.
+
+    Distinguishes ``can you show channel wise sales for karachi`` (fresh)
+    from short table ops like bare ``channel wise`` / ``remove BU``.
+    """
+    raw = _strip_followup_marker(text)
+    t = (raw or "").lower().strip()
+    if not t:
+        return False
+    if _looks_same_format(t) or _looks_combine_tables(t) or _looks_include_check(t):
+        return False
+    # Bare dimension-wise mutations (optionally with please/show)
+    if re.search(
+        r"^(please\s+|can you\s+|could you\s+)?"
+        r"(show\s+|give\s+)?"
+        r"(city|zone|channel|client([- ]?type)?|bu|business\s*units?|"
+        r"product|packing|oil|distributor|party)"
+        r"[- ]?wise\s*[.?!]?\s*$",
+        t,
+    ):
+        return False
+    if _looks_hide_sku(t) and not re.search(r"\b(sales?|show me|how)\b", t):
+        return False
+    if _looks_remove(t) and not (
+        extract_city_from_text(raw)
+        or _looks_national_scope(raw)
+        or re.search(r"\b(sales?|show me|how are|how were)\b", t)
+    ):
+        return False
+
+    has_sales = bool(re.search(r"\b(sales?|volume|mt|performance|ams)\b", t))
+    has_channel = _looks_channel_language(raw)
+    has_ask = bool(
+        re.search(
+            r"\b("
+            r"show|give|display|pull|get|what (were|are|was)|"
+            r"how (are|were|is|did|do)|can you|could you|please|"
+            r"sales?\s+(for|in|of|by)|channel[- ]?wise\s+sales?"
+            r")\b",
+            t,
+        )
+    )
+    has_geo_or_brand = bool(
+        extract_city_from_text(raw)
+        or extract_client_type_from_text(raw)
+        or _extract_business_units_from_text(raw)
+        or _looks_national_scope(raw)
+        or extract_oil_type_from_text(raw)
+        or extract_packing_from_text(raw)
+    )
+    # "show me all channels in Karachi" / "channel wise sales for Karachi"
+    if has_ask and has_geo_or_brand and (has_sales or has_channel):
+        return True
+    # Dimension-wise + sales + scope without an extra verb
+    if has_sales and has_geo_or_brand and extract_regroup_dimension(raw):
+        return True
+    return False
+
+
 def _looks_table_op_followup(text: str) -> bool:
     """True when this turn mutates / inspects a prior sales table."""
+    # Complete new asks may contain "channel wise" but are not mutations.
+    if _looks_complete_sales_ask(text):
+        return bool(
+            _looks_include_check(text)
+            or _looks_combine_tables(text)
+            or _looks_same_format(text)
+        )
     return bool(
         _is_explicit_followup(text)
         or _looks_include_check(text)
@@ -2156,8 +2229,11 @@ def extract_regroup_dimension(text: str) -> str | None:
             "client_type",
         ),
         (
-            r"\b(client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
-            r"by\s+channels?)\b",
+            r"\b("
+            r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
+            r"by\s+channels?|all\s+channels?|every\s+channel|"
+            r"channels?\s+in\b|channels?\s+for\b|show\s+(me\s+)?(all\s+)?channels?"
+            r")\b",
             "client_type",
         ),
         (
@@ -2229,18 +2305,22 @@ def _looks_channel_language(text: str) -> bool:
 
 def _looks_channel_growth_ask(text: str) -> bool:
     """'Which channels grew / declined' → client_type Volume + AMS + %."""
-    if not _looks_channel_language(text):
+    raw = _strip_followup_marker(text)
+    if not _looks_channel_language(raw):
         return False
-    t = (text or "").lower()
+    t = (raw or "").lower()
+    # Avoid bare \bup\b — it matches inside "FOLLOW-UP" when marker isn't stripped.
     return bool(
         re.search(
             r"\b("
             r"grew|grown|grow|growth|declined?|dropped|fallen|fell|"
-            r"increased?|decreased?|up|down|vs\s*ams|against ams|"
-            r"performance|doing"
+            r"increased?|decreased?|went\s+up|up\s+vs|vs\s*ams|against ams|"
+            r"performance|doing\s+well|doing\s+poorly"
             r")\b",
             t,
         )
+        or re.search(r"\b(channels?|client\s*types?)\b.+\b(up|down)\b", t)
+        or re.search(r"\b(up|down)\b.+\b(channels?|client\s*types?)\b", t)
     )
 
 
@@ -2317,6 +2397,17 @@ def resolve_regroup_request(
         pf.get("business_unit") or prior_spec.get("business_units")
     ):
         clear.append("business_unit")
+    # Channel-wise = all trade channels — drop sticky BU/packing product scope
+    # unless the user is explicitly nesting a layer.
+    add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
+    if dim == "client_type" and not add_layer:
+        if pf.get("business_unit") or prior_spec.get("business_units"):
+            if "business_unit" not in clear:
+                clear.append("business_unit")
+        if pf.get("packing_category") and "packing_category" not in clear:
+            clear.append("packing_category")
+        if pf.get("oil_type") and "oil_type" not in clear:
+            clear.append("oil_type")
 
     out: dict[str, Any] = {
         "axis": axis,
@@ -2335,6 +2426,10 @@ def resolve_regroup_request(
             leaf, groups = _party_matrix_row_layout(text, prior_spec)
             out["row_dimension"] = leaf
             out["row_groups"] = groups or []
+        # Channel-wise / city-wise as a new cut — flat rows, don't bury under packing
+        elif dim in {"client_type", "city", "zone"} and not add_layer:
+            out["row_dimension"] = dim
+            out["row_groups"] = []
         elif (
             prior_row
             and prior_row != dim
@@ -2348,6 +2443,11 @@ def resolve_regroup_request(
             out["row_groups"] = []
         if prior_col == dim:
             out["columns"] = "client_type" if dim != "client_type" else "city"
+        elif dim == "client_type" and prior_col != "month" and re.search(
+            r"\bsales?\b", t
+        ):
+            # "channel wise sales" → prefer a month grid over a stale city column
+            out["columns"] = "month"
         else:
             out["columns"] = prior_col
     else:
@@ -2409,8 +2509,12 @@ def resolve_row_dimension_request(
 
     # Channels / client types as rows
     if re.search(
-        r"\b(by\s+channels?|channel[- ]?wise|by\s+client\s*types?|"
-        r"client[- ]?type[- ]?wise|show\s+channels?)\b",
+        r"\b("
+        r"by\s+channels?|channel[- ]?wise|by\s+client\s*types?|"
+        r"client[- ]?type[- ]?wise|show\s+channels?|"
+        r"all\s+channels?|every\s+channel|channels?\s+in\b|"
+        r"channels?\s+for\b|trade\s+channels?"
+        r")\b",
         t,
     ):
         return "client_type"
@@ -4230,15 +4334,18 @@ def _dispatch_tool(
         if arguments.get("business_unit"):
             units.append(arguments["business_unit"])
 
+        # Complete new asks ("channel wise sales for Karachi") ignore sticky priors
+        is_complete = _looks_complete_sales_ask(user_text)
+
         prior_row = (prior_spec or {}).get("row_dimension") if prior_spec else None
         remove = (
             resolve_remove_request(user_text, prior_spec=prior_spec)
-            if prior_spec
+            if prior_spec and not is_complete
             else None
         )
         regroup = (
             None
-            if remove
+            if remove or is_complete
             else (
                 resolve_regroup_request(user_text, prior_spec=prior_spec)
                 if prior_spec
@@ -4290,8 +4397,31 @@ def _dispatch_tool(
                 row_dim = asked_dim
             else:
                 row_dim = row_dim or None
+            # Complete channel/city asks: drop sticky product filters from prior
+            if is_complete:
+                clear_filters = list(clear_filters or [])
+                spoken_bus = _extract_business_units_from_text(user_text)
+                if not spoken_bus and "business_unit" not in clear_filters:
+                    clear_filters.append("business_unit")
+                if (
+                    not extract_oil_type_from_text(user_text)
+                    and "oil_type" not in clear_filters
+                ):
+                    clear_filters.append("oil_type")
+                if (
+                    not extract_packing_from_text(user_text)
+                    and "packing_category" not in clear_filters
+                ):
+                    clear_filters.append("packing_category")
+                # Don't inherit a sticky client_type unless the user named one
+                if (
+                    not extract_client_type_from_text(user_text)
+                    and asked_dim == "client_type"
+                    and "client_type" not in clear_filters
+                ):
+                    clear_filters.append("client_type")
         is_same_format = _looks_same_format(user_text)
-        is_drill = (not remove and not regroup) and (
+        is_drill = (not remove and not regroup and not is_complete) and (
             bool(asked_dim)
             or (
                 bool(row_dim)
@@ -4305,7 +4435,9 @@ def _dispatch_tool(
 
         # Follow-up: merge mentioned BUs / keep prior table / change row grain / YoY
         is_yoy = _looks_sales_yoy_compare(user_text)
-        is_combine = _looks_combine_tables(user_text) or _looks_table_followup(user_text)
+        is_combine = _looks_combine_tables(user_text) or (
+            _looks_table_followup(user_text) and not is_complete
+        )
         use_prior = prior_spec if (
             (
                 is_combine
@@ -4314,7 +4446,10 @@ def _dispatch_tool(
                 or is_regroup
                 or is_remove
                 or is_same_format
-                or _is_explicit_followup(user_text)
+                or (
+                    _is_explicit_followup(user_text)
+                    and not is_complete
+                )
             )
             and prior_spec
         ) else None
@@ -4471,9 +4606,20 @@ def _dispatch_tool(
         ):
             uniq = []
 
-        # Regroup / remove: do not invent city/client from this short follow-up text
-        if is_regroup or is_remove:
-            city_arg = None
+        # Regroup / remove: do not invent city/client from short mutation text.
+        # Complete asks keep spoken city ("for Karachi") and drop sticky BUs.
+        if is_complete:
+            if not _extract_business_units_from_text(user_text):
+                uniq = []
+            # Named brand on a complete ask replaces prior BUs (don't merge)
+            elif use_prior:
+                clear_filters = list(clear_filters or [])
+                if "business_unit" not in clear_filters:
+                    clear_filters.append("business_unit")
+        elif is_regroup or is_remove:
+            # Keep a city the user named; only drop invented cities
+            if not extract_city_from_text(user_text):
+                city_arg = None
             if not extract_client_type_from_text(user_text):
                 ctype = None
             if is_remove:

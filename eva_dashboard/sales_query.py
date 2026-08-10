@@ -1024,7 +1024,8 @@ def _pivot_months(
 _ROW_HIERARCHY: dict[str, list[str]] = {
     "packing_category": ["business_unit", "packing_category"],
     "product": ["business_unit", "packing_category", "product"],
-    "city": ["zone", "city"],
+    # City alone stays City × … ; Zone → City only when zone is in row_groups
+    # (e.g. after a zone table + "city wise").
 }
 
 _ROW_HEADER_LABELS = {
