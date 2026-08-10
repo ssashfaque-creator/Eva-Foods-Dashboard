@@ -837,6 +837,14 @@ def _fetch_lines(
             frame = frame[
                 ~frame[col].astype(str).str.strip().str.lower().eq(tk)
             ]
+    # Canonical packing labels so "Pet bottle" / "Pet Bottle" collapse.
+    if not frame.empty and "packing_category" in frame.columns:
+        frame = frame.copy()
+        frame["packing_category"] = frame["packing_category"].map(
+            lambda v: normalize_packing_category(str(v))
+            if str(v).strip() and str(v).strip() != "(unmapped)"
+            else str(v)
+        )
     return frame.reset_index(drop=True)
 
 

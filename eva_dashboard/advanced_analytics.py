@@ -158,7 +158,7 @@ def _fetch_filtered_lines(
 
     sql = f"""
     SELECT
-      s.date, s.party, s.inv_no, s.product,
+      s.date, s.party, s.inv_no, s.product, s.rate,
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
       COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
       COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
@@ -171,6 +171,13 @@ def _fetch_filtered_lines(
     with connect() as conn:
         frame = pd.read_sql_query(sql, conn, params=params)
     frame = _attach_client_dims(frame)
+    if not frame.empty and "packing_category" in frame.columns:
+        frame = frame.copy()
+        frame["packing_category"] = frame["packing_category"].map(
+            lambda v: normalize_packing_category(str(v))
+            if str(v).strip() and str(v).strip() != "(unmapped)"
+            else str(v)
+        )
     if city:
         ck = city.strip().lower()
         frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
@@ -1573,6 +1580,172 @@ def detect_dumping(
     return {
         "ok": True, "mode": "dumping", "period": period_info, "filters": filters,
         "case_count": len(cases), "cases": show,
+        "answer_markdown": _analysis(lines, tips),
+        "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+    }
+
+
+def detect_price_dispersion(
+    *,
+    period: str | None = None,
+    city: str | None = None,
+    client_type: str | None = None,
+    business_unit: str | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    exclude_client_types: list[str] | None = None,
+    limit: int = 40,
+) -> dict[str, Any]:
+    """Find same-date (+product) cases where distributors paid different rates."""
+    period_info = resolve_period(period or "this month")
+    if period_info.get("ok") is False:
+        return {"ok": False, "error": period_info.get("error")}
+    d0, d1 = period_info["date_from"], period_info["date_to"]
+    bu = _normalize_business_unit(business_unit)
+    oil = normalize_oil_type(oil_type)
+    pack = normalize_packing_category(packing_category)
+    ctype = normalize_client_type(client_type) or "Eva Distributors"
+
+    cur = _fetch_filtered_lines(
+        date_from=d0,
+        date_to=d1,
+        city=city,
+        client_type=ctype,
+        business_unit=bu,
+        oil_type=oil,
+        packing_category=pack,
+        exclude_client_types=exclude_client_types,
+    )
+    filters = {
+        "city": city,
+        "client_type": ctype,
+        "business_unit": bu,
+        "oil_type": oil,
+        "packing_category": pack,
+        "exclude_client_types": exclude_client_types,
+    }
+    if cur.empty:
+        return {
+            "ok": True,
+            "mode": "price_dispersion",
+            "period": period_info,
+            "filters": filters,
+            "cases": [],
+            "answer_markdown": (
+                f"No sales with rates for {period_info.get('label')} · "
+                f"{_scope_bits(filters)}.\n"
+            ),
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    frame = cur.copy()
+    frame["rate"] = pd.to_numeric(frame.get("rate"), errors="coerce")
+    frame["mt"] = pd.to_numeric(frame.get("mt"), errors="coerce").fillna(0.0)
+    frame = frame[frame["rate"].notna() & (frame["rate"] > 0)]
+    if frame.empty:
+        return {
+            "ok": True,
+            "mode": "price_dispersion",
+            "period": period_info,
+            "filters": filters,
+            "cases": [],
+            "answer_markdown": (
+                f"No usable rate values for {period_info.get('label')} · "
+                f"{_scope_bits(filters)}.\n"
+            ),
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
+
+    frame["date_key"] = frame["date"].astype(str).str.slice(0, 10)
+    # Party-level weighted average rate per date×product
+    frame["rate_mt"] = frame["rate"] * frame["mt"]
+    party_rates = (
+        frame.groupby(
+            ["date_key", "product", "party", "city", "client_type"],
+            as_index=False,
+        )
+        .agg(mt=("mt", "sum"), rate_mt=("rate_mt", "sum"))
+    )
+    party_rates["rate"] = party_rates.apply(
+        lambda r: (float(r["rate_mt"]) / float(r["mt"])) if float(r["mt"]) else None,
+        axis=1,
+    )
+    party_rates = party_rates[party_rates["rate"].notna()]
+
+    cases: list[dict[str, Any]] = []
+    for (dt, prod), grp in party_rates.groupby(["date_key", "product"]):
+        rates = sorted({round(float(x), 4) for x in grp["rate"].tolist()})
+        if len(rates) < 2:
+            continue
+        parties = sorted(
+            {
+                (
+                    str(r["party"]),
+                    round(float(r["rate"]), 2),
+                    round(float(r["mt"]), 3),
+                    str(r.get("city") or ""),
+                )
+                for _, r in grp.iterrows()
+            },
+            key=lambda x: (-x[1], -x[2], x[0]),
+        )
+        spread = rates[-1] - rates[0]
+        cases.append(
+            {
+                "date": str(dt),
+                "product": str(prod),
+                "party_count": len(parties),
+                "min_rate": round(rates[0], 2),
+                "max_rate": round(rates[-1], 2),
+                "spread": round(spread, 2),
+                "parties": parties[:8],
+            }
+        )
+    cases.sort(key=lambda c: (-(c["spread"] or 0), -c["party_count"], c["date"]))
+    show = cases[: max(1, min(int(limit or 40), 100))]
+
+    lines = [
+        "Same-date price differences across distributors "
+        f"(date × product) — {period_info.get('label')} · {_scope_bits(filters)}.\n",
+        "| # | Date | Product | Parties | Min rate | Max rate | Spread | Examples |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for i, c in enumerate(show, 1):
+        examples = "; ".join(
+            f"{p[0][:28]}@{p[1]}" for p in (c.get("parties") or [])[:3]
+        )
+        prod = str(c["product"])[:36]
+        lines.append(
+            f"| {i} | {c['date']} | {prod} | {c['party_count']} | "
+            f"{c['min_rate']} | {c['max_rate']} | {c['spread']} | {examples} |"
+        )
+    tips: list[str] = []
+    if show:
+        tips.append(
+            f"{len(cases)} date×product groups have different distributor rates."
+        )
+        top = show[0]
+        tips.append(
+            f"Largest spread **{top['spread']}** on **{top['date']}** / "
+            f"{str(top['product'])[:40]} "
+            f"(min {top['min_rate']} → max {top['max_rate']})."
+        )
+    else:
+        lines = [
+            "No same-date price differences across distributors for "
+            f"{period_info.get('label')} · {_scope_bits(filters)}.\n"
+        ]
+        tips.append(
+            "All distributors with rates paid the same rate per product on each date "
+            "in this scope."
+        )
+    return {
+        "ok": True,
+        "mode": "price_dispersion",
+        "period": period_info,
+        "filters": filters,
+        "case_count": len(cases),
+        "cases": show,
         "answer_markdown": _analysis(lines, tips),
         "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
     }

@@ -127,8 +127,11 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             # Grown-only: Beta declined YoY and should be excluded
             assert "Beta Dist" not in parties
             md = out["answer_markdown"]
-            assert "YoY" in md
-            assert "AMS growth" in md
+            assert "AMS growth" in md or "AMS gains" in md
+            assert "AMS current (" in md
+            assert "AMS prior (" in md
+            # AMS-growth report no longer mixes YoY volume columns
+            assert "| Prior (MT) |" not in md
             assert "Business Unit" not in md  # not a packing matrix
 
             # Wrong tool choice still redirects

@@ -302,8 +302,8 @@ def test_pakistan_growth_clears_city_and_ranks_ams_growth() -> None:
             assert out["filters"].get("business_unit") is None
             assert out["filters"]["oil_type"] == "Eva VTF"
             md = out.get("answer_markdown") or ""
-            assert "AMS growth" in md
-            assert "YoY" in md
+            assert "AMS growth" in md or "AMS gains" in md
+            assert "AMS current (" in md
             assert "Zeta Dist" in md
         finally:
             if previous is None:

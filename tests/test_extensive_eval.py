@@ -170,8 +170,8 @@ def test_extensive_offline_eval_bank() -> None:
                 )
                 assert out.get("metric") == "ams_growth"
                 md = out.get("answer_markdown") or ""
-                assert "YoY" in md
-                assert "AMS growth" in md
+                assert "AMS" in md
+                assert "AMS current" in md or "AMS growth" in md or "AMS gains" in md
             except Exception as exc:
                 failures.append(f"grown VTF: {exc}")
 

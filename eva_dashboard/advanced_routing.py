@@ -94,7 +94,22 @@ def infer_advanced_from_text(text: str) -> dict[str, Any]:
     if re.search(r"\bbottom\b", t):
         out["sort"] = "asc"
 
-    # Dumping
+    # Same-date price differences across distributors (not volume dumping)
+    if re.search(
+        r"\b("
+        r"different prices?|price differences?|prices? differ|"
+        r"purchased at different|bought at different|"
+        r"same date.{0,40}prices?|prices?.{0,40}same date|"
+        r"price (dispersion|variance|outlier)|rate differences?"
+        r")\b",
+        t,
+    ):
+        out["mode"] = "price_dispersion"
+        out["client_type"] = out["client_type"] or "Eva Distributors"
+        out["period"] = out["period"] or "this month"
+        return out
+
+    # Dumping = volume excess vs AMS (not price)
     if re.search(
         r"\b(dumping|excessive sales?|excess sale|likely dump|"
         r"identify (any )?dump|show (any )?dump)\b",

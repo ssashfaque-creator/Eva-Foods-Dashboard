@@ -242,6 +242,17 @@ def _first_sale_dates(
     }
 
 
+def _ams_window_label(as_of: date) -> str:
+    """Short label for the 3 full months before ``as_of`` (e.g. May–Jul 2026)."""
+    ranges = _prior_three_month_ranges(as_of.replace(day=1))
+    if not ranges:
+        return ""
+    start, end = ranges[0][0], ranges[-1][1]
+    if start.year == end.year:
+        return f"{start.strftime('%b')}–{end.strftime('%b %Y')}"
+    return f"{start.strftime('%b %Y')}–{end.strftime('%b %Y')}"
+
+
 def _ams_by_party(
     *,
     as_of: date,
@@ -1352,13 +1363,18 @@ def analyze_parties(
 
     # Prior 3-month AMS window (the 3 full months before current AMS window)
     prior_ams: dict[str, float] = {}
+    ams_current_label = ""
+    ams_prior_label = ""
     if metric_n == "ams_growth":
-        prior_as_of = as_of.replace(day=1)
+        ams_as_of = as_of.replace(day=1)
+        ams_current_label = _ams_window_label(ams_as_of)
+        prior_as_of = ams_as_of
         for _ in range(3):
             y, m = prior_as_of.year, prior_as_of.month - 1
             if m == 0:
                 y, m = y - 1, 12
             prior_as_of = date(y, m, 1)
+        ams_prior_label = _ams_window_label(prior_as_of)
         prior_ams = _ams_by_party(
             as_of=prior_as_of,
             city=city_f,
@@ -1527,50 +1543,45 @@ def analyze_parties(
         rows.sort(key=lambda r: sk(r["pct_vs_ams"], r["volume_mt"] or 0))
         score_key, score_label = "pct_vs_ams", "% vs AMS/Expected"
     elif metric_n == "ams_growth":
+        # Rank on AMS windows only — need a real prior/current AMS baseline.
         rows = [
             r
             for r in rows
-            if (r["volume_mt"] or 0) > 0
-            or (r["ams_mt"] or 0) > 0
-            or (r["ams_prior_mt"] or 0) > 0
-            or (r["prior_mt"] or 0) > 0
+            if (r.get("ams_mt") or 0) > 0 or (r.get("ams_prior_mt") or 0) > 0
         ]
         rows.sort(
             key=lambda r: sk(
                 r.get("ams_growth_pct"),
-                r.get("yoy_pct") if r.get("yoy_pct") is not None else -1e18,
+                float(r.get("ams_prior_mt") or 0),
             )
         )
         if grown_only and not declined_only:
             grown = [
                 r
                 for r in rows
-                if (
-                    isinstance(r.get("ams_growth_pct"), (int, float))
-                    and float(r["ams_growth_pct"]) > 0
-                )
-                or (
-                    isinstance(r.get("yoy_pct"), (int, float))
-                    and float(r["yoy_pct"]) > 0
-                )
+                if isinstance(r.get("ams_growth_pct"), (int, float))
+                and float(r["ams_growth_pct"]) > 0
             ]
+            # Fallback: "grown since last year" may only move on volume YoY
+            if not grown:
+                grown = [
+                    r
+                    for r in rows
+                    if isinstance(r.get("yoy_pct"), (int, float))
+                    and float(r["yoy_pct"]) > 0
+                ]
             if grown:
                 rows = grown
             else:
                 grown_only = False
         if declined_only:
+            # Meaningful AMS declines: had prior AMS and current AMS fell.
             declined = [
                 r
                 for r in rows
-                if (
-                    isinstance(r.get("ams_growth_pct"), (int, float))
-                    and float(r["ams_growth_pct"]) < 0
-                )
-                or (
-                    r.get("ams_growth_pct") is None
-                    and isinstance(r.get("yoy_pct"), (int, float))
-                    and float(r["yoy_pct"]) < 0
-                )
+                if (r.get("ams_prior_mt") or 0) > 0
+                and isinstance(r.get("ams_growth_pct"), (int, float))
+                and float(r["ams_growth_pct"]) < 0
             ]
             if declined:
                 rows = declined
@@ -1628,13 +1639,12 @@ def analyze_parties(
     if metric_n == "yoy_ams":
         extra = ["volume_mt", "ams_mt", "pct_vs_ams", "prior_mt", "yoy_pct"]
     if metric_n == "ams_growth":
+        # AMS columns only — do not mix YoY volume (confuses "last year AMS").
         extra = [
             "ams_mt",
             "ams_prior_mt",
             "ams_growth_pct",
             "volume_mt",
-            "prior_mt",
-            "yoy_pct",
         ]
     if metric_n == "invoices":
         extra = ["invoices", "volume_mt", "avg_invoice_mt"]
@@ -1643,19 +1653,51 @@ def analyze_parties(
 
     blurb = _scope_blurb(filters, period_info)
     entity_word = "cities" if group == "city" else "parties"
-    if metric_n in {"yoy", "yoy_ams", "ams_growth"} and compare_info:
-        blurb += f" vs {compare_info.get('label')}"
+    col_label_overrides: dict[str, str] | None = None
+    if metric_n == "ams_growth":
+        cur_lbl = ams_current_label or "current 3 months"
+        prior_lbl = ams_prior_label or "prior 3 months"
+        col_label_overrides = {
+            "ams_mt": f"AMS current ({cur_lbl})",
+            "ams_prior_mt": f"AMS prior ({prior_lbl})",
+            "ams_growth_pct": "AMS growth %",
+            "volume_mt": "Volume in period (MT)",
+        }
+        blurb += (
+            f" · AMS current = avg MT of {cur_lbl}"
+            f" · AMS prior = avg MT of {prior_lbl}"
+        )
         if grown_only:
             blurb += " · grown only"
         if declined_only:
             blurb += " · declined only"
-    if metric_n == "vs_ams":
-        direction = "furthest behind" if sort_n == "asc" else "furthest ahead of"
-        blurb += (
-            f" · {entity_word} {direction} "
-            + ("Expected (days/month × AMS)" if partial else "AMS (3 prior months)")
-        )
+        if declined_only or sort_n == "asc":
+            blurb = f"Biggest AMS declines — {blurb}"
+        elif grown_only:
+            blurb = f"Biggest AMS gains — {blurb}"
+        else:
+            blurb = f"Parties by AMS growth % — {blurb}"
     else:
+        if metric_n in {"yoy", "yoy_ams"} and compare_info:
+            blurb += f" vs {compare_info.get('label')}"
+            if grown_only:
+                blurb += " · grown only"
+            if declined_only:
+                blurb += " · declined only"
+            col_label_overrides = {
+                "prior_mt": "Volume last year (MT)",
+                "yoy_pct": "Volume YoY %",
+            }
+        if metric_n == "vs_ams":
+            direction = "furthest behind" if sort_n == "asc" else "furthest ahead of"
+            blurb += (
+                f" · {entity_word} {direction} "
+                + (
+                    "Expected (days/month × AMS)"
+                    if partial
+                    else "AMS (3 prior months)"
+                )
+            )
         blurb = f"Top {entity_word} by {score_label} — {blurb}"
 
     return _party_table_result(
@@ -1665,9 +1707,10 @@ def analyze_parties(
         metric=metric_n,
         score_label=score_label,
         extra_cols=extra,
-        blurb=blurb if metric_n == "vs_ams" else blurb,
+        blurb=blurb,
         compare_period=compare_info,
         entity_key=entity_key,
+        col_label_overrides=col_label_overrides,
     )
 
 
@@ -1903,6 +1946,7 @@ def _party_table_result(
     blurb: str,
     compare_period: dict[str, Any] | None = None,
     entity_key: str = "party",
+    col_label_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     col_labels = {
         "volume_mt": "Volume (MT)",
@@ -1911,13 +1955,15 @@ def _party_table_result(
         "ams_growth_pct": "AMS growth %",
         "expected_mt": "Expected (MT)",
         "segment_mt": "Segment (MT)",
-        "prior_mt": "Prior (MT)",
+        "prior_mt": "Volume last year (MT)",
         "pct_vs_ams": "% vs AMS",
-        "yoy_pct": "YoY %",
+        "yoy_pct": "Volume YoY %",
         "first_sale": "First sale",
         "invoices": "Invoices",
         "avg_invoice_mt": "Avg MT / invoice",
     }
+    if col_label_overrides:
+        col_labels.update(col_label_overrides)
     name_header = "City" if entity_key == "city" else "Party"
     # Omit constant filter columns (same value on every row / matches filter)
     show_type = True

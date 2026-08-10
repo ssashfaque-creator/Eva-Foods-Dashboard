@@ -1167,7 +1167,8 @@ TOOLS.append(
                 "Advanced analytics: city/client compare (+growth), WoW, packing/oil "
                 "growth, expected month close, silent this week, not ordered packing, "
                 "reactivated, days since invoice, concentration/shares, oil mix, "
-                "packing contribution, top SKUs, party profile, dumping/excessive sales, "
+                "packing contribution, top SKUs, party profile, dumping/excessive volume, "
+                "same-date price differences across distributors, "
                 "filter entities by volume/YoY/MoM (sales > 10 MT, declined >10%, "
                 "more this month than last)."
             ),
@@ -1194,6 +1195,7 @@ TOOLS.append(
                             "top_skus",
                             "party_profile",
                             "dumping",
+                            "price_dispersion",
                             "filter_entities",
                         ],
                     },
@@ -1830,34 +1832,43 @@ def _extract_remove_phrase(text: str) -> str | None:
     t = (text or "").strip()
     if _looks_hide_sku(t):
         return "sku"
-    m = re.search(
-        r"\b(?:remove|exclude|drop|without|filter\s+out)\s+"
-        r"(?:the\s+)?(.+?)(?:\s+from\s+(?:the\s+)?(?:table|view|this|that|above))?\s*$",
+    # Prefer parenthetical remove hints: "... (remove BU)" / "... (without packing)"
+    m_paren = re.search(
+        r"\(\s*(?:remove|exclude|drop|without|filter\s+out)\s+(?:the\s+)?([^)]+?)\s*\)",
         t,
         flags=re.IGNORECASE,
     )
-    if not m:
+    if m_paren:
+        phrase = re.sub(r"\s+", " ", m_paren.group(1)).strip(" .,!?;:")
+    else:
         m = re.search(
-            r"\b(?:remove|exclude|drop|without|filter\s+out)\s+(?:the\s+)?(.+)",
+            r"\b(?:remove|exclude|drop|without|filter\s+out)\s+"
+            r"(?:the\s+)?(.+?)(?:\s+from\s+(?:the\s+)?(?:table|view|this|that|above))?\s*$",
             t,
             flags=re.IGNORECASE,
         )
-    if not m:
-        return None
-    phrase = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?")
+        if not m:
+            m = re.search(
+                r"\b(?:remove|exclude|drop|without|filter\s+out)\s+(?:the\s+)?(.+)",
+                t,
+                flags=re.IGNORECASE,
+            )
+        if not m:
+            return None
+        phrase = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:()[]")
     phrase = re.sub(
         r"\s+from\s+(the\s+)?(table|view|this|that|above)$",
         "",
         phrase,
         flags=re.IGNORECASE,
     ).strip()
-    # Strip trailing filler like "items" / "rows" after the value list
+    # Strip trailing filler like "items" / "rows" / "layer" after the value list
     phrase = re.sub(
-        r"\s+(items?|rows?|lines?|entries)\s*$",
+        r"\s+(items?|rows?|lines?|entries|layers?|columns?|breakdown)\s*$",
         "",
         phrase,
         flags=re.IGNORECASE,
-    ).strip()
+    ).strip(" .,!?;:()[]")
     return phrase or None
 
 
@@ -1887,6 +1898,11 @@ def _split_remove_value_phrases(phrase: str) -> list[str]:
 
 def _phrase_as_struct_dim(phrase: str) -> str | None:
     key = (phrase or "").strip().lower()
+    key = re.sub(
+        r"\s+(layers?|columns?|breakdown|rows?)$",
+        "",
+        key,
+    ).strip()
     for needle, dim in _STRUCT_DIM_PHRASES:
         if key == needle or key == needle.replace(" ", ""):
             return dim
@@ -3232,9 +3248,18 @@ def _looks_factor_only_ask(text: str) -> bool:
     return True
 
 
+def _looks_price_dispersion_ask(text: str) -> bool:
+    """Same-date / cross-party price variance — advanced_query, not avg rate."""
+    from eva_dashboard.advanced_routing import infer_advanced_from_text
+
+    return infer_advanced_from_text(text).get("mode") == "price_dispersion"
+
+
 def _looks_price_query(text: str) -> bool:
     t = (text or "").lower()
     if _looks_party_lookup(t) or _looks_client_list(t) or _looks_party_analytics(t):
+        return False
+    if _looks_price_dispersion_ask(text):
         return False
     # "average sale" is volume, not rate
     if re.search(r"\baverage\s+sales?\b|\bavg\.?\s+sales?\b", t):
@@ -3244,7 +3269,7 @@ def _looks_price_query(text: str) -> bool:
     return bool(
         re.search(
             r"\b(price\s*fetch|price fetch|avg\.?\s*rate|average\s+rate|"
-            r"average\s+price|avg\.?\s*price|\brate\b|\bpriced?\b|"
+            r"average\s+price|avg\.?\s*price|\brate\b|\bprices?\b|\bpriced\b|"
             r"what'?s\s+the\s+price|selling\s+price)\b",
             t,
         )
@@ -3419,6 +3444,7 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
         days_since_last_invoice,
         party_profile,
         detect_dumping,
+        detect_price_dispersion,
         top_skus,
         filter_entities,
     )
@@ -3539,6 +3565,17 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
             period=period, city=city, client_type=ctype, business_unit=bu,
             oil_type=oil, packing_category=pack, exclude_client_types=exclude,
             group_by=group_by, limit=limit,
+        )
+    if mode == "price_dispersion":
+        return detect_price_dispersion(
+            period=period,
+            city=city,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            exclude_client_types=exclude,
+            limit=max(limit, 25),
         )
     if mode == "filter_entities":
         thr = None if threshold is None else float(threshold)
@@ -3673,6 +3710,65 @@ def _prior_had_bu_grain(prior_spec: dict[str, Any] | None) -> bool:
     return False
 
 
+def _wants_party_totals_only(text: str) -> bool:
+    """True for 'total sale(s)' / 'totals only' — no packing/BU breakdown."""
+    t = (text or "").lower()
+    if re.search(
+        r"\b("
+        r"by\s+products?|product[- ]?wise|by\s+packing|packing[- ]?wise|"
+        r"by\s+skus?|sku[- ]?wise|skus?\b|item[- ]?wise|"
+        r"by\s+business\s+unit|by\s+bu\b|bu[- ]?wise"
+        r")\b",
+        t,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"totals?\s+only|just\s+totals?|only\s+totals?|"
+            r"total\s+sales?|totals?\s+sale|sales?\s+totals?|"
+            r"overall\s+totals?|distributor\s+totals?"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _wants_omit_bu_layer(text: str) -> bool:
+    """True when the user asks to drop the Business Unit row layer."""
+    t = (text or "").lower()
+    if re.search(
+        r"\b("
+        r"remove|exclude|drop|without|filter\s+out"
+        r")\b.{0,24}\b("
+        r"bu|b\.?u\.?|business\s+units?"
+        r")\b",
+        t,
+    ):
+        return True
+    if re.search(
+        r"\(\s*(?:remove|exclude|drop|without)\s+(?:the\s+)?(?:bu|business\s+units?)\s*\)",
+        t,
+    ):
+        return True
+    return False
+
+
+def _wants_omit_packing_layer(text: str) -> bool:
+    """True when the user asks to drop packing/product breakdown."""
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"remove|exclude|drop|without|filter\s+out"
+            r")\b.{0,24}\b("
+            r"packing|packings|products?|product\s+break(?:down)?"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _party_matrix_row_layout(
     user_text: str,
     prior_spec: dict[str, Any],
@@ -3682,6 +3778,8 @@ def _party_matrix_row_layout(
     Distributor → Business Unit → Product when prior had BU;
     Distributor → Product otherwise. Spoken "product" = packing_category
     unless the user explicitly asks for SKUs.
+
+    Honors "total sale", "remove BU", and "remove packing" on the same ask.
     """
     t = (user_text or "").lower()
     selling = bool(
@@ -3709,6 +3807,12 @@ def _party_matrix_row_layout(
             t,
         )
     )
+    # Totals / remove packing → one row per distributor
+    if _wants_party_totals_only(user_text) or (
+        explicit_dist_layer and _wants_omit_packing_layer(user_text)
+    ):
+        return "party", None
+
     # "Who is BU selling to" → flat distributor rows (unless distributor-wise / by product)
     if selling and not explicit_dist_layer and not by_product:
         return "party", None
@@ -3721,7 +3825,8 @@ def _party_matrix_row_layout(
     )
     leaf = "product" if sku else "packing_category"
     groups = ["party"]
-    if _prior_had_bu_grain(prior_spec):
+    omit_bu = _wants_omit_bu_layer(user_text)
+    if _prior_had_bu_grain(prior_spec) and not omit_bu:
         groups.append("business_unit")
     return leaf, groups
 
@@ -3941,6 +4046,14 @@ def _dispatch_tool(
             user_text, prior_spec=prior_spec, arguments=arguments
         )
 
+    # Same-date price differences — never invoices / AMS rankings
+    if _looks_price_dispersion_ask(user_text):
+        return _dispatch_advanced(
+            {"mode": "price_dispersion", **(arguments or {})},
+            user_text,
+            prior_spec,
+        )
+
     # which/what + distributors|Imtiaz → individual parties (selling BU / most VTF / active)
     if _looks_which_parties_ask(user_text) or (
         _looks_sold_to_parties(user_text)
@@ -3979,7 +4092,36 @@ def _dispatch_tool(
         new_period = _extract_period_phrase(user_text)
         return _replay_party_spec(prior_party_spec, period=new_period)
 
-    # Individual distributors / party breakdown — keep month grid when prior is months
+    # Individual distributors / party breakdown — keep month grid when prior is months.
+    # Also honor total-sale / remove-BU language on an existing party×month grid.
+    if (
+        name
+        in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
+        and prior_spec
+        and str(prior_spec.get("column_dimension") or "") == "month"
+        and (
+            "party"
+            in {
+                normalize_row_dimension(prior_spec.get("row_dimension"))
+                or str(prior_spec.get("row_dimension") or ""),
+                *[
+                    normalize_row_dimension(g) or str(g)
+                    for g in (prior_spec.get("row_groups") or [])
+                ],
+            }
+        )
+        and (
+            _wants_party_totals_only(user_text)
+            or _wants_omit_bu_layer(user_text)
+            or _wants_omit_packing_layer(user_text)
+        )
+        and not _looks_party_growth_rank(user_text)
+        and not _looks_party_mix_query(user_text)
+    ):
+        return _party_month_matrix_from_prior(
+            user_text, prior_spec=prior_spec, arguments=arguments
+        )
+
     if (
         name
         in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
@@ -5237,7 +5379,11 @@ def resolve_forced_tool(
     if _looks_channel_growth_ask(text):
         return "query_sales"
 
-    # 2b2) Rate / Price Fetch / cost factor / packing cost / factor breakdown
+    # 2b2) Same-date price differences across parties
+    if _looks_price_dispersion_ask(text):
+        return "advanced_query"
+
+    # 2b2b) Rate / Price Fetch / cost factor / packing cost / factor breakdown
     if _looks_price_query(text):
         return "query_price"
 
@@ -5258,6 +5404,7 @@ def resolve_forced_tool(
             "compare_cities",
             "compare_client_types",
             "dumping",
+            "price_dispersion",
             "expected_month",
             "filter_entities",
             "dimension_growth",
