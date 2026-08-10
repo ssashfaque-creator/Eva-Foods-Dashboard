@@ -57,8 +57,14 @@ def test_golden_preferred_tool_hint() -> None:
 
 
 def test_v040_forces_only_high_confidence() -> None:
-    """General factual asks must not hard-pin a tool name."""
-    assert resolve_forced_tool("Show me Lahore sales") == "required"
+    """Force high-confidence tools; leave ambiguous ranking asks as required."""
+    # Scoped city/channel/brand sales are high-confidence → query_sales
+    assert resolve_forced_tool("Show me Lahore sales") == "query_sales"
+    assert resolve_forced_tool("how are Maan sales in Karachi") == "query_sales"
+    assert resolve_forced_tool("how are distributor sales in karachi") == (
+        "query_sales"
+    )
+    # Ambiguous AMS rankings stay unforced (model chooses analyze_parties)
     assert resolve_forced_tool("Top 10 distributors by AMS last month") == "required"
     assert resolve_forced_tool("Compare Lahore vs Karachi last month") == (
         "advanced_query"

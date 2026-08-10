@@ -105,3 +105,62 @@ def test_real_party_name_still_extracts() -> None:
         "Alpha Dist"
     )
     assert _looks_named_party_sales("show me Alpha Dist sales")
+
+
+def test_maan_sales_not_named_party() -> None:
+    q = "how are Maan sales in karachi"
+    assert _extract_named_party_query(q) is None
+    assert not _looks_named_party_sales(q)
+    assert resolve_forced_tool(q) == "query_sales"
+    assert suggest_preferred_tool(q) == "query_sales"
+    bus = _extract_business_units_from_text(q)
+    assert set(bus) == {"Maan Consumer", "Maan Bulk"}
+
+
+def test_maan_sales_karachi_dispatches_sales_not_lookup() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            q = "how are Maan sales in Karachi"
+            out = _dispatch_tool("lookup_party", {}, user_text=q)
+            assert out["ok"] is True
+            assert out.get("mode") in {"analytical", "matrix", "trend"}
+            filters = out.get("filters") or {}
+            assert filters.get("city") == "Karachi"
+            bus = list(out.get("business_units") or [])
+            assert "Maan Consumer" in bus
+            assert "Maan Bulk" in bus
+            assert "Eva Consumer" not in bus
+            md = out.get("answer_markdown") or ""
+            assert "Top parties by AMS" not in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_distributor_sales_not_ams_ranking() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            q = "how are distributor sales in karachi"
+            assert resolve_forced_tool(q) == "query_sales"
+            for tool in ("query_sales", "analyze_parties"):
+                out = _dispatch_tool(tool, {}, user_text=q)
+                assert out["ok"] is True
+                assert out.get("mode") in {"analytical", "matrix", "trend"}
+                assert (out.get("filters") or {}).get("client_type") == (
+                    "Eva Distributors"
+                )
+                assert (out.get("filters") or {}).get("city") == "Karachi"
+                assert "Top parties by AMS" not in (out.get("answer_markdown") or "")
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous

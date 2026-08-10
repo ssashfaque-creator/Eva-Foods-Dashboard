@@ -159,7 +159,7 @@ def test_named_party_natural_phrasing() -> None:
     # Client-type sales stay on the matrix path (not forced lookup_party)
     assert _extract_named_party_query("Show Imtiaz sales for July") is None
     assert not _looks_named_party_sales("Show Imtiaz sales for July")
-    assert resolve_forced_tool("Show Imtiaz sales for July") == "required"
+    assert resolve_forced_tool("Show Imtiaz sales for July") == "query_sales"
     assert suggest_preferred_tool("Show Imtiaz sales for July") == "query_sales"
 
 

@@ -1673,13 +1673,32 @@ def analyze_parties(
 
 def _party_meta(frame: pd.DataFrame, party: str) -> dict[str, Any]:
     part = frame[frame["party"] == party]
-    if part.empty:
-        return {"client_type": None, "city": None, "zone": None}
-    return {
-        "client_type": str(part["client_type"].iloc[0]) if "client_type" in part else None,
-        "city": str(part["city"].iloc[0]) if "city" in part else None,
-        "zone": str(part["zone"].iloc[0]) if "zone" in part else None,
-    }
+    ctype = city = zone = None
+    if not part.empty:
+        if "client_type" in part.columns:
+            raw = str(part["client_type"].iloc[0] or "").strip()
+            ctype = raw or None
+        if "city" in part.columns:
+            raw = str(part["city"].iloc[0] or "").strip()
+            city = raw or None
+        if "zone" in part.columns:
+            raw = str(part["zone"].iloc[0] or "").strip()
+            zone = raw or None
+    # Fill gaps from clients master (name mismatches / AMS-only parties)
+    if not ctype or not city:
+        try:
+            from eva_dashboard.sales_query import _clients_lookup, _norm_party_key
+
+            meta = _clients_lookup().get(_norm_party_key(party)) or {}
+            if not ctype:
+                ctype = (meta.get("type") or meta.get("type_raw") or None) or None
+            if not city:
+                city = meta.get("city") or None
+            if not zone:
+                zone = meta.get("zone") or None
+        except Exception:  # noqa: BLE001
+            pass
+    return {"client_type": ctype, "city": city, "zone": zone}
 
 
 def _party_analysis_bullets(

@@ -1457,6 +1457,64 @@ def _wants_scoped_month_ams(text: str) -> bool:
     )
 
 
+def _looks_scoped_performance_sales(text: str) -> bool:
+    """True for 'how are X sales/performance in Karachi' — sales table, not rankings.
+
+    Covers Eva/Maan brand, distributor channel, and city performance asks.
+    Explicit top/rank/which-distributor asks stay on analyze_parties.
+    """
+    t = (text or "").lower()
+    # Sales dump language OR evaluation language ("how is X performance")
+    has_sales_signal = bool(
+        re.search(
+            r"\b(sales?|volume|mt|performance|ams|numbers?)\b",
+            t,
+        )
+        or _looks_analytical(t)
+    )
+    if not has_sales_signal:
+        return False
+    if _looks_named_party_sales(text):
+        return False
+    # Leave city/client compares and filter modes to advanced_query
+    if looks_advanced(text):
+        return False
+    if _looks_party_growth_rank(t) or _looks_party_rank_ask(t):
+        return False
+    if _looks_party_mix_query(t) or _looks_which_parties_ask(t):
+        return False
+    if re.search(
+        r"\b("
+        r"top\s+\d+|who\s+(are|were)\s+the\s+top|highest|"
+        r"rank(ed|ing)?|leaderboard|league\s+table"
+        r")\b",
+        t,
+    ):
+        return False
+    has_scope = bool(
+        extract_city_from_text(text)
+        or extract_client_type_from_text(text)
+        or _extract_business_units_from_text(text)
+        or extract_oil_type_from_text(text)
+        or extract_packing_from_text(text)
+        or _looks_national_scope(text)
+    )
+    if not has_scope:
+        return False
+    # Performance / show-me language, or bare "X sales in city"
+    return bool(
+        _looks_analytical(t)
+        or _wants_scoped_month_ams(text)
+        or re.search(
+            r"\b("
+            r"show|give|sales?\s+in|sales?\s+for|sales?\s+nationally|"
+            r"performance|doing|evaluate|assess"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _should_redirect_scoped_sales(name: str, user_text: str) -> bool:
     """Under tool_choice=required, GPT may pick the wrong tool for show-me sales."""
     if name not in {
@@ -1469,20 +1527,11 @@ def _should_redirect_scoped_sales(name: str, user_text: str) -> bool:
         return False
     if _looks_named_party_sales(user_text) or _looks_table_op_followup(user_text):
         return False
+    if _looks_scoped_performance_sales(user_text):
+        return True
     if _looks_scoped_entity_sales(user_text):
         return True
     t = (user_text or "").lower()
-    # "how are Eva sales in Karachi" is analytical + city/brand → still sales
-    if re.search(r"\b(sales?|volume|mt)\b", t) and (
-        extract_city_from_text(user_text)
-        or extract_client_type_from_text(user_text)
-        or _extract_business_units_from_text(user_text)
-        or extract_oil_type_from_text(user_text)
-        or extract_packing_from_text(user_text)
-    ):
-        if _looks_party_analytics(t) or _looks_client_list(t):
-            return False
-        return True
     if _looks_analytical(t) or _looks_party_analytics(t) or _looks_client_list(t):
         return False
     return False
@@ -2618,8 +2667,8 @@ def _looks_client_list(text: str) -> bool:
         t,
     ):
         return False
-    # "distributor sales in Karachi" is a sales matrix, not a client list
-    if re.search(r"\b(sales?|volume|mt)\b", t) and not re.search(
+    # "distributor sales/performance in Karachi" is a sales matrix, not a list
+    if re.search(r"\b(sales?|volume|mt|performance)\b", t) and not re.search(
         r"\b(who are|list|individual|[- ]wise)\b",
         t,
     ):
@@ -2913,10 +2962,10 @@ def _looks_which_parties_ask(text: str) -> bool:
     t = (text or "").lower()
     if _looks_channel_growth_ask(t) or looks_advanced(text):
         return False
-    # Plain "X sales" matrix (e.g. Imtiaz sales / Metro sales) — not party list
+    # Plain "X sales/performance" matrix — not party list
     if re.search(
         r"\b(distributors?|imtiaz|metro|chase\s*up|spar|gelani|csd|"
-        r"food\s*panda|online|lmt)\s+sales\b",
+        r"food\s*panda|online|lmt)\s+(sales?|performance|volume)\b",
         t,
     ) and not re.search(r"\b(selling|sells)\b", t):
         return False
@@ -3234,14 +3283,6 @@ def _extract_business_units_from_text(text: str) -> list[str]:
     for needle, label in informal:
         if needle in lower and label not in found:
             found.append(label)
-    # Bare brand shorthand: "selling maan" → Maan Consumer
-    if re.search(r"\bmaan\b", lower) and "Maan Consumer" not in found and (
-        "Maan Bulk" not in found
-    ):
-        if re.search(r"\bmaan\s+bulk\b", lower):
-            found.append("Maan Bulk")
-        else:
-            found.append("Maan Consumer")
     # Bare Eva brand sales ("how are Eva sales in Karachi") → both Eva BUs
     # — not Eva Distributors (client type) and not a party named "Eva".
     if (
@@ -3258,6 +3299,29 @@ def _extract_business_units_from_text(text: str) -> list[str]:
         )
     ):
         found.extend(["Eva Consumer", "Eva Bulk"])
+    # Bare Maan brand sales → both Maan BUs (mirror Eva). Sold-to shorthand
+    # ("selling maan") still resolves to Maan Consumer only below.
+    elif (
+        re.search(r"\bmaan\b", lower)
+        and not re.search(r"\bmaan\s+distributors?\b", lower)
+        and not any(str(x).lower().startswith("maan") for x in found)
+        and re.search(
+            r"\b("
+            r"maan\s+sales|maan\s+performance|maan\s+volume|"
+            r"how\s+(are|were|is|did|do|have|has)\s+maan|"
+            r"for\s+maan\b|maan\s+in\b|maan\s+brand"
+            r")\b",
+            lower,
+        )
+    ):
+        found.extend(["Maan Consumer", "Maan Bulk"])
+    elif re.search(r"\bmaan\b", lower) and "Maan Consumer" not in found and (
+        "Maan Bulk" not in found
+    ):
+        if re.search(r"\bmaan\s+bulk\b", lower):
+            found.append("Maan Bulk")
+        else:
+            found.append("Maan Consumer")
     return found
 
 
@@ -5101,6 +5165,9 @@ def suggest_preferred_tool(
         return "query_sales"
     if _looks_party_growth_rank(text):
         return "analyze_parties"
+    # Performance sales (how are distributor/Eva/Maan sales…) beat list/rank paths
+    if _looks_scoped_performance_sales(text):
+        return "query_sales"
     if looks_advanced(text):
         return "advanced_query"
     if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
@@ -5178,6 +5245,11 @@ def resolve_forced_tool(
     if _looks_party_growth_rank(text):
         return "analyze_parties"
 
+    # 2b4) Brand / city / channel performance ("how are … sales/performance")
+    # before which-parties / advanced so Eva/Maan/distributor asks stay on sales.
+    if _looks_scoped_performance_sales(text):
+        return "query_sales"
+
     # 2c) High-confidence advanced modes (city/client compares, etc.)
     if looks_advanced(text):
         adv = infer_advanced_from_text(text)
@@ -5250,18 +5322,6 @@ def resolve_forced_tool(
         ):
             return "query_sales"
         return "required"
-
-    # Brand / city / "how are … sales" scopes → sales table (not party lookup)
-    if (
-        _looks_analytical(text) or _wants_scoped_month_ams(text)
-    ) and (
-        extract_city_from_text(text)
-        or _extract_business_units_from_text(text)
-        or extract_client_type_from_text(text)
-        or extract_oil_type_from_text(text)
-        or extract_packing_from_text(text)
-    ):
-        return "query_sales"
 
     # Default factual ask: require a tool; model chooses which one
     return "required"

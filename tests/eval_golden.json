@@ -1,41 +1,41 @@
 {
-  "version": "0.4.0",
-  "description": "Golden eval set: expected_forced is what resolve_forced_tool must return; preferred_tool is the intended business tool (model should pick when forced is required).",
+  "version": "0.4.26",
+  "description": "Golden eval set: expected_forced is what resolve_forced_tool must return; scoped brand/city/channel sales force query_sales; preferred_tool is the intended business tool when forced is required.",
   "cases": [
     {
       "id": "sales-bu-city",
       "q": "What were Eva Consumer sales in Lahore last month?",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-distributor-karachi",
       "q": "Show distributor sales in Karachi for July",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-imtiaz",
       "q": "Show me Imtiaz sales",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-lahore",
       "q": "Show me Lahore sales",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-analytical",
       "q": "How are Eva Consumer sales doing in Lahore this month?",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-month-wise",
       "q": "Month wise Eva Consumer sales last 6 months",
-      "expected_forced": "required",
+      "expected_forced": "query_sales",
       "preferred_tool": "query_sales"
     },
     {
@@ -176,7 +176,10 @@
       "expected_forced": "query_sales",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
-        "filters": {"city": "Lahore", "business_unit": "Eva Consumer"},
+        "filters": {
+          "city": "Lahore",
+          "business_unit": "Eva Consumer"
+        },
         "column_dimension": "month",
         "months_back": 6
       }
@@ -187,7 +190,9 @@
       "expected_forced": "query_sales",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
-        "filters": {"client_type": "Eva Distributors"},
+        "filters": {
+          "client_type": "Eva Distributors"
+        },
         "column_dimension": "month",
         "months_back": 6
       }
@@ -198,7 +203,9 @@
       "expected_forced": "query_sales",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
-        "filters": {"client_type": "Eva Distributors"},
+        "filters": {
+          "client_type": "Eva Distributors"
+        },
         "column_dimension": "month",
         "months_back": 6
       }
@@ -209,7 +216,9 @@
       "expected_forced": "query_sales",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
-        "filters": {"city": "Lahore"},
+        "filters": {
+          "city": "Lahore"
+        },
         "column_dimension": "client_type"
       }
     },
@@ -219,7 +228,10 @@
       "expected_forced": "query_sales",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
-        "filters": {"city": "Lahore", "client_type": "Eva Distributors"},
+        "filters": {
+          "city": "Lahore",
+          "client_type": "Eva Distributors"
+        },
         "period_phrase": "July",
         "column_dimension": "month",
         "months_back": 6,
