@@ -253,9 +253,10 @@ def _ams_window_label(as_of: date) -> str:
     return f"{start.strftime('%b %Y')}–{end.strftime('%b %Y')}"
 
 
-def _ams_by_party(
+def _ams_by_entity(
     *,
     as_of: date,
+    entity_key: str,
     city: str | None,
     client_type: str | None,
     business_unit: str | None,
@@ -264,6 +265,11 @@ def _ams_by_party(
     brand_prefix: str | None,
     zone: str | None = None,
 ) -> dict[str, float]:
+    """Average monthly sales for the prior 3 full months, keyed by entity_key.
+
+    entity_key must match the ranking grain: party | city | zone.
+    """
+    key = entity_key if entity_key in {"party", "city", "zone"} else "party"
     ranges = _prior_three_month_ranges(as_of)
     monthly: list[dict[str, float]] = []
     keys: set[str] = set()
@@ -282,13 +288,41 @@ def _ams_by_party(
         if frame.empty:
             monthly.append({})
             continue
+        if key not in frame.columns:
+            monthly.append({})
+            continue
         totals = {
             str(k): float(v)
-            for k, v in frame.groupby("party")["mt"].sum().items()
+            for k, v in frame.groupby(key)["mt"].sum().items()
+            if str(k).strip()
         }
         keys.update(totals)
         monthly.append(totals)
-    return {key: sum(m.get(key, 0.0) for m in monthly) / 3.0 for key in keys}
+    return {name: sum(m.get(name, 0.0) for m in monthly) / 3.0 for name in keys}
+
+
+def _ams_by_party(
+    *,
+    as_of: date,
+    city: str | None,
+    client_type: str | None,
+    business_unit: str | None,
+    oil_type: str | None,
+    packing_category: str | None,
+    brand_prefix: str | None,
+    zone: str | None = None,
+) -> dict[str, float]:
+    return _ams_by_entity(
+        as_of=as_of,
+        entity_key="party",
+        city=city,
+        zone=zone,
+        client_type=client_type,
+        business_unit=business_unit,
+        oil_type=oil_type,
+        packing_category=packing_category,
+        brand_prefix=brand_prefix,
+    )
 
 
 def list_clients(
@@ -614,6 +648,7 @@ def analyze_parties(
     grown_only: bool = False,
     declined_only: bool = False,
     active_only: bool = False,
+    title_mode: str | None = None,
 ) -> dict[str, Any]:
     """Rank / summarize parties or cities.
 
@@ -628,6 +663,7 @@ def analyze_parties(
     sort: desc (default) | asc  — underperformers force asc on % vs AMS
     grown_only: when True with yoy/yoy_ams/ams_growth, keep growth % > 0
     declined_only: when True with those metrics, keep growth % < 0
+    title_mode: biggest_gains | smallest_gains | biggest_declines | by_growth
     Default ranking metric is AMS unless the user asks for volume/growth.
     """
     from eva_dashboard.geo import normalize_zone
@@ -1277,44 +1313,17 @@ def analyze_parties(
             inv.groupby(entity_key)["inv_key"].nunique().astype(int).to_dict()
         )
 
-    if group in {"city", "zone"}:
-        # AMS by city/zone = mean of prior 3 months' geo totals
-        ranges = _prior_three_month_ranges(as_of.replace(day=1))
-        monthly_geo: list[dict[str, float]] = []
-        keys: set[str] = set()
-        for start, end in ranges:
-            cf = _fetch_party_lines(
-                date_from=start.isoformat(),
-                date_to=end.isoformat(),
-                city=city_f,
-                zone=zone_f,
-                client_type=ctype,
-                business_unit=bu,
-                oil_type=oil,
-                packing_category=pack,
-                brand_prefix=brand_prefix,
-            )
-            if cf.empty:
-                monthly_geo.append({})
-                continue
-            totals = {
-                str(k): float(v)
-                for k, v in cf.groupby(entity_key)["mt"].sum().items()
-            }
-            keys.update(totals)
-            monthly_geo.append(totals)
-        ams = {k: sum(m.get(k, 0.0) for m in monthly_geo) / 3.0 for k in keys}
-    else:
-        ams = _ams_by_party(
-            as_of=as_of.replace(day=1),
-            city=city_f,
-            zone=zone_f,
-            client_type=ctype,
-            business_unit=bu,
-            oil_type=oil,
-            packing_category=pack,
-            brand_prefix=brand_prefix,
-        )
+    ams = _ams_by_entity(
+        as_of=as_of.replace(day=1),
+        entity_key=entity_key if group in {"city", "zone", "party"} else "party",
+        city=city_f,
+        zone=zone_f,
+        client_type=ctype,
+        business_unit=bu,
+        oil_type=oil,
+        packing_category=pack,
+        brand_prefix=brand_prefix,
+    )
 
     compare_info = None
     compare_vol: dict[str, float] = {}
@@ -1375,8 +1384,10 @@ def analyze_parties(
                 y, m = y - 1, 12
             prior_as_of = date(y, m, 1)
         ams_prior_label = _ams_window_label(prior_as_of)
-        prior_ams = _ams_by_party(
+        # Prior AMS must use the SAME grain as the ranking (city/zone/party)
+        prior_ams = _ams_by_entity(
             as_of=prior_as_of,
+            entity_key=entity_key if group in {"city", "zone", "party"} else "party",
             city=city_f,
             zone=zone_f,
             client_type=ctype,
@@ -1671,14 +1682,27 @@ def analyze_parties(
             blurb += " · grown only"
         if declined_only:
             blurb += " · declined only"
-        if declined_only:
+        mode = (title_mode or "").strip().lower()
+        if not mode:
+            if declined_only:
+                mode = "biggest_declines"
+            elif sort_n == "asc":
+                mode = "smallest_gains"
+            elif grown_only:
+                mode = "biggest_gains"
+            else:
+                mode = "by_growth"
+        entity_title = "Cities" if group == "city" else (
+            "Zones" if group == "zone" else "Parties"
+        )
+        if mode == "biggest_declines":
             blurb = f"Biggest AMS declines — {blurb}"
-        elif sort_n == "asc":
+        elif mode == "smallest_gains":
             blurb = f"Smallest AMS gains — {blurb}"
-        elif grown_only or sort_n == "desc":
+        elif mode == "biggest_gains":
             blurb = f"Biggest AMS gains — {blurb}"
         else:
-            blurb = f"Parties by AMS growth % — {blurb}"
+            blurb = f"{entity_title} by AMS growth % — {blurb}"
     else:
         if metric_n in {"yoy", "yoy_ams"} and compare_info:
             blurb += f" vs {compare_info.get('label')}"

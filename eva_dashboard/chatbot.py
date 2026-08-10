@@ -245,7 +245,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.29 AI-first):
+SPEED & TOOL RULES (v0.4.30 AI-first):
 1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures
    or cite an OpenAI knowledge cutoff.
 2. YOU choose the tool and its arguments. Guides below teach structure and vocabulary
@@ -836,9 +836,10 @@ TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Rank parties/cities/zones or answer AMS, underperformers, "
                 "new/lost, packing/SKU mix, invoices, share, YoY. Default rank "
-                "metric = AMS. Examples: top 5 distributors for Eva VTF; poorly "
-                "in Lahore; SOUTH zone AMS; new parties last 6 months; product "
-                "mix for Imtiaz; city league; zone league; growth in July."
+                "metric = AMS. For 'growth vs other cities' set group_by=city "
+                "and leave city blank. Examples: top 5 distributors for Eva VTF; "
+                "poorly in Lahore; city league AMS growth; zone league; "
+                "growth in July."
             ),
             "parameters": {
                 "type": "object",
@@ -882,6 +883,10 @@ TOOLS: list[dict[str, Any]] = [
                     "group_by": {
                         "type": "string",
                         "enum": ["party", "city", "zone"],
+                        "description": (
+                            "party (default), city (city league / other cities), "
+                            "or zone. When group_by=city, omit city filter."
+                        ),
                     },
                     "mix_dimension": {
                         "type": "string",
@@ -2806,6 +2811,10 @@ def _looks_context_followup(text: str) -> bool:
             r"in this|from this|in that|from that|this table|that table|"
             r"above|these sales|those sales|in the above|from the above|"
             r"same (period|filters?|scope|table)|for this|"
+            r"this\s+growth|that\s+growth|same\s+growth|the\s+growth|"
+            r"how\s+is\s+this|how\s+does\s+this|"
+            r"compared?\s+to|relative\s+to|vs\.?\s+other|versus\s+other|"
+            r"other\s+cities|other\s+zones|"
             r"combine the tables|merge the tables|add bulk|include bulk|"
             r"city[- ]?wise|group by|as columns|remove |exclude |without |"
             r"show this|this by"
@@ -4713,6 +4722,8 @@ def _dispatch_tool(
             }
         return _dispatch_advanced(arguments, user_text, prior_spec=prior_spec)
     if name == "analyze_parties":
+        from eva_dashboard.analytics_reshape import resolve_analytics_reshape
+
         # which/what + oil/rank — same helper when the model picked analyze_parties
         if (
             (
@@ -4732,16 +4743,14 @@ def _dispatch_tool(
             )
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
-        # Mix / ranking follow-up after a party list: inherit that list's filters
-        if (
+        # Party rankings are first-class priors for growth / reshape follow-ups
+        if prior_party_spec and (
             not prior_ctx
-            and prior_party_spec
-            and (
-                _looks_party_mix_query(user_text)
-                or _looks_context_followup(user_text)
-            )
+            or _looks_context_followup(user_text)
+            or _looks_party_mix_query(user_text)
+            or re.search(r"\b(growth|gains?|ams|cities|zones)\b", (user_text or "").lower())
         ):
-            prior_ctx = _party_filters_from_prior(
+            party_prior_ctx = _party_filters_from_prior(
                 {
                     "filters": dict(prior_party_spec.get("filters") or {}),
                     "period_phrase": prior_party_spec.get("period_phrase"),
@@ -4750,11 +4759,34 @@ def _dispatch_tool(
                 },
                 user_text,
             )
-        # Model metric wins. Fill from vocabulary/inference only when omitted.
-        metric = arguments.get("metric")
+            # Prefer party-answer filters for continuity; table_spec fills gaps
+            merged = dict(prior_ctx)
+            for k, v in party_prior_ctx.items():
+                if v is not None and (k not in merged or merged.get(k) is None):
+                    merged[k] = v
+            # On explicit growth/city reshape follow-ups, party filters win for channel
+            if _looks_context_followup(user_text) or re.search(
+                r"\b(this\s+growth|other\s+cities|compared?)\b",
+                (user_text or "").lower(),
+            ):
+                for k in ("client_type", "oil_type", "packing_category", "active_only"):
+                    if party_prior_ctx.get(k) is not None:
+                        merged[k] = party_prior_ctx[k]
+            prior_ctx = merged
+
+        reshape = resolve_analytics_reshape(
+            user_text,
+            arguments=arguments,
+            inferred=inferred,
+            prior_party_spec=prior_party_spec,
+            prior_ctx=prior_ctx,
+        )
+
+        # Model metric wins. Fill from reshape / vocabulary when omitted.
+        metric = arguments.get("metric") or reshape.get("metric")
         if not metric:
             metric = inferred.get("metric") or ("volume" if prior_ctx else None) or "ams"
-            if _looks_party_growth_rank(user_text):
+            if _looks_party_growth_rank(user_text) or reshape.get("from_prior_metric"):
                 inferred_m = str(inferred.get("metric") or "").strip().lower()
                 t_low = (user_text or "").lower()
                 wants_vol_vs_ams = bool(
@@ -4798,6 +4830,7 @@ def _dispatch_tool(
             and metric == "ams"
             and (inferred.get("metric") or "ams") == "ams"
             and not arguments.get("metric")
+            and not reshape.get("from_prior_metric")
             and not _looks_party_mix_query(user_text)
         ):
             if not re.search(
@@ -4817,9 +4850,11 @@ def _dispatch_tool(
         mix_limit = int(arguments.get("limit") or inferred.get("limit") or 10)
         if per_party_mix and not arguments.get("limit") and not inferred.get("limit"):
             mix_limit = 16
+        # City league needs a wider top-N than party top-10
+        group_by = str(reshape.get("group_by") or "party")
+        if group_by in {"city", "zone"} and not arguments.get("limit"):
+            mix_limit = max(mix_limit, 25)
         named_bus = _extract_business_units_from_text(user_text)
-        # Model BU wins; spoken BU fills when omitted; growth asks do not
-        # inherit sticky prior BU unless the model/text set one.
         bu_arg = (
             arguments.get("business_unit")
             or (named_bus[0] if len(named_bus) == 1 else None)
@@ -4829,16 +4864,24 @@ def _dispatch_tool(
                 if (
                     _looks_national_scope(user_text)
                     or _looks_party_growth_rank(user_text)
+                    or reshape.get("clear_city")
                 )
                 else prior_ctx.get("business_unit")
             )
         )
-        city_arg = (
-            None
-            if _looks_national_scope(user_text)
-            else (
-                arguments.get("city")
-                or extract_city_from_text(user_text)
+        if reshape.get("clear_city"):
+            city_arg = None
+        elif _looks_national_scope(user_text):
+            city_arg = None
+        else:
+            # Do not let a sticky model city override a geo-expand reshape
+            city_arg = (
+                extract_city_from_text(user_text)
+                or (
+                    arguments.get("city")
+                    if not reshape.get("clear_city")
+                    else None
+                )
                 or inferred.get("city")
                 or (
                     None
@@ -4846,19 +4889,46 @@ def _dispatch_tool(
                     else prior_ctx.get("city")
                 )
             )
-        )
-        zone_arg = (
-            None
-            if _looks_national_scope(user_text)
-            else normalize_zone(
-                arguments.get("zone")
-                or extract_zone_from_text(user_text)
+        if reshape.get("clear_zone"):
+            zone_arg = None
+        elif _looks_national_scope(user_text):
+            zone_arg = None
+        else:
+            zone_arg = normalize_zone(
+                extract_zone_from_text(user_text)
+                or arguments.get("zone")
                 or inferred.get("zone")
                 or (
                     None
                     if _looks_party_growth_rank(user_text)
                     else prior_ctx.get("zone")
                 )
+            )
+        ctype_arg = normalize_client_type(
+            arguments.get("client_type")
+            or reshape.get("client_type")
+            or inferred.get("client_type")
+            or prior_ctx.get("client_type")
+        )
+        grown = (
+            bool(reshape["grown_only"])
+            if "grown_only" in reshape
+            else _resolve_party_grown_only(
+                user_text, arguments=arguments, inferred=inferred
+            )
+        )
+        declined = (
+            bool(reshape["declined_only"])
+            if "declined_only" in reshape
+            else _resolve_party_declined_only(
+                user_text, arguments=arguments, inferred=inferred
+            )
+        )
+        sort_arg = (
+            str(reshape["sort"])
+            if reshape.get("sort") in {"asc", "desc"}
+            else _resolve_party_sort(
+                user_text, arguments=arguments, inferred=inferred
             )
         )
         return analyze_parties(
@@ -4869,17 +4939,15 @@ def _dispatch_tool(
             date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
             city=city_arg,
             zone=zone_arg,
-            client_type=normalize_client_type(
-                arguments.get("client_type")
-                or inferred.get("client_type")
-                or prior_ctx.get("client_type")
-            ),
+            client_type=ctype_arg,
             business_unit=bu_arg,
             oil_type=arguments.get("oil_type")
+            or reshape.get("oil_type")
             or inferred.get("oil_type")
             or extract_oil_type_from_text(user_text)
             or prior_ctx.get("oil_type"),
             packing_category=arguments.get("packing_category")
+            or reshape.get("packing_category")
             or inferred.get("packing_category")
             or extract_packing_from_text(user_text)
             or prior_ctx.get("packing_category"),
@@ -4894,32 +4962,22 @@ def _dispatch_tool(
                 else None
             )
             or extract_city_from_text(user_text),
-            group_by=arguments.get("group_by") or inferred.get("group_by") or "party",
+            group_by=group_by,
             mix_dimension=arguments.get("mix_dimension")
             or inferred.get("mix_dimension"),
-            sort=_resolve_party_sort(
-                user_text,
-                arguments=arguments,
-                inferred=inferred,
-            ),
+            sort=sort_arg,
             limit=mix_limit,
             per_party_mix=per_party_mix,
-            grown_only=_resolve_party_grown_only(
-                user_text,
-                arguments=arguments,
-                inferred=inferred,
-            ),
-            declined_only=_resolve_party_declined_only(
-                user_text,
-                arguments=arguments,
-                inferred=inferred,
-            ),
+            grown_only=grown,
+            declined_only=declined,
             active_only=bool(
                 arguments.get("active_only")
+                or reshape.get("active_only")
                 or inferred.get("active_only")
                 or prior_ctx.get("active_only")
                 or _wants_active_only(user_text)
             ),
+            title_mode=reshape.get("title_mode"),
         )
     if name == "query_price":
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)

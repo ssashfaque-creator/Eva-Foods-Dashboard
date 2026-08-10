@@ -49,12 +49,18 @@ def vocabulary_for_prompt() -> str:
         "- zone ← SOUTH | CENTRAL | NORTH (mapped from city)",
         "- blank/unmapped city → treat as Karachi → SOUTH",
         "- \"nationally\" / \"all over Pakistan\" → clear city + zone",
+        "- \"other cities\" / \"compared to other cities\" / city league → "
+        "group_by=city and CLEAR city filter (do not keep sticky Lahore)",
+        "- \"other zones\" / by zone → group_by=zone and clear city",
         "",
         "Metrics language (analyze_parties.metric + sort):",
         "- AMS / average monthly sales → ams or ams_growth",
         "- least / lowest / smallest / bottom gains or growth → sort=asc "
         "(do NOT set grown_only)",
-        "- biggest / highest / top gains → sort=desc",
+        "- biggest / highest / top gains → sort=desc + grown_only only if "
+        "they asked for growers",
+        "- \"this growth\" / \"how is this compared…\" → keep prior metric "
+        "(usually ams_growth) and reshape grain/geography",
         "- only growing / that have grown → grown_only=true",
         "- declined / dropped / fallen → declined_only=true, sort=asc",
         "- vs AMS / behind on AMS → vs_ams",
@@ -71,6 +77,13 @@ def vocabulary_for_prompt() -> str:
         "- named month (\"for July\") → that month Volume + AMS + % "
         "(mode=trend is fine)",
         "- how are / performance → analytical tone is OK; still use a tool",
+        "",
+        "Follow-up reshape (analyze_parties):",
+        "- Keep channel/oil/packing from the prior answer when user says "
+        "\"this growth\" / \"compared to…\"",
+        "- Change group_by when they ask for cities/zones vs parties",
+        "- Expanding geography clears sticky city — never rank cities "
+        "while filtered to one city",
     ]
     return "\n".join(parts)
 
@@ -85,11 +98,12 @@ TOOLS — you choose which to call and with which arguments:
    (matrix|analytical|trend). Use for \"show sales\", channel-wise, city sales,
    brand sales, include/remove/regroup follow-ups on a prior table.
 
-2) analyze_parties — party/city rankings and AMS/growth.
-   Set metric (ams, ams_growth, yoy, vs_ams, packing_mix, …), sort (asc|desc),
-   grown_only / declined_only when the user asks to filter growers/decliners,
-   city/client_type/oil filters, limit. Use for least/biggest gains, top parties,
-   decline in AMS, product mix per distributor.
+2) analyze_parties — party/city/zone rankings and AMS/growth.
+   Set metric (ams, ams_growth, yoy, vs_ams, packing_mix, …), group_by
+   (party|city|zone), sort (asc|desc), grown_only / declined_only only when
+   asked. For \"growth vs other cities\": metric=ams_growth, group_by=city,
+   omit city. Keep client_type from prior. Use for least/biggest gains,
+   city leagues, decline in AMS, product mix per distributor.
 
 3) list_clients — who are the parties in a channel/city/BU (identity list).
    Not for rankings or growth tables.
