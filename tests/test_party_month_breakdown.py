@@ -8,6 +8,8 @@ from pathlib import Path
 
 from eva_dashboard.chatbot import (
     _dispatch_tool,
+    _looks_national_scope,
+    _party_matrix_row_layout,
     _wants_party_month_matrix,
     resolve_forced_tool,
     resolve_regroup_request,
@@ -102,8 +104,9 @@ def test_individual_distributor_breakdown_keeps_month_grid() -> None:
                 prior_spec=prior,
             )
             assert rg is not None
-            assert rg["row_dimension"] == "party"
-            assert rg["row_groups"] == ["business_unit"]
+            # Distributor → Business Unit → Product (packing)
+            assert rg["row_dimension"] == "packing_category"
+            assert rg["row_groups"] == ["party", "business_unit"]
             assert rg["columns"] == "month"
 
             out = _dispatch_tool(
@@ -114,20 +117,96 @@ def test_individual_distributor_breakdown_keeps_month_grid() -> None:
             )
             assert out["ok"] is True
             assert out.get("column_dimension") == "month"
-            assert out.get("row_dimension") == "party"
+            assert out.get("row_dimension") == "packing_category"
             headers = (out.get("matrix") or {}).get("row_headers") or []
-            assert "party" in headers
-            assert "business_unit" in headers
+            assert headers[:3] == ["party", "business_unit", "packing_category"]
             # Month columns preserved (plus AMS helpers / Total)
             cols = (out.get("matrix") or {}).get("columns") or []
             assert any("2026" in str(c) for c in cols)
             parties = {
                 str(r.get("party"))
                 for r in (out.get("matrix") or {}).get("rows") or []
-                if r.get("party") and r.get("row_kind") != "total"
+                if r.get("party") and r.get("row_kind") not in {"total", None}
+                and "Total" not in str(r.get("party"))
             }
             assert "Alpha Dist" in parties
             assert "Beta Dist" in parties
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_distributor_by_product_hierarchy_and_national_clears_city() -> None:
+    """Distributor-wise by product: Dist→[BU]→Product; Pakistan clears city."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            assert _looks_national_scope(
+                "sales distributor wise for all over Pakistan by product"
+            )
+            prior_bu = query_sales(
+                city="Karachi",
+                client_type="Eva Distributors",
+                columns="month",
+                months_back=6,
+                row_dimension="business_unit",
+            )["table_spec"]
+            leaf, groups = _party_matrix_row_layout(
+                "Can you show sales distributor wise for all over Pakistan by product",
+                prior_bu,
+            )
+            assert leaf == "packing_category"
+            assert groups == ["party", "business_unit"]
+
+            out = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text=(
+                    "Can you show sales distributor wise for all over Pakistan by product"
+                ),
+                prior_spec=prior_bu,
+            )
+            assert out["ok"] is True
+            filters = out.get("filters") or (out.get("table_spec") or {}).get("filters") or {}
+            assert not filters.get("city"), filters
+            headers = (out.get("matrix") or {}).get("row_headers") or []
+            assert headers[:3] == ["party", "business_unit", "packing_category"]
+
+            # No BU in prior city table → Distributor → Product only
+            prior_city = query_sales(
+                city="Karachi",
+                client_type="Eva Distributors",
+                columns="month",
+                months_back=6,
+                row_dimension="city",
+            )["table_spec"]
+            leaf2, groups2 = _party_matrix_row_layout(
+                "distributor wise by product all over Pakistan",
+                prior_city,
+            )
+            assert leaf2 == "packing_category"
+            assert groups2 == ["party"]
+
+            out2 = _dispatch_tool(
+                "query_sales",
+                {},
+                user_text="distributor wise by product all over Pakistan",
+                prior_spec=prior_city,
+            )
+            assert out2["ok"] is True
+            filters2 = (
+                out2.get("filters")
+                or (out2.get("table_spec") or {}).get("filters")
+                or {}
+            )
+            assert not filters2.get("city"), filters2
+            headers2 = (out2.get("matrix") or {}).get("row_headers") or []
+            assert headers2[:2] == ["party", "packing_category"]
+            assert "business_unit" not in headers2
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

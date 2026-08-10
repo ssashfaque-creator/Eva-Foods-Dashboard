@@ -1203,14 +1203,20 @@ def _resolve_row_levels(
     *,
     row_groups: list[str] | None = None,
 ) -> list[str]:
-    """Leading group dims + base hierarchy for the leaf row dimension."""
+    """Leading group dims + base hierarchy for the leaf row dimension.
+
+    When a custom lead like ``party`` / ``client_type`` is already in
+    ``row_groups``, do not inject default parents (e.g. business_unit under
+    packing) — the caller owns the stack (Distributor → Product).
+    """
     levels: list[str] = []
     for g in row_groups or []:
         g_n = normalize_row_dimension(g) or str(g).strip()
         if g_n and g_n not in levels:
             levels.append(g_n)
+    custom_lead = any(g in {"party", "client_type"} for g in levels)
     base = _ROW_HIERARCHY.get(row_dim)
-    if base:
+    if base and not custom_lead:
         for b in base:
             if b not in levels:
                 levels.append(b)

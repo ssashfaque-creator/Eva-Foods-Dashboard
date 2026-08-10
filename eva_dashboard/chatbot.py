@@ -2182,10 +2182,11 @@ def resolve_regroup_request(
         if prior_row == "zone" and dim == "city":
             out["row_dimension"] = "city"
             out["row_groups"] = ["zone"]
-        # Add distributor layer under the prior grain (BU → Party × months)
-        elif dim == "party" and prior_row and prior_row not in {"party", "client_type"}:
-            out["row_dimension"] = "party"
-            out["row_groups"] = [prior_row]
+        # Distributor-wise on a month grid: Distributor → [BU] → Product
+        elif dim == "party" and prior_col == "month":
+            leaf, groups = _party_matrix_row_layout(text, prior_spec)
+            out["row_dimension"] = leaf
+            out["row_groups"] = groups or []
         elif (
             prior_row
             and prior_row != dim
@@ -3465,23 +3466,81 @@ def _wants_party_month_matrix(
     return _looks_party_breakdown(user_text)
 
 
+def _prior_had_bu_grain(prior_spec: dict[str, Any] | None) -> bool:
+    """True when the prior month table showed a Business Unit row layer."""
+    if not prior_spec:
+        return False
+    groups: list[str] = []
+    for g in prior_spec.get("row_groups") or []:
+        ng = normalize_row_dimension(g) or str(g).strip()
+        if ng:
+            groups.append(ng)
+    rd = normalize_row_dimension(prior_spec.get("row_dimension")) or str(
+        prior_spec.get("row_dimension") or ""
+    ).strip()
+    if rd == "business_unit" or "business_unit" in groups:
+        return True
+    # Default packing / SKU tables render with a BU parent (unless already a
+    # custom party stack that omitted BU).
+    if rd in {"packing_category", "product"} and "party" not in groups:
+        return True
+    return False
+
+
+def _party_matrix_row_layout(
+    user_text: str,
+    prior_spec: dict[str, Any],
+) -> tuple[str, list[str] | None]:
+    """Distributor month-grid hierarchy.
+
+    Distributor → Business Unit → Product when prior had BU;
+    Distributor → Product otherwise. Spoken "product" = packing_category
+    unless the user explicitly asks for SKUs.
+    """
+    t = (user_text or "").lower()
+    selling = bool(
+        re.search(r"\b(selling|sells|sold\s+to|buyers?|bought)\b", t)
+    )
+    distributor_wise = _looks_party_breakdown(user_text)
+    by_product = bool(
+        re.search(
+            r"\b("
+            r"by\s+products?|product[- ]?wise|by\s+packing|packing[- ]?wise|"
+            r"by\s+skus?|sku[- ]?wise|skus?\b|item[- ]?wise"
+            r")\b",
+            t,
+        )
+    )
+    # "Who is BU selling to" → flat distributor rows (unless also by product)
+    if selling and not distributor_wise and not by_product:
+        return "party", None
+
+    sku = bool(
+        re.search(
+            r"\b(by\s+skus?|sku[- ]?wise|skus?\b|item[- ]?wise)\b",
+            t,
+        )
+    )
+    leaf = "product" if sku else "packing_category"
+    groups = ["party"]
+    if _prior_had_bu_grain(prior_spec):
+        groups.append("business_unit")
+    return leaf, groups
+
+
 def _party_month_matrix_from_prior(
     user_text: str,
     *,
     prior_spec: dict[str, Any],
     arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Replay prior month filters with party (distributor) as the row layer."""
+    """Replay prior month filters with distributor-leading row hierarchy."""
     args = arguments or {}
     inferred = infer_party_analytics_from_text(user_text)
     prior_ctx = _party_filters_from_prior(prior_spec, user_text)
-    prior_row = normalize_row_dimension(prior_spec.get("row_dimension")) or str(
-        prior_spec.get("row_dimension") or ""
-    ).strip()
-    row_groups: list[str] | None = None
-    # Keep prior grain as a leading group when adding a distributor layer
-    if prior_row and prior_row not in {"party", "client_type", ""}:
-        row_groups = [prior_row]
+    row_dimension, row_groups = _party_matrix_row_layout(user_text, prior_spec)
+    national = _looks_national_scope(user_text)
+    clear_filters: list[str] | None = ["city", "zone"] if national else None
 
     units = _extract_business_units_from_text(user_text)
     bu = (
@@ -3506,7 +3565,7 @@ def _party_month_matrix_from_prior(
     )
     city = (
         None
-        if _looks_national_scope(user_text)
+        if national
         else (
             args.get("city")
             or inferred.get("city")
@@ -3516,7 +3575,7 @@ def _party_month_matrix_from_prior(
     )
     zone = (
         None
-        if _looks_national_scope(user_text)
+        if national
         else normalize_zone(
             args.get("zone")
             or inferred.get("zone")
@@ -3545,8 +3604,9 @@ def _party_month_matrix_from_prior(
         columns="month",
         months_back=months_back,
         mode="matrix",
-        row_dimension="party",
+        row_dimension=row_dimension,
         row_groups=row_groups,
+        clear_filters=clear_filters,
         lock_columns=True,
         period=(
             args.get("period")
