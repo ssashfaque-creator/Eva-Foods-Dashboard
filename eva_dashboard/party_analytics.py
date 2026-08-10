@@ -568,19 +568,21 @@ def analyze_parties(
     limit: int = 10,
     per_party_mix: bool = False,
     grown_only: bool = False,
+    declined_only: bool = False,
 ) -> dict[str, Any]:
     """Rank / summarize parties or cities.
 
     metric:
-      volume | ams | vs_ams | underperformers | yoy | yoy_ams | share_of_segment |
-      segment_mix | geo_share | doing_well | new_parties | lost_parties |
-      packing_mix | product_mix | invoices | invoice_mt
+      volume | ams | vs_ams | underperformers | yoy | yoy_ams | ams_growth |
+      share_of_segment | segment_mix | geo_share | doing_well | new_parties |
+      lost_parties | packing_mix | product_mix | invoices | invoice_mt
 
     group_by: party (default) | city | zone
     mix_dimension: packing_category | product (for mix metrics)
     per_party_mix: when True with packing/product_mix, one mix table per party
     sort: desc (default) | asc  — underperformers force asc on % vs AMS
-    grown_only: when True with yoy/yoy_ams, keep parties with YoY % > 0
+    grown_only: when True with yoy/yoy_ams/ams_growth, keep growth % > 0
+    declined_only: when True with those metrics, keep growth % < 0
     Default ranking metric is AMS unless the user asks for volume/growth.
     """
     from eva_dashboard.geo import normalize_zone
@@ -1489,7 +1491,7 @@ def analyze_parties(
                 r.get("yoy_pct") if r.get("yoy_pct") is not None else -1e18,
             )
         )
-        if grown_only:
+        if grown_only and not declined_only:
             grown = [
                 r
                 for r in rows
@@ -1506,11 +1508,29 @@ def analyze_parties(
                 rows = grown
             else:
                 grown_only = False
+        if declined_only:
+            declined = [
+                r
+                for r in rows
+                if (
+                    isinstance(r.get("ams_growth_pct"), (int, float))
+                    and float(r["ams_growth_pct"]) < 0
+                )
+                or (
+                    r.get("ams_growth_pct") is None
+                    and isinstance(r.get("yoy_pct"), (int, float))
+                    and float(r["yoy_pct"]) < 0
+                )
+            ]
+            if declined:
+                rows = declined
+            else:
+                declined_only = False
         score_key, score_label = "ams_growth_pct", "AMS growth %"
     elif metric_n in {"yoy", "yoy_ams"}:
         rows = [r for r in rows if (r["volume_mt"] or 0) > 0 or (r["prior_mt"] or 0) > 0]
         rows.sort(key=lambda r: sk(r["yoy_pct"], r["volume_mt"] or 0))
-        if grown_only:
+        if grown_only and not declined_only:
             grown = [
                 r
                 for r in rows
@@ -1520,6 +1540,16 @@ def analyze_parties(
                 rows = grown
             else:
                 grown_only = False
+        if declined_only:
+            declined = [
+                r
+                for r in rows
+                if isinstance(r.get("yoy_pct"), (int, float)) and float(r["yoy_pct"]) < 0
+            ]
+            if declined:
+                rows = declined
+            else:
+                declined_only = False
         score_key, score_label = "yoy_pct", "YoY %"
     elif metric_n == "invoices":
         rows = [r for r in rows if (r["invoices"] or 0) > 0]
@@ -1567,6 +1597,8 @@ def analyze_parties(
         blurb += f" vs {compare_info.get('label')}"
         if grown_only:
             blurb += " · grown only"
+        if declined_only:
+            blurb += " · declined only"
     if metric_n == "vs_ams":
         direction = "furthest behind" if sort_n == "asc" else "furthest ahead of"
         blurb += (
@@ -2307,6 +2339,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     elif re.search(
         r"\b("
         r"grown|grow|growth|grew|"
+        r"declined?|dropped|fallen|fell|"
         r"vs\.?\s*last year|versus last year|since last year|from last year|"
         r"year over year|\byoy\b"
         r")\b",
@@ -2334,9 +2367,15 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
             out["period"] = named_month
             out["compare_period"] = f"{named_month} last year"
         # else: last full month (handled in analyze_parties) + YoY prior year
-        if re.search(r"\b(grown|grew|growth)\b", t) and not re.search(
-            r"\b(declined?|dropped|fallen|fell)\b", t
-        ):
+        declining = bool(
+            re.search(r"\b(declined?|dropped|fallen|fell)\b", t)
+        ) and not bool(re.search(r"\b(grown|grew|growth)\b", t))
+        growing = bool(re.search(r"\b(grown|grew|growth)\b", t)) and not declining
+        if declining:
+            out["sort"] = "asc"
+            out["declined_only"] = True
+            out["limit"] = max(int(out.get("limit") or 10), 25)
+        elif growing:
             out["sort"] = "desc"
             out["grown_only"] = True
             out["limit"] = max(int(out.get("limit") or 10), 25)

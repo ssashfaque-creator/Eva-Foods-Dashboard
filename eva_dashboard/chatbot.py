@@ -891,6 +891,8 @@ TOOLS: list[dict[str, Any]] = [
                             "ams",
                             "vs_ams",
                             "yoy",
+                            "ams_growth",
+                            "yoy_ams",
                             "share_of_segment",
                             "segment_mix",
                             "geo_share",
@@ -1676,9 +1678,11 @@ def _looks_national_scope(text: str) -> bool:
     return bool(
         re.search(
             r"\b("
-            r"all\s+over\s+pakistan|across\s+pakistan|nationwide|national|"
+            r"all\s+over\s+pakistan|across\s+pakistan|nationwide|nationally|"
+            r"national|"
             r"country[- ]?wide|all\s+pakistan|pakistan[- ]?wide|"
-            r"all\s+over\s+the\s+country|across\s+the\s+country"
+            r"all\s+over\s+the\s+country|across\s+the\s+country|"
+            r"across\s+the\s+nation|whole\s+country|entire\s+country"
             r")\b",
             t,
         )
@@ -3500,8 +3504,7 @@ def _party_matrix_row_layout(
     t = (user_text or "").lower()
     selling = bool(
         re.search(r"\b(selling|sells|sold\s+to|buyers?|bought)\b", t)
-    )
-    distributor_wise = _looks_party_breakdown(user_text)
+    ) or _looks_sold_to_parties(user_text)
     by_product = bool(
         re.search(
             r"\b("
@@ -3511,8 +3514,21 @@ def _party_matrix_row_layout(
             t,
         )
     )
-    # "Who is BU selling to" → flat distributor rows (unless also by product)
-    if selling and not distributor_wise and not by_product:
+    # Explicit distributor-wise / individual-distributor layer (not "who sells X")
+    explicit_dist_layer = bool(
+        re.search(
+            r"\b("
+            r"individual\s+distributors?|"
+            r"(distributors?|parties|clients?)[- ]wise|"
+            r"by\s+(individual\s+)?(distributors?|parties|clients?)|"
+            r"(distributor|party|client)\s+layer|"
+            r"add(ing)?\s+(a\s+)?(distributor|party|client)\s+layer"
+            r")\b",
+            t,
+        )
+    )
+    # "Who is BU selling to" → flat distributor rows (unless distributor-wise / by product)
+    if selling and not explicit_dist_layer and not by_product:
         return "party", None
 
     sku = bool(
@@ -4311,6 +4327,31 @@ def _dispatch_tool(
             or ("volume" if prior_ctx else None)
             or "ams"
         )
+        # Growth/decline ranks: heuristics beat model "yoy" / bare "ams"
+        if _looks_party_growth_rank(user_text):
+            inferred_m = str(inferred.get("metric") or "").strip().lower()
+            arg_m = str(arguments.get("metric") or "").strip().lower()
+            t_low = (user_text or "").lower()
+            wants_vol_vs_ams = bool(
+                re.search(r"\bvs\s*ams\b|\bagainst ams\b|\brelative to ams\b", t_low)
+            )
+            if inferred_m in {"ams_growth", "yoy_ams", "yoy", "vs_ams"}:
+                metric = inferred_m
+            elif wants_vol_vs_ams:
+                metric = "yoy_ams"
+            elif re.search(r"\bams\b", t_low) or arg_m in {
+                "yoy",
+                "ams_growth",
+                "yoy_ams",
+                "ams",
+                "",
+            }:
+                # "decline in AMS" / model yoy → AMS current vs prior growth
+                metric = "ams_growth"
+            elif arg_m in {"ams_growth", "yoy_ams", "yoy"}:
+                metric = "ams_growth" if arg_m == "yoy" else arg_m
+            else:
+                metric = inferred_m or "ams_growth"
         # Mix language always wins — never fall back to volume/AMS tops
         if _looks_party_mix_query(user_text):
             inferred_m = str(inferred.get("metric") or "").strip().lower()
@@ -4438,11 +4479,18 @@ def _dispatch_tool(
             group_by=arguments.get("group_by") or inferred.get("group_by") or "party",
             mix_dimension=arguments.get("mix_dimension")
             or inferred.get("mix_dimension"),
-            sort=arguments.get("sort") or inferred.get("sort") or "desc",
+            sort=(
+                inferred.get("sort")
+                if _looks_party_growth_rank(user_text) and inferred.get("sort")
+                else (arguments.get("sort") or inferred.get("sort") or "desc")
+            ),
             limit=mix_limit,
             per_party_mix=per_party_mix,
             grown_only=bool(
                 arguments.get("grown_only") or inferred.get("grown_only")
+            ),
+            declined_only=bool(
+                arguments.get("declined_only") or inferred.get("declined_only")
             ),
         )
     if name == "query_price":

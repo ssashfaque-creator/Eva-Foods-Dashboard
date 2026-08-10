@@ -175,14 +175,16 @@ def build_excel_bytes(
 
         ws.row_dimensions[header_row].height = 22
         for col_i, col_name in enumerate(frame.columns, start=1):
-            series = frame.iloc[:, col_i - 1].astype(str)
+            # NaN/None must not reach len() — month AMS growth % often has blanks
+            series = frame.iloc[:, col_i - 1].map(
+                lambda v: ""
+                if v is None or (isinstance(v, float) and pd.isna(v))
+                else str(v)
+            )
+            max_cell = int(series.map(len).max()) if len(series) else 8
             width = min(
                 42,
-                max(
-                    10,
-                    len(str(col_name)) + 2,
-                    int(series.map(len).max() if len(series) else 8) + 2,
-                ),
+                max(10, len(str(col_name)) + 2, max_cell + 2),
             )
             ws.column_dimensions[get_column_letter(col_i)].width = width
         ws.freeze_panes = f"A{header_row + 1}"

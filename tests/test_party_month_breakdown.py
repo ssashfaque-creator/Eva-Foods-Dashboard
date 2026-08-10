@@ -282,6 +282,14 @@ def test_table_export_excel_and_pdf() -> None:
             payload = export_payload_from_followup(snap)
             assert payload and payload["ok"] is True
             assert payload["headers"] == headers
+
+            # Month AMS growth % cells are often None/NaN — must not crash Excel
+            xlsx_nan = build_excel_bytes(
+                title="Nan cells",
+                headers=["Packing", "AMS growth %", "Total"],
+                data=[["Stand up", None, 10.0], ["Pillow", float("nan"), 5.5]],
+            )
+            assert xlsx_nan[:2] == b"PK"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

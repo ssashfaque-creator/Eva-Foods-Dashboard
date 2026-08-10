@@ -8,6 +8,7 @@ from pathlib import Path
 
 from eva_dashboard.chatbot import (
     _dispatch_tool,
+    _looks_national_scope,
     _looks_party_breakdown,
     _looks_party_growth_rank,
     resolve_forced_tool,
@@ -52,13 +53,20 @@ def _seed() -> None:
             ("2025-07-05", "Alpha Dist", "Eva VTF Pouch", 10.0),
             ("2025-07-06", "Beta Dist", "Eva VTF Pouch", 20.0),
             ("2025-07-07", "Gamma Dist", "Eva VTF Pouch", 5.0),
-            # AMS window months
+            # Current AMS window (Apr–Jun 2026)
             ("2026-04-05", "Alpha Dist", "Eva VTF Pouch", 15.0),
             ("2026-05-05", "Alpha Dist", "Eva VTF Pouch", 15.0),
             ("2026-06-05", "Alpha Dist", "Eva VTF Pouch", 15.0),
-            ("2026-04-05", "Beta Dist", "Eva VTF Pouch", 10.0),
-            ("2026-05-05", "Beta Dist", "Eva VTF Pouch", 10.0),
-            ("2026-06-05", "Beta Dist", "Eva VTF Pouch", 10.0),
+            ("2026-04-05", "Beta Dist", "Eva VTF Pouch", 4.0),
+            ("2026-05-05", "Beta Dist", "Eva VTF Pouch", 4.0),
+            ("2026-06-05", "Beta Dist", "Eva VTF Pouch", 4.0),
+            # Prior AMS window (Jan–Mar 2026) — Beta declined AMS, Alpha grew
+            ("2026-01-05", "Alpha Dist", "Eva VTF Pouch", 8.0),
+            ("2026-02-05", "Alpha Dist", "Eva VTF Pouch", 8.0),
+            ("2026-03-05", "Alpha Dist", "Eva VTF Pouch", 8.0),
+            ("2026-01-05", "Beta Dist", "Eva VTF Pouch", 12.0),
+            ("2026-02-05", "Beta Dist", "Eva VTF Pouch", 12.0),
+            ("2026-03-05", "Beta Dist", "Eva VTF Pouch", 12.0),
         ]
         for i, (dt, party, product, mt) in enumerate(rows):
             conn.execute(
@@ -146,6 +154,88 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             assert "YoY" in md2
             assert "% vs AMS" in md2 or "AMS" in md2
             assert "Volume" in md2
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_decline_in_ams_uses_ams_growth_sorted_asc() -> None:
+    q = "which distributors have had the biggest decline in ams"
+    assert _looks_party_growth_rank(q)
+    inf = infer_party_analytics_from_text(q)
+    assert inf["metric"] == "ams_growth"
+    assert inf.get("sort") == "asc"
+    assert inf.get("declined_only") is True
+
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            # Model often sends metric=yoy — heuristics must win
+            out = _dispatch_tool(
+                "analyze_parties",
+                {"metric": "yoy", "period": "July 2026", "sort": "desc"},
+                user_text=q,
+            )
+            assert out["ok"] is True
+            assert out["metric"] == "ams_growth"
+            md = out["answer_markdown"]
+            assert "AMS growth" in md
+            assert "AMS prior" in md or "AMS (MT)" in md
+            assert "Top parties by YoY %" not in md
+            parties = [p["party"] for p in out["parties"]]
+            assert parties, out
+            # Biggest AMS decline first
+            assert parties[0] == "Beta Dist"
+            assert out["parties"][0].get("ams_growth_pct") is not None
+            assert float(out["parties"][0]["ams_growth_pct"]) < 0
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_nationally_clears_sticky_city_on_ams_decline() -> None:
+    q = "Can you show nationally which distributors have had a decline in AMS"
+    assert _looks_national_scope(q)
+    assert _looks_party_growth_rank(q)
+
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            prior = {
+                "filters": {
+                    "city": "Karachi",
+                    "client_type": "Eva Distributors",
+                },
+                "column_dimension": "month",
+                "row_dimension": "packing_category",
+                "period": {
+                    "date_from": "2026-03-01",
+                    "date_to": "2026-08-05",
+                },
+            }
+            out = _dispatch_tool(
+                "analyze_parties",
+                {"metric": "yoy", "city": "Karachi"},
+                user_text=q,
+                prior_spec=prior,
+            )
+            assert out["ok"] is True
+            assert out["metric"] == "ams_growth"
+            assert out["filters"].get("city") is None, out["filters"]
+            md = out["answer_markdown"]
+            assert "city Karachi" not in md.lower()
+            assert "AMS growth" in md
+            parties = {p["party"] for p in out["parties"]}
+            # National: both Lahore and Karachi distributors can appear
+            assert "Alpha Dist" in parties or "Beta Dist" in parties
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
