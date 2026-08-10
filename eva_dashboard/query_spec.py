@@ -166,6 +166,15 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "description": "One short sentence: why this plan answers the user",
                 },
+                "business_units": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Brand shorthand: Eva → [Eva Consumer, Eva Bulk]; "
+                        "Maan → [Maan Consumer, Maan Bulk]; "
+                        "Consumer alone → [Eva Consumer]. Required for brand asks."
+                    ),
+                },
             },
             "required": ["intent", "base"],
             "additionalProperties": False,
@@ -261,9 +270,9 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
         "clear=['city'], keep metric (often ams_growth).\n"
         "- 'least/lowest gains' → sort=asc, grown_only=false, "
         "title_mode=smallest_gains.\n"
-        "- Brand Eva sales → intent=sales_*, business_units=["
-        "Eva Consumer, Eva Bulk] only (never Shortening / other BUs).\n"
-        "- Brand Maan sales → [Maan Consumer, Maan Bulk] only.\n"
+        "- Brand shorthand (YOU must set business_units — do not omit):\n"
+        "  Eva → [Eva Consumer, Eva Bulk]; Maan → [Maan Consumer, Maan Bulk];\n"
+        "  Consumer alone → Eva Consumer.\n"
     )
 
 

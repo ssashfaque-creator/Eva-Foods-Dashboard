@@ -245,7 +245,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.32 plan→execute):
+SPEED & TOOL RULES (v0.4.33 plan→execute):
 1. For factual data asks, call ``plan_query`` FIRST with a complete QuerySpec.
    The server executes it and returns tables. Never invent figures or cite a cutoff.
 2. Read PRIOR_QUERY_CONTEXT when present. Use base='prior' + clear[] for follow-ups
@@ -3412,7 +3412,7 @@ def _extract_business_units_from_text(text: str) -> list[str]:
     for needle, label in informal:
         if needle in lower and label not in found:
             found.append(label)
-    # Bare Eva brand sales ("show me Eva sales in Lahore") → both Eva BUs
+    # Bare Eva brand sales ("how are Eva sales in Karachi") → both Eva BUs
     # — not Eva Distributors (client type) and not a party named "Eva".
     if (
         re.search(r"\beva\b", lower)
@@ -3421,9 +3421,8 @@ def _extract_business_units_from_text(text: str) -> list[str]:
         and re.search(
             r"\b("
             r"eva\s+sales|eva\s+performance|eva\s+volume|"
-            r"show\s+(me\s+)?eva\b|eva\s+figures?|"
             r"how\s+(are|were|is|did|do|have|has)\s+eva|"
-            r"for\s+eva\b|eva\s+in\b|eva\s+brand|eva\s+only"
+            r"for\s+eva\b|eva\s+in\b|eva\s+brand"
             r")\b",
             lower,
         )
@@ -3438,9 +3437,8 @@ def _extract_business_units_from_text(text: str) -> list[str]:
         and re.search(
             r"\b("
             r"maan\s+sales|maan\s+performance|maan\s+volume|"
-            r"show\s+(me\s+)?maan\b|maan\s+figures?|"
             r"how\s+(are|were|is|did|do|have|has)\s+maan|"
-            r"for\s+maan\b|maan\s+in\b|maan\s+brand|maan\s+only"
+            r"for\s+maan\b|maan\s+in\b|maan\s+brand"
             r")\b",
             lower,
         )

@@ -76,17 +76,6 @@ def execute_query_spec(
             filters["oil_type"] = extract_oil_type_from_text(user_text)
         if not filters.get("packing_category"):
             filters["packing_category"] = extract_packing_from_text(user_text)
-        # Brand shorthand: "Eva sales" / "Maan in Karachi" → Consumer+Bulk
-        if not bus and not filters.get("business_unit"):
-            from eva_dashboard.chatbot import _extract_business_units_from_text
-
-            spoken_bus = _extract_business_units_from_text(user_text)
-            if spoken_bus:
-                bus = list(spoken_bus)
-                if len(bus) == 1:
-                    filters["business_unit"] = bus[0]
-                else:
-                    filters["business_units"] = list(bus)
 
     # Safety: city league cannot keep a city filter
     if (grain.get("group_by") or "") == "city":

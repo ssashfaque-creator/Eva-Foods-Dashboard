@@ -38,11 +38,13 @@ def vocabulary_for_prompt() -> str:
         "Oil types:",
         *_group(OIL_TYPE_ALIASES),
         "",
-        "Business units (set business_unit / business_units):",
-        "- Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk, Cusine King, …",
-        "- Bare \"Eva sales\" → both Eva Consumer + Eva Bulk",
-        "- Bare \"Maan sales\" → both Maan Consumer + Maan Bulk",
-        "- \"selling maan\" (who buys) → Maan Consumer parties, not a BU sales matrix",
+        "Business units (ALWAYS set business_unit / business_units in plan_query):",
+        "- Eva → Eva Consumer + Eva Bulk (BOTH). Never include Shortening, Meal, etc.",
+        "- Maan → Maan Consumer + Maan Bulk (BOTH).",
+        "- Consumer (alone) → Eva Consumer only.",
+        "- Bulk (alone, Eva context) → Eva Bulk; \"Maan bulk\" → Maan Bulk.",
+        "- Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk, Cusine King are full names.",
+        "- \"selling maan\" (who buys) → Maan Consumer parties, not a BU sales matrix.",
         "",
         "Geography:",
         "- city ← City-Filter on clients (Karachi, Lahore, …)",
@@ -103,9 +105,10 @@ Examples:
   grown_only=false, title_mode=smallest_gains
 - \"growth vs other cities\" (after Lahore party growth) → base=prior,
   clear=[\"city\"], grain.group_by=city, metric=ams_growth, title_mode=by_growth
-- \"show me Eva sales in Lahore\" / \"how are Eva sales\" → sales_*,
-  business_units=[Eva Consumer, Eva Bulk] ONLY (never Shortening/Meal/…)
-- \"Maan sales\" → [Maan Consumer, Maan Bulk] only
+- \"show me Eva sales in Lahore\" → sales_*, city=Lahore,
+  business_units=[\"Eva Consumer\", \"Eva Bulk\"]  ← Eva means both; not Shortening
+- \"Maan sales\" → business_units=[\"Maan Consumer\", \"Maan Bulk\"]
+- \"Consumer sales\" → business_unit=\"Eva Consumer\"
 - \"who are distributors in Lahore\" → party_list
 - named store/distributor sales → party_lookup
 
