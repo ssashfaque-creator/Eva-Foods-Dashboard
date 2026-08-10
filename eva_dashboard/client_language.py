@@ -234,6 +234,40 @@ _GENERIC_CLIENT_ALIASES = {
     "distributors",
 }
 
+# Bare "distributor(s)" often means party grain ("distributor-wise"), not the
+# Eva Distributors channel. Specific names ("Eva Distributors", "Maan
+# distributors") still resolve to the channel.
+_DISTRIBUTOR_CHANNEL_ALIASES = {
+    "distributor",
+    "distributors",
+    "dist",
+}
+
+
+def is_distributor_party_grain(text: str) -> bool:
+    """True when "distributor(s)" means party rows / ranking grain, not channel.
+
+    Grain (do NOT invent Eva Distributors):
+      "distributor wise", "by distributor", "party-wise",
+      "individual distributors"
+
+    Channel (still Eva Distributors):
+      "distributor sales", "top distributors", "distributor performance",
+      "which distributors are performing poorly"
+    """
+    t = (text or "").lower()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\bdistributors?\s*[- ]?\s*wise\b|"
+            r"\bparty\s*[- ]?\s*wise\b|"
+            r"\bby\s+distributors?\b|"
+            r"\bindividual\s+distributors?\b",
+            t,
+        )
+    )
+
 
 def extract_all_client_types_from_text(text: str) -> list[str]:
     """All distinct client types mentioned, in order of appearance.
@@ -242,15 +276,22 @@ def extract_all_client_types_from_text(text: str) -> list[str]:
     is Imtiaz, not a bare ``stores`` hit). Non-overlapping generics still
     count — ``Imtiaz vs distributors`` → both types. Used for multi-type
     compares (Imtiaz vs Metro vs Chase Up).
+
+    Grain language ("distributor wise", "lowest performing distributors") does
+    **not** invent the Eva Distributors channel — only explicit channel names
+    like "Eva Distributors" / "Maan distributors" do.
     """
     t = _norm(text or "")
     if not t:
         return []
 
+    skip_bare_distributor = is_distributor_party_grain(text)
     hits: list[tuple[int, int, str]] = []  # start, end, canon
     # Longest alias first so specific phrases claim their span before generics
     aliases = sorted(CLIENT_TYPE_ALIASES.keys(), key=len, reverse=True)
     for alias in aliases:
+        if skip_bare_distributor and alias in _DISTRIBUTOR_CHANNEL_ALIASES:
+            continue
         pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
         for m in re.finditer(pattern, t):
             start, end = m.start(), m.end()

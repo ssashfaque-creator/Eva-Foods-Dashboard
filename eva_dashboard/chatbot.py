@@ -245,7 +245,7 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.33 plan→execute):
+SPEED & TOOL RULES (v0.4.34 plan→execute):
 1. For factual data asks, call ``plan_query`` FIRST with a complete QuerySpec.
    The server executes it and returns tables. Never invent figures or cite a cutoff.
 2. Read PRIOR_QUERY_CONTEXT when present. Use base='prior' + clear[] for follow-ups
@@ -708,11 +708,12 @@ TOOLS: list[dict[str, Any]] = [
                     "client_type": {
                         "type": "string",
                         "description": (
-                            "Client type filter. Specific names stay specific "
-                            "(Chase Up, CSD, Metro, NORTH LMT). Broad groups: "
-                            "IMT, LMT, Dealer. Imtiaz→Imtiaz Store; "
-                            "distributors→Eva Distributors. Pivots by channel "
-                            "still roll up to NEW groups."
+                            "Client / channel filter only when the user names "
+                            "a channel (Eva Distributors, Imtiaz Store, IMT, "
+                            "LMT, …). Do NOT set this for 'distributor-wise' / "
+                            "'by distributor' / 'lowest performing distributors' "
+                            "— those mean party grain, not the Eva Distributors "
+                            "channel."
                         ),
                     },
                     "row_dimension": {
@@ -3964,11 +3965,6 @@ def _party_month_matrix_from_prior(
         or inferred.get("client_type")
         or _client_type_mentioned(user_text)
         or prior_ctx.get("client_type")
-        or (
-            "Eva Distributors"
-            if re.search(r"\bdistributors?\b", (user_text or "").lower())
-            else None
-        )
     )
     city = (
         None
@@ -4682,11 +4678,6 @@ def _dispatch_tool(
             arguments.get("client_type")
             or inferred.get("client_type")
             or prior_ctx.get("client_type")
-            or (
-                "Eva Distributors"
-                if re.search(r"\bdistributors?\b", (user_text or "").lower())
-                else None
-            )
         )
         period = (
             arguments.get("period")

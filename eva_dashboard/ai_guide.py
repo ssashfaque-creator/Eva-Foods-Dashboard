@@ -29,8 +29,18 @@ def vocabulary_for_prompt() -> str:
     parts = [
         "VOCABULARY (spoken words → system values). Use these when setting tool args:",
         "",
-        "Client / channel types:",
+        "Client / channel types (ONLY when the user names a channel):",
         *_group(CLIENT_TYPE_ALIASES),
+        "",
+        "CRITICAL — distributor grain vs channel:",
+        "- \"distributor-wise\" / \"by distributor\" / \"party-wise\" / "
+        "\"lowest performing distributors\" → grain.group_by=party. "
+        "Do NOT set filters.client_type=Eva Distributors.",
+        "- Set Eva Distributors ONLY when they name that channel "
+        "(\"Eva Distributors\", \"distributor sales\" as a channel ask).",
+        "- After an Eva Consumer vs Eva Bulk table, \"show this distributor "
+        "wise…\" → base=prior, keep business_units, clear client_type, "
+        "party_rank by party.",
         "",
         "Packing categories (spoken \"product\" usually means packing, not SKU):",
         *_group(PACKING_ALIASES),
@@ -56,9 +66,13 @@ def vocabulary_for_prompt() -> str:
         "- \"other zones\" / by zone → group_by=zone and clear city",
         "",
         "Metrics language (analyze_parties.metric + sort):",
-        "- AMS / average monthly sales → ams or ams_growth",
-        "- least / lowest / smallest / bottom gains or growth → sort=asc "
-        "(do NOT set grown_only)",
+        "- AMS = mean MT of the 3 full months BEFORE the report month "
+        "(not the same window as Volume). Parties with Volume but AMS=0 "
+        "have no baseline — do not call them \"lowest AMS\".",
+        "- \"lowest / worst performing\" distributors → metric=vs_ams, "
+        "sort=asc, title_mode=underperformers (behind their AMS).",
+        "- least / lowest / smallest / bottom gains or growth → "
+        "metric=ams_growth, sort=asc (do NOT set grown_only)",
         "- biggest / highest / top gains → sort=desc + grown_only only if "
         "they asked for growers",
         "- \"this growth\" / \"how is this compared…\" → keep prior metric "
@@ -81,8 +95,11 @@ def vocabulary_for_prompt() -> str:
         "- how are / performance → analytical tone is OK; still use a tool",
         "",
         "Follow-up reshape (analyze_parties):",
+        "- \"show this … wise\" / \"this distributor wise\" → base=prior, "
+        "keep prior business_units / brand scope",
         "- Keep channel/oil/packing from the prior answer when user says "
-        "\"this growth\" / \"compared to…\"",
+        "\"this growth\" / \"compared to…\" — but CLEAR client_type when "
+        "they ask distributor-/party-wise grain",
         "- Change group_by when they ask for cities/zones vs parties",
         "- Expanding geography clears sticky city — never rank cities "
         "while filtered to one city",
@@ -109,7 +126,12 @@ Examples:
   business_units=[\"Eva Consumer\", \"Eva Bulk\"]  ← Eva means both; not Shortening
 - \"Maan sales\" → business_units=[\"Maan Consumer\", \"Maan Bulk\"]
 - \"Consumer sales\" → business_unit=\"Eva Consumer\"
-- \"who are distributors in Lahore\" → party_list
+- After Eva Consumer vs Eva Bulk: \"show this distributor wise, lowest
+  performing distributors\" → base=prior, intent=party_rank,
+  business_units=[Eva Consumer, Eva Bulk], clear=[\"client_type\"],
+  grain.group_by=party, metric=vs_ams, sort=asc, title_mode=underperformers
+  (NOT filters.client_type=Eva Distributors; NOT metric=ams \"Top parties\")
+- \"who are Eva Distributors in Lahore\" → party_list + that channel
 - named store/distributor sales → party_lookup
 
 Legacy tools (query_sales, analyze_parties, …) still exist but prefer plan_query.

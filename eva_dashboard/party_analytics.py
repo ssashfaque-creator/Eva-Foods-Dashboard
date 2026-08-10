@@ -1547,10 +1547,15 @@ def analyze_parties(
     sk = _sort_key_asc if sort_n == "asc" else _sort_key_desc
 
     if metric_n == "ams":
+        # AMS=0 means no prior-3-month baseline — not "lowest AMS".
+        # Ascending ranks would otherwise fill with zeros while Volume > 0.
+        if sort_n == "asc":
+            rows = [r for r in rows if (r["ams_mt"] or 0) > 0]
         rows.sort(key=lambda r: sk(r["ams_mt"], r["volume_mt"] or 0))
         score_key, score_label = "ams_mt", "AMS (MT)"
     elif metric_n == "vs_ams":
-        rows = [r for r in rows if (r["volume_mt"] or 0) > 0 or (r["ams_mt"] or 0) > 0]
+        # Need an AMS baseline to judge under/over-performance.
+        rows = [r for r in rows if (r["ams_mt"] or 0) > 0]
         rows.sort(key=lambda r: sk(r["pct_vs_ams"], r["volume_mt"] or 0))
         score_key, score_label = "pct_vs_ams", "% vs AMS/Expected"
     elif metric_n == "ams_growth":
@@ -1724,7 +1729,17 @@ def analyze_parties(
                     else "AMS (3 prior months)"
                 )
             )
-        blurb = f"Top {entity_word} by {score_label} — {blurb}"
+        mode = (title_mode or "").strip().lower()
+        low_title = sort_n == "asc" or mode in {
+            "underperformers",
+            "lowest",
+            "smallest",
+            "smallest_gains",
+        }
+        if low_title:
+            blurb = f"Lowest {entity_word} by {score_label} — {blurb}"
+        else:
+            blurb = f"Top {entity_word} by {score_label} — {blurb}"
 
     return _party_table_result(
         rows=rows,
@@ -2269,10 +2284,18 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     from eva_dashboard.geo import extract_zone_from_text
 
     t = (text or "").lower()
+    from eva_dashboard.client_language import is_distributor_party_grain
+
+    grain_distributors = is_distributor_party_grain(text)
     out: dict[str, Any] = {
         "city": extract_city_from_text(text),
         "zone": extract_zone_from_text(text),
-        "client_type": extract_client_type_from_text(text),
+        # Grain language ("distributor wise") must not invent Eva Distributors.
+        "client_type": (
+            None
+            if grain_distributors
+            else extract_client_type_from_text(text)
+        ),
         "oil_type": None,
         "business_unit": None,
         "brand": None,
@@ -2287,6 +2310,8 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
         "sort": "desc",
         "per_party_mix": False,
     }
+    if grain_distributors:
+        out["group_by"] = "party"
 
     # Business units mentioned in the ask (Maan Consumer, Eva Bulk, …)
     bu_aliases = (
@@ -2454,13 +2479,20 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
     ):
         out["metric"] = "share_of_segment"
     elif re.search(
-        r"\b(behind|poorly|poor performance|falling behind|falling in sales|"
-        r"not doing well|underperform|below ams|below average|"
-        r"behind on average|bottom\s+\d+)\b",
+        r"\b("
+        r"behind|poorly|poor performance|poor(?:ly)?\s+performing|"
+        r"falling behind|falling in sales|not doing well|"
+        r"underperform(?:ing|ers?|ed)?|below ams|below average|"
+        r"behind on average|bottom\s+\d+|"
+        r"lowest\s+perform(?:ing|ers?|ance)?|"
+        r"worst\s+perform(?:ing|ers?|ance)?|"
+        r"poorest\s+perform(?:ing|ers?|ance)?"
+        r")\b",
         t,
     ):
         out["metric"] = "vs_ams" if not re.search(r"\bby volume\b|\bbottom\b.+\bvolume\b", t) else "volume"
         out["sort"] = "asc"
+        out["title_mode"] = "underperformers"
         if re.search(r"\bbottom\b.+\bvolume\b|\bby volume\b.+\bbottom\b", t):
             out["metric"] = "volume"
             out["sort"] = "asc"

@@ -8,6 +8,7 @@ from eva_dashboard.client_language import (
     extract_client_type_from_text,
     extract_oil_type_from_text,
     extract_packing_from_text,
+    is_distributor_party_grain,
     normalize_client_type,
     normalize_oil_type,
     normalize_packing_category,
@@ -62,13 +63,16 @@ def execute_query_spec(
     if filters.get("business_unit") and not bus:
         bus = [filters["business_unit"]]
 
-    # Light vocab fill ONLY when the model left a filter blank but spoke it
+    # Light vocab fill ONLY when the model left a filter blank but spoke it.
+    # Never invent Eva Distributors from "distributor-wise" grain language.
     if user_text:
         if not filters.get("city"):
             filters["city"] = extract_city_from_text(user_text)
         if not filters.get("zone"):
             filters["zone"] = normalize_zone(extract_zone_from_text(user_text))
-        if not filters.get("client_type"):
+        if not filters.get("client_type") and not is_distributor_party_grain(
+            user_text
+        ):
             filters["client_type"] = normalize_client_type(
                 extract_client_type_from_text(user_text)
             )
@@ -76,6 +80,9 @@ def execute_query_spec(
             filters["oil_type"] = extract_oil_type_from_text(user_text)
         if not filters.get("packing_category"):
             filters["packing_category"] = extract_packing_from_text(user_text)
+        # Grain language must never keep a sticky Eva Distributors channel.
+        if is_distributor_party_grain(user_text):
+            filters["client_type"] = None
 
     # Safety: city league cannot keep a city filter
     if (grain.get("group_by") or "") == "city":
@@ -133,6 +140,18 @@ def execute_query_spec(
     elif intent == "party_rank":
         group_by = grain.get("group_by") or "party"
         limit = int(spec.get("limit") or (25 if group_by in {"city", "zone"} else 25))
+        # Multi-BU brand scope (Eva Consumer+Bulk) via brand filter — do not
+        # silently drop prior Eva scope when the plan carried both units.
+        brand = None
+        single_bu = filters.get("business_unit") or (
+            bus[0] if len(bus) == 1 else None
+        )
+        if len(bus) > 1 and not single_bu:
+            lowers = [str(b).lower() for b in bus]
+            if all(b.startswith("eva") for b in lowers):
+                brand = "eva"
+            elif all(b.startswith("maan") for b in lowers):
+                brand = "maan"
         result = analyze_parties(
             period=phrase,
             date_from=date_from,
@@ -140,7 +159,8 @@ def execute_query_spec(
             city=filters.get("city"),
             zone=filters.get("zone"),
             client_type=filters.get("client_type"),
-            business_unit=filters.get("business_unit") or (bus[0] if len(bus) == 1 else None),
+            business_unit=single_bu,
+            brand=brand,
             oil_type=filters.get("oil_type"),
             packing_category=filters.get("packing_category"),
             metric=str(spec.get("metric") or "ams"),
@@ -255,14 +275,28 @@ def heuristic_plan_query(
     if looks_advanced(user_text):
         intent = "advanced"
 
+    grain_distributors = is_distributor_party_grain(user_text)
     is_followup = bool(prior) and (
         "this growth" in text_l
         or "compared" in text_l
         or "other cities" in text_l
         or "other zones" in text_l
         or "same format" in text_l
+        or "show this" in text_l
+        or "this distributor" in text_l
+        or grain_distributors
         or text_l.strip().startswith("[follow-up")
     )
+    # "distributor wise / lowest performing distributors" after a sales table
+    # is a party rank reshape of that table — not a fresh channel list.
+    if grain_distributors and (
+        "lowest" in text_l
+        or "worst" in text_l
+        or "performing" in text_l
+        or "show this" in text_l
+        or bool(prior)
+    ):
+        intent = "party_rank"
     base = "prior" if is_followup and prior else "none"
 
     reshape = resolve_analytics_reshape(
@@ -276,12 +310,19 @@ def heuristic_plan_query(
     filters: dict[str, Any] = {
         "city": inf.get("city"),
         "zone": inf.get("zone"),
-        "client_type": inf.get("client_type"),
+        "client_type": None if grain_distributors else inf.get("client_type"),
         "business_unit": inf.get("business_unit"),
         "oil_type": inf.get("oil_type"),
         "packing_category": inf.get("packing_category"),
     }
     bus = _extract_business_units_from_text(user_text)
+    # Carry prior Eva/Maan multi-BU when follow-up didn't rename the brand.
+    if not bus and base == "prior" and prior:
+        bus = list(prior.get("business_units") or [])
+        if not bus:
+            pbu = (prior.get("filters") or {}).get("business_unit")
+            if pbu:
+                bus = [pbu]
     clear: list[str] = []
     if reshape.get("clear_city"):
         clear.append("city")
@@ -289,6 +330,11 @@ def heuristic_plan_query(
     if reshape.get("clear_zone"):
         clear.append("zone")
         filters["zone"] = None
+    if grain_distributors:
+        # Explicitly drop a sticky channel so party grain can see all buyers
+        # of the prior brand scope (e.g. Eva Consumer+Bulk).
+        clear.append("client_type")
+        filters["client_type"] = None
 
     grain: dict[str, Any] = {}
     if intent == "party_rank":
@@ -304,6 +350,8 @@ def heuristic_plan_query(
     metric = reshape.get("metric") or inf.get("metric")
     if intent == "party_rank" and not metric:
         metric = "ams"
+    sort = reshape.get("sort") or inf.get("sort") or "desc"
+    title_mode = reshape.get("title_mode") or inf.get("title_mode")
 
     spec: dict[str, Any] = {
         "intent": intent,
@@ -312,10 +360,10 @@ def heuristic_plan_query(
         "filters": {k: v for k, v in filters.items() if v is not None},
         "grain": grain,
         "metric": metric,
-        "sort": reshape.get("sort") or inf.get("sort") or "desc",
+        "sort": sort,
         "grown_only": bool(reshape.get("grown_only") or False),
         "declined_only": bool(reshape.get("declined_only") or False),
-        "title_mode": reshape.get("title_mode"),
+        "title_mode": title_mode,
         "business_units": bus,
         "period": {"phrase": inf.get("period")} if inf.get("period") else {},
         "rationale": f"heuristic plan via {preferred}",

@@ -273,6 +273,9 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
         "- Brand shorthand (YOU must set business_units — do not omit):\n"
         "  Eva → [Eva Consumer, Eva Bulk]; Maan → [Maan Consumer, Maan Bulk];\n"
         "  Consumer alone → Eva Consumer.\n"
+        "- 'distributor-wise' / 'lowest performing distributors' after a brand\n"
+        "  table → base='prior', party_rank, keep business_units, clear\n"
+        "  client_type, metric=vs_ams, sort=asc. Do NOT invent Eva Distributors.\n"
     )
 
 
