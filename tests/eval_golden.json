@@ -1,41 +1,41 @@
 {
-  "version": "0.4.26",
-  "description": "Golden eval set: expected_forced is what resolve_forced_tool must return; scoped brand/city/channel sales force query_sales; preferred_tool is the intended business tool when forced is required.",
+  "version": "0.4.29",
+  "description": "Golden eval set (AI-first): expected_forced is almost always required (model picks the tool). Only short Reply table mutations pin query_sales. preferred_tool is the soft business hint.",
   "cases": [
     {
       "id": "sales-bu-city",
       "q": "What were Eva Consumer sales in Lahore last month?",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-distributor-karachi",
       "q": "Show distributor sales in Karachi for July",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-imtiaz",
       "q": "Show me Imtiaz sales",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-lahore",
       "q": "Show me Lahore sales",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-analytical",
       "q": "How are Eva Consumer sales doing in Lahore this month?",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
       "id": "sales-month-wise",
       "q": "Month wise Eva Consumer sales last 6 months",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales"
     },
     {
@@ -47,19 +47,19 @@
     {
       "id": "list-distributors-lahore",
       "q": "Who are the distributors in Lahore?",
-      "expected_forced": "list_clients",
+      "expected_forced": "required",
       "preferred_tool": "list_clients"
     },
     {
       "id": "which-distributor-selling-maan",
       "q": "which distributor is selling maan",
-      "expected_forced": "list_clients",
+      "expected_forced": "required",
       "preferred_tool": "list_clients"
     },
     {
       "id": "imtiaz-sells-most-vtf",
       "q": "what Imtiaz store sells the most VTF",
-      "expected_forced": "analyze_parties",
+      "expected_forced": "required",
       "preferred_tool": "analyze_parties"
     },
     {
@@ -101,49 +101,49 @@
     {
       "id": "named-alpha-dist",
       "q": "Show sales for Alpha Dist in July",
-      "expected_forced": "lookup_party",
+      "expected_forced": "required",
       "preferred_tool": "lookup_party"
     },
     {
       "id": "named-rubina",
       "q": "What were Rubina Shaheen sales last month?",
-      "expected_forced": "lookup_party",
+      "expected_forced": "required",
       "preferred_tool": "lookup_party"
     },
     {
       "id": "named-show-me-alpha",
       "q": "Show me Alpha Dist sales",
-      "expected_forced": "lookup_party",
+      "expected_forced": "required",
       "preferred_tool": "lookup_party"
     },
     {
       "id": "named-who-is",
       "q": "Who is Al Bari?",
-      "expected_forced": "lookup_party",
+      "expected_forced": "required",
       "preferred_tool": "lookup_party"
     },
     {
       "id": "adv-compare-cities",
       "q": "Compare Lahore vs Karachi last month",
-      "expected_forced": "advanced_query",
+      "expected_forced": "required",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "adv-expected-month",
       "q": "What are our expected sales for this month?",
-      "expected_forced": "advanced_query",
+      "expected_forced": "required",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "adv-dumping",
       "q": "Identify any dumping this month",
-      "expected_forced": "advanced_query",
+      "expected_forced": "required",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "list-food-panda-active",
       "q": "what Food Panda are active",
-      "expected_forced": "list_clients",
+      "expected_forced": "required",
       "preferred_tool": "list_clients"
     },
     {
@@ -155,19 +155,19 @@
     {
       "id": "adv-filter-decline",
       "q": "Which cities declined more than 20% YoY?",
-      "expected_forced": "advanced_query",
+      "expected_forced": "required",
       "preferred_tool": "advanced_query"
     },
     {
       "id": "price-rate",
       "q": "What is the average rate for Eva Canola in Lahore July?",
-      "expected_forced": "query_price",
+      "expected_forced": "required",
       "preferred_tool": "query_price"
     },
     {
       "id": "price-fetch",
       "q": "Price Fetch for Eva Consumer last month",
-      "expected_forced": "query_price",
+      "expected_forced": "required",
       "preferred_tool": "query_price"
     },
     {
@@ -225,7 +225,7 @@
     {
       "id": "followup-individual-distributors",
       "q": "By individual distributors",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {

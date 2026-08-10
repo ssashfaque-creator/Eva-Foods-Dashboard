@@ -149,7 +149,7 @@ def test_extensive_offline_eval_bank() -> None:
                 q = f"{FOLLOWUP_MARKER}\n\nwhich distributors are selling maan"
                 out = run(
                     q,
-                    forced_exp="query_sales",
+                    forced_exp="required",
                     tool="list_clients",
                     prior_spec=prior,
                 )
@@ -165,7 +165,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "which distributors have grown VTF sales since last year",
-                    forced_exp="analyze_parties",
+                    forced_exp="required",
                     tool="analyze_parties",
                 )
                 assert out.get("metric") == "ams_growth"
@@ -179,7 +179,7 @@ def test_extensive_offline_eval_bank() -> None:
                 out = run(
                     "show individual distributor sales for VTF with growth "
                     "vs AMS and VS last year",
-                    forced_exp="analyze_parties",
+                    forced_exp="required",
                     tool="analyze_parties",
                 )
                 assert out.get("metric") == "yoy_ams"
@@ -191,7 +191,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "Compare Lahore vs Karachi vs Islamabad for July",
-                    forced_exp="advanced_query",
+                    forced_exp="required",
                     tool="advanced_query",
                 )
                 assert len(out.get("entities") or []) == 3
@@ -201,7 +201,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "Imtiaz vs Metro vs Chase Up this month",
-                    forced_exp="advanced_query",
+                    forced_exp="required",
                     tool="advanced_query",
                 )
                 assert len(out.get("entities") or []) == 3
@@ -237,7 +237,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "Canola standup price for Distributors in July",
-                    forced_exp="query_price",
+                    forced_exp="required",
                     tool="query_price",
                 )
                 assert "Avg Rate" in (out.get("answer_markdown") or "")
@@ -260,7 +260,7 @@ def test_extensive_offline_eval_bank() -> None:
                 }
                 out = run(
                     "what's the Price Fetch?",
-                    forced_exp="query_price",
+                    forced_exp="required",
                     tool="query_price",
                     prior_price_spec=price_prior,
                 )
@@ -273,7 +273,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "show factor breakdown for distributors canola standup",
-                    forced_exp="query_price",
+                    forced_exp="required",
                     tool="query_price",
                 )
                 assert out.get("mode") == "factor_costs"
@@ -284,7 +284,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "which Chase Up is active in Karachi",
-                    forced_exp="list_clients",
+                    forced_exp="required",
                     tool="list_clients",
                 )
                 names = [c["client"] for c in out.get("clients") or []]
@@ -336,7 +336,7 @@ def test_reply_selling_maan_fast_and_filtered() -> None:
             q = f"{FOLLOWUP_MARKER}\n\nwhich distributors are selling maan"
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "query_sales"
+                == "required"
             )
             t0 = time.time()
             out = _dispatch_tool("list_clients", {}, user_text=q, prior_spec=prior)

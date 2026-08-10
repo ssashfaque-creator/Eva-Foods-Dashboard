@@ -207,7 +207,7 @@ def test_selling_maan_party_month_matrix() -> None:
             q = "what distributors are selling maan"
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "query_sales"
+                == "required"
             )
             out = _dispatch_tool(
                 "list_clients", {}, user_text=q, prior_spec=prior
@@ -288,11 +288,7 @@ def test_pakistan_growth_clears_city_and_ranks_ams_growth() -> None:
             }
             out = _dispatch_tool(
                 "analyze_parties",
-                {
-                    "city": "Lahore",
-                    "business_unit": "Eva Bulk",
-                    "period": "July 2026",
-                },
+                {"period": "July 2026"},
                 user_text=q,
                 prior_spec=prior,
             )

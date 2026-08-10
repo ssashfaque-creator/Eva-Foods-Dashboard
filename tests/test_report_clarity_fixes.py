@@ -250,7 +250,7 @@ def test_price_dispersion_routing_and_dispatch() -> None:
         "than others on the same date"
     )
     assert infer_advanced_from_text(q).get("mode") == "price_dispersion"
-    assert resolve_forced_tool(q) == "advanced_query"
+    assert resolve_forced_tool(q) == "required"
     assert suggest_preferred_tool(q) == "advanced_query"
 
     previous = os.environ.get("EVA_DATA_DIR")
@@ -258,15 +258,14 @@ def test_price_dispersion_routing_and_dispatch() -> None:
         _env(tmp)
         try:
             _seed()
-            # Wrong model pick must still answer price dispersion
-            for tool in ("analyze_parties", "query_sales", "advanced_query"):
-                out = _dispatch_tool(tool, {}, user_text=q)
-                assert out["ok"] is True, out
-                assert out.get("mode") == "price_dispersion"
-                md = out.get("answer_markdown") or ""
-                assert "price differences" in md.lower() or "Min rate" in md
-                assert "Top parties by Invoices" not in md
-                assert out.get("case_count", 0) >= 1
+            # AI-first: honor the model's tool; advanced_query is the taught path
+            out = _dispatch_tool("advanced_query", {}, user_text=q)
+            assert out["ok"] is True, out
+            assert out.get("mode") == "price_dispersion"
+            md = out.get("answer_markdown") or ""
+            assert "price differences" in md.lower() or "Min rate" in md
+            assert "Top parties by Invoices" not in md
+            assert out.get("case_count", 0) >= 1
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

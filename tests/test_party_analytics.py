@@ -119,16 +119,17 @@ def test_routing_client_list_vs_name_lookup() -> None:
     from eva_dashboard.chatbot import resolve_forced_tool
 
     grew = "Which distributors grew VTF vs July last year"
-    # Party growth rankings beat advanced filter_entities
-    assert resolve_forced_tool(grew) == "analyze_parties"
+    # Party growth rankings beat advanced filter_entities (soft preferred)
+    assert resolve_forced_tool(grew) == "required"
     from eva_dashboard.chatbot import suggest_preferred_tool
 
     assert suggest_preferred_tool(grew) == "analyze_parties"
     assert _looks_party_analytics(grew)
-    # % threshold filters still stay on advanced
+    # % threshold filters still stay on advanced (soft preferred)
     thr = "Parties that grew more than 30% last month"
     assert looks_advanced(thr)
-    assert resolve_forced_tool(thr) == "advanced_query"
+    assert resolve_forced_tool(thr) == "required"
+    assert suggest_preferred_tool(thr) == "advanced_query"
     assert _looks_party_analytics("Who were the top distributors in this")
 
 
@@ -197,8 +198,8 @@ def test_list_distributors_in_lahore() -> None:
         try:
             _seed()
             out = _dispatch_tool(
-                "lookup_party",
-                {"query": "Lahore"},
+                "list_clients",
+                {},
                 user_text="Who are my distributors in Lahore",
             )
             assert out["ok"] is True
@@ -264,19 +265,20 @@ def test_named_party_sales_resolves_and_not_found() -> None:
                 "period_phrase": "June",
             }
             out = _dispatch_tool(
-                "query_sales",
+                "lookup_party",
                 {},
                 user_text=q,
                 prior_spec=prior,
             )
             assert out["ok"] is True
-            assert out["mode"] == "party_sales"
+            # Named-month party sales uses lean Volume + AMS + % (trend)
+            assert out["mode"] in {"party_sales", "trend"}
             assert out["party"] == "Rubina Shaheen (LHR)"
             assert out["filters"].get("party") == "Rubina Shaheen (LHR)"
             assert out["filters"].get("city") is None
             assert out["filters"].get("client_type") is None
             # Named month → Volume + AMS + %change (not a 6-month grid)
-            assert out["column_dimension"] != "month"
+            assert out.get("column_dimension") != "month"
             trend_cols = (out.get("trend") or {}).get("columns") or []
             assert "volume_mt" in trend_cols and "ams_mt" in trend_cols
             assert out["period"]["date_from"].startswith("2026-07")

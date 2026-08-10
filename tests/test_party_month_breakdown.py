@@ -97,7 +97,7 @@ def test_individual_distributor_breakdown_keeps_month_grid() -> None:
                     prior_table_spec=prior,
                     explicit_followup=True,
                 )
-                == "query_sales"
+                == "required"
             )
             rg = resolve_regroup_request(
                 "Can you show individual distributor breakdown",

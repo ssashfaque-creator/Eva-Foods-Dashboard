@@ -250,23 +250,23 @@ def test_reply_prefix_not_channel_growth() -> None:
     q = FOLLOWUP_MARKER + "\ncan you show channel wise sales for karachi"
     assert not _looks_channel_growth_ask(q)
     assert _looks_complete_sales_ask(q)
-    assert resolve_forced_tool(q) == "query_sales"
+    # Complete new ask → model chooses (required); soft hint is query_sales
+    assert resolve_forced_tool(q) == "required"
     assert suggest_preferred_tool(q) == "query_sales"
 
 
-def test_wrong_tool_still_channel_matrix(seeded) -> None:
+def test_channel_wise_matrix_via_query_sales(seeded) -> None:
     q = "can you show channel wise sales for karachi"
-    for tool in ("analyze_parties", "list_clients", "query_sales"):
-        out = _dispatch_tool(
-            tool,
-            {},
-            user_text=q,
-            prior_spec=_maan_july_prior(),
-        )
-        assert out.get("ok") is True
-        assert out.get("row_dimension") == "client_type" or out.get("mode") in {
-            "matrix",
-            "analytical",
-            "trend",
-        }
-        assert not (out.get("filters") or {}).get("business_unit")
+    out = _dispatch_tool(
+        "query_sales",
+        {},
+        user_text=q,
+        prior_spec=_maan_july_prior(),
+    )
+    assert out.get("ok") is True
+    assert out.get("row_dimension") == "client_type" or out.get("mode") in {
+        "matrix",
+        "analytical",
+        "trend",
+    }
+    assert not (out.get("filters") or {}).get("business_unit")

@@ -1,4 +1,4 @@
-"""Question-bank routing coverage — v0.4.0 slim forced + preferred hints."""
+"""Question-bank routing coverage — AI-first required + preferred hints."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _env(tmp: str) -> None:
     os.environ["EVA_DATA_DIR"] = str(Path(tmp) / "data")
 
 
-# (question, preferred_tool) — model should pick these when forced is "required"
+# (question, preferred_tool) — soft hints; forced is almost always "required"
 PREFERRED_CASES: list[tuple[str, str]] = [
     # Sales matrices
     ("What were Eva Consumer sales in Lahore last month?", "query_sales"),
@@ -64,7 +64,6 @@ PREFERRED_CASES: list[tuple[str, str]] = [
     # Advanced
     ("Compare Lahore vs Karachi last month", "advanced_query"),
     ("Compare Imtiaz vs distributors growth last month", "advanced_query"),
-    # (forced via advanced_query for city/client compares — see FORCED_EXCEPTIONS)
     ("Week over week sales change", "advanced_query"),
     ("Which packing is growing fastest?", "advanced_query"),
     ("What are our expected sales for this month?", "advanced_query"),
@@ -84,34 +83,14 @@ PREFERRED_CASES: list[tuple[str, str]] = [
     ("Exclude online customers from Lahore sales last month", "query_sales"),
 ]
 
-# High-confidence forces (named party, who-are lists, selling/active party asks)
-FORCED_EXCEPTIONS: dict[str, str] = {
-    "Show sales for Alpha Dist in July": "lookup_party",
-    "What were Rubina Shaheen sales last month?": "lookup_party",
-    "Sales of Gamma Dist this month": "lookup_party",
-    "Who is Al Bari?": "lookup_party",
-    "show me Alpha Dist sales in July": "lookup_party",
-    "Who are the distributors in Lahore?": "list_clients",
-    "Compare Lahore vs Karachi last month": "advanced_query",
-    "Compare Imtiaz vs distributors growth last month": "advanced_query",
-    "What are our expected sales for this month?": "advanced_query",
-    "Identify any dumping this month": "advanced_query",
-    "Which packing is growing fastest?": "advanced_query",
-    "Which cities declined more than 20% YoY?": "advanced_query",
-    "Parties that grew more than 30% last month": "advanced_query",
-}
 
-
-def test_question_bank_forced_tool_routing_v040() -> None:
-    """Force high-confidence tools; otherwise require a tool (model chooses)."""
+def test_question_bank_forced_tool_ai_first() -> None:
+    """AI-first: new factual asks require a tool; model chooses which."""
     failures: list[str] = []
-    for question, preferred in PREFERRED_CASES:
-        expected = FORCED_EXCEPTIONS.get(question, "required")
+    for question, _preferred in PREFERRED_CASES:
         got = resolve_forced_tool(question)
-        if got != expected:
-            # Also OK when we force the preferred tool for a confident party ask
-            if not (expected == "required" and got == preferred):
-                failures.append(f"{got!r} != {expected!r}: {question}")
+        if got != "required":
+            failures.append(f"{got!r} != 'required': {question}")
     assert not failures, "Forced routing mismatches:\n" + "\n".join(failures)
 
 
@@ -126,7 +105,11 @@ def test_question_bank_preferred_tool_hints() -> None:
 
 
 def test_table_followups_require_prior_spec() -> None:
-    assert resolve_forced_tool("Does this include bulk?") in {"query_sales", "required", "auto"}
+    assert resolve_forced_tool("Does this include bulk?") in {
+        "query_sales",
+        "required",
+        "auto",
+    }
     assert resolve_forced_tool(
         "Does this include bulk?",
         prior_table_spec={"filters": {"city": "Lahore"}},
@@ -159,7 +142,7 @@ def test_named_party_natural_phrasing() -> None:
     # Client-type sales stay on the matrix path (not forced lookup_party)
     assert _extract_named_party_query("Show Imtiaz sales for July") is None
     assert not _looks_named_party_sales("Show Imtiaz sales for July")
-    assert resolve_forced_tool("Show Imtiaz sales for July") == "query_sales"
+    assert resolve_forced_tool("Show Imtiaz sales for July") == "required"
     assert suggest_preferred_tool("Show Imtiaz sales for July") == "query_sales"
 
 
@@ -170,10 +153,12 @@ def test_advanced_modes_not_stolen_by_party_analytics() -> None:
     assert infer_advanced_from_text("Show reactivated parties")["mode"] == "reactivated"
     assert looks_advanced("Days since last invoice for distributors")
     assert looks_advanced("Which cities declined more than 20% YoY?")
-    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == (
+    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == "required"
+    assert suggest_preferred_tool("Compare Lahore vs Karachi last month") == (
         "advanced_query"
     )
-    assert resolve_forced_tool("what Food Panda are active") == "list_clients"
+    assert resolve_forced_tool("what Food Panda are active") == "required"
+    assert suggest_preferred_tool("what Food Panda are active") == "list_clients"
 
 
 def test_named_party_dist_suffix_and_exclude_online_execute() -> None:
@@ -237,7 +222,9 @@ def test_named_party_dist_suffix_and_exclude_online_execute() -> None:
                 user_text="Exclude online customers from Lahore sales last month",
             )
             assert excl["ok"] is True
-            ex = (excl.get("table_spec") or excl).get("excludes") or excl.get("excludes")
+            ex = (excl.get("table_spec") or excl).get("excludes") or excl.get(
+                "excludes"
+            )
             assert ex
             assert any(
                 "online" in str(v).lower()

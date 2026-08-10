@@ -193,7 +193,8 @@ def seeded_env():
 def test_exec_query_bank_routing(seeded_env, query, tool, modes, expect):
     forced = resolve_forced_tool(query)
     preferred = suggest_preferred_tool(query)
-    assert forced == tool, f"forced={forced} for {query!r}"
+    # AI-first: force is required; preferred soft-hint matches the bank tool
+    assert forced == "required", f"forced={forced} for {query!r}"
     assert preferred == tool, f"preferred={preferred} for {query!r}"
     assert not _looks_named_party_sales(query) or tool == "lookup_party"
     if "Eva" in query or "eva" in query.lower():
@@ -206,7 +207,7 @@ def test_exec_query_bank_routing(seeded_env, query, tool, modes, expect):
 
 @pytest.mark.parametrize("query,tool,modes,expect", CASES)
 def test_exec_query_bank_dispatch(seeded_env, query, tool, modes, expect):
-    # Correct tool
+    # Dispatch the preferred tool (AI-first: no wrong-tool rewrite)
     out = _dispatch_tool(tool, {}, user_text=query)
     assert out.get("ok") is True, out
     mode = out.get("mode") or out.get("metric")
@@ -233,15 +234,6 @@ def test_exec_query_bank_dispatch(seeded_env, query, tool, modes, expect):
             "matrix",
             "trend",
         }
-
-    # Wrong model pick of analyze_parties / lookup_party must still redirect
-    if tool == "query_sales":
-        for wrong in ("analyze_parties", "lookup_party"):
-            redirected = _dispatch_tool(wrong, {}, user_text=query)
-            assert redirected.get("ok") is True, redirected
-            md = redirected.get("answer_markdown") or ""
-            assert "Top parties by AMS" not in md, query
-            assert "Could not find" not in md, query
 
 
 def test_maan_brand_expands_like_eva():

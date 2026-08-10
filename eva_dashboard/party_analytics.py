@@ -1671,9 +1671,11 @@ def analyze_parties(
             blurb += " · grown only"
         if declined_only:
             blurb += " · declined only"
-        if declined_only or sort_n == "asc":
+        if declined_only:
             blurb = f"Biggest AMS declines — {blurb}"
-        elif grown_only:
+        elif sort_n == "asc":
+            blurb = f"Smallest AMS gains — {blurb}"
+        elif grown_only or sort_n == "desc":
             blurb = f"Biggest AMS gains — {blurb}"
         else:
             blurb = f"Parties by AMS growth % — {blurb}"
@@ -2446,7 +2448,7 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
             out["sort"] = "asc"
     elif re.search(
         r"\b("
-        r"grown|grow|growth|grew|growing|"
+        r"grown|grow|growth|grew|growing|gains?|"
         r"declined?|dropped|fallen|fell|"
         r"vs\.?\s*last year|versus last year|since last year|from last year|"
         r"year over year|\byoy\b"
@@ -2475,39 +2477,73 @@ def infer_party_analytics_from_text(text: str) -> dict[str, Any]:
             out["period"] = named_month
             out["compare_period"] = f"{named_month} last year"
         # else: last full month (handled in analyze_parties) + YoY prior year
-        declining = bool(
-            re.search(r"\b(declined?|dropped|fallen|fell)\b", t)
-        ) and not bool(re.search(r"\b(grown|grew|growth|growing)\b", t))
-        sort_only = bool(
-            re.search(
-                r"\b(sort|rank|order)\b.+\b(ams\s*growth|growth|ams)\b|"
-                r"\bby\s+ams\s*growth\b|\bsorted?\s+by\s+(ams\s*)?growth\b",
-                t,
-            )
-        )
-        only_growing = bool(
+        low_end = bool(
             re.search(
                 r"\b("
-                r"only\s+(the\s+)?grow(?:n|ing)|show\s+only\s+grow|"
-                r"grown\s+only|growing\s+only|that\s+(have\s+)?grown"
+                r"least|lowest|smallest|bottom|worst|fewest|minimal|slowest|"
+                r"least\s+(ams\s*)?(gains?|growth)|"
+                r"lowest\s+(ams\s*)?(gains?|growth)|"
+                r"smallest\s+(ams\s*)?(gains?|growth)"
                 r")\b",
                 t,
             )
         )
-        growing = bool(
-            re.search(r"\b(grown|grew|growth|growing)\b", t)
-        ) and not declining
-        if declining:
+        high_end = bool(
+            re.search(
+                r"\b(biggest|highest|top|most|largest|best|greatest)\b",
+                t,
+            )
+        )
+        declining = bool(
+            re.search(r"\b(declined?|dropped|fallen|fell)\b", t)
+        ) and not bool(
+            re.search(r"\b(grown|grew|growth|growing|gains?)\b", t)
+        )
+        sort_only = bool(
+            re.search(
+                r"\b(sort|rank|order)\b.+\b(ams\s*growth|growth|ams|gains?)\b|"
+                r"\bby\s+ams\s*growth\b|\bsorted?\s+by\s+(ams\s*)?(growth|gains?)\b",
+                t,
+            )
+        )
+        # Filter to growers ONLY when explicitly asked — never because "growth" appears
+        only_growing = bool(
+            re.search(
+                r"\b("
+                r"only\s+(the\s+)?grow(?:n|ing)|show\s+only\s+grow|"
+                r"grown\s+only|growing\s+only|"
+                r"that\s+(have\s+)?grown|"
+                r"which\s+.+\s+grew\b|which\s+.+\s+have\s+grown\b|"
+                r"who\s+grew|who\s+have\s+grown|"
+                r"distributors?\s+that\s+grew|"
+                r"have\s+grown|"
+                r"grew\s+(in\s+)?ams|grown\s+(in\s+)?ams"
+                r")\b",
+                t,
+            )
+        )
+        if declining and not low_end:
             out["sort"] = "asc"
             out["declined_only"] = True
             out["limit"] = max(int(out.get("limit") or 10), 25)
+        elif low_end:
+            # "least gains" / "lowest growth" → ascending rank, do NOT force growers
+            out["sort"] = "asc"
+            out["grown_only"] = False
+            out["declined_only"] = False
+            out["limit"] = max(int(out.get("limit") or 10), 25)
         elif sort_only and not only_growing:
-            # "sort by AMS growth" → rank by metric, do not filter growers
-            out["sort"] = "desc"
-        elif growing or only_growing:
-            out["sort"] = "desc"
+            out["sort"] = "desc" if not high_end else "desc"
+        elif only_growing:
+            out["sort"] = "asc" if low_end else "desc"
             out["grown_only"] = True
             out["limit"] = max(int(out.get("limit") or 10), 25)
+        elif high_end:
+            out["sort"] = "desc"
+            out["limit"] = max(int(out.get("limit") or 10), 25)
+        else:
+            # Bare "AMS growth" / "gains" → rank desc, no grown-only filter
+            out["sort"] = "desc"
     elif re.search(r"\bdoing well\b|\bperforming well\b|\bmanaged well\b", t):
         if re.search(r"\bwhich\b|\btop\b|\blist\b", t):
             out["metric"] = "vs_ams"

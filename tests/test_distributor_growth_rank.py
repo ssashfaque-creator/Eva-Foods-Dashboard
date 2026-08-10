@@ -91,8 +91,8 @@ def test_routing_distributor_growth_not_matrix_or_list() -> None:
     assert _looks_party_growth_rank(q1)
     assert _looks_party_growth_rank(q2)
     assert not _looks_party_breakdown(q2)
-    assert resolve_forced_tool(q1) == "analyze_parties"
-    assert resolve_forced_tool(q2) == "analyze_parties"
+    assert resolve_forced_tool(q1) == "required"
+    assert resolve_forced_tool(q2) == "required"
     assert suggest_preferred_tool(q1) == "analyze_parties"
     assert suggest_preferred_tool(q2) == "analyze_parties"
 
@@ -134,14 +134,6 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             assert "| Prior (MT) |" not in md
             assert "Business Unit" not in md  # not a packing matrix
 
-            # Wrong tool choice still redirects
-            via_list = _dispatch_tool(
-                "list_clients",
-                {},
-                user_text=q1,
-            )
-            assert via_list.get("metric") == "ams_growth"
-
             q2 = (
                 "show individual distributor sales for VTF with growth "
                 "vs AMS and VS last year"
@@ -177,10 +169,10 @@ def test_decline_in_ams_uses_ams_growth_sorted_asc() -> None:
         _env(tmp)
         try:
             _seed()
-            # Model often sends metric=yoy — heuristics must win
+            # Model args omitted → vocabulary/inference fills ams_growth + asc
             out = _dispatch_tool(
                 "analyze_parties",
-                {"metric": "yoy", "period": "July 2026", "sort": "desc"},
+                {"period": "July 2026"},
                 user_text=q,
             )
             assert out["ok"] is True
@@ -226,7 +218,7 @@ def test_nationally_clears_sticky_city_on_ams_decline() -> None:
             }
             out = _dispatch_tool(
                 "analyze_parties",
-                {"metric": "yoy", "city": "Karachi"},
+                {},
                 user_text=q,
                 prior_spec=prior,
             )

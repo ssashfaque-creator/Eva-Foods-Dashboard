@@ -271,7 +271,7 @@ def test_national_distributor_ams_decline_still_works() -> None:
             }
             out = _dispatch_tool(
                 "analyze_parties",
-                {"metric": "yoy"},
+                {},
                 user_text=(
                     "nationally which distributors have had a decline in AMS"
                 ),

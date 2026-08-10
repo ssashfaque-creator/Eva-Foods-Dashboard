@@ -234,72 +234,40 @@ Never say the data "only goes to 2023" or cite an OpenAI knowledge cutoff for th
 
 
 def system_prompt() -> str:
+    from eva_dashboard.ai_guide import tool_guide_for_prompt, vocabulary_for_prompt
+
     catalog = load_data_catalog()
     live = live_database_briefing()
     glossary = glossary_for_prompt()
+    vocab = vocabulary_for_prompt()
+    tools = tool_guide_for_prompt()
     return f"""You are the Eva Foods in-app data analyst. Answer ONLY from the live SQLite database.
 
 {live}
 
-SPEED & TOOL RULES (v0.4.7):
-1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures or cite an OpenAI knowledge cutoff.
-2. Choose the tool yourself. Do NOT call get_schema / run_sql for normal pivots.
-3. Geography = City-Filter (`city`) or Zone (`SOUTH` / `CENTRAL` / `NORTH`).
-   Blank/unmapped/undefined City-Filter defaults to Karachi → SOUTH.
-4. Read-only. Paste tool `answer_markdown` tables verbatim.
-5. ### Analysis is written by you from the tool table (quality commercial insight) —
-   never invent numbers; never paste generic canned filler.
+SPEED & TOOL RULES (v0.4.29 AI-first):
+1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures
+   or cite an OpenAI knowledge cutoff.
+2. YOU choose the tool and its arguments. Guides below teach structure and vocabulary
+   — they are not hard scripts. Match least/lowest → sort=asc; biggest/top → sort=desc.
+3. Read-only. Paste tool `answer_markdown` verbatim, then ### Analysis (2–4 bullets
+   that answer the user's actual question).
+4. Joins: sales.party↔clients.client; sales.product↔category.product
+   (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
 
-DATA MODEL (filters you set; tools build tables):
-- Product hierarchy: Business Unit → Oil Type → Packing Category → Product SKU.
-- Client hierarchy: Client Type → Party (named client).
-  City = City-Filter on clients; Zone = SOUTH/CENTRAL/NORTH mapped from city.
-- Geography: city/zone alike. After a zone table, "city wise" → Zone then City.
-- Channel = Client Type. "Channel wise sales for Karachi" → client_type × month,
-  all BUs (no sticky Maan/Eva). Full new asks reset sticky filters; short mutations
-  ("city wise", "remove BU", "same format") keep prior.
-- Client Type groups: Chase Up/Metro/CSD/SPAR→IMT; LMT sources→LMT; dealers→Dealer.
-  Named old type stays specific. imt→IMT, distributors→Eva Distributors, Imtiaz→Imtiaz Store.
-- which/what + client type → parties; "who is X?" → lookup_party; cold distributor
-  list → list_clients. Month-table "individual distributors" → party×month grid.
-- Distributor growth / AMS / last year → analyze_parties (not packing matrix).
-
-TOOL CHOICE:
-- Volume pivots / month grids / regroup / include-bulk / remove / add layer / YoY → query_sales
-- Party rankings, growth, AMS, share, mix, new/lost/silent → analyze_parties
-- Rate / price / Price Fetch / cost factor / packing cost / factor breakdown → query_price
-- City/client compares (2+ sides: Lahore vs Karachi vs Islamabad; Imtiaz vs Metro
-  vs Chase Up) → advanced_query with mode compare_cities/compare_client_types and
-  `entities` for all sides. Dumping, expected month, filter grown/declined/>N MT
-  → advanced_query too.
-- Single spoken product → resolve_product_language then product_sales / filtered query
-- Daily briefing → report_snapshot; what's loaded? → get_sales_overview
-
-DEFAULTS (tools also enforce these):
-- "Show me X sales" (party / client type / city) with NO named month → columns='month',
-  months_back=6 + AMS (3) + AMS (6).
-- Named month in the ask ("for July", "this month") → that month's Volume + AMS + % vs AMS
-  only (not a 6-month grid). Explicit "last N months" / "month-wise" keeps the grid.
-- "Sold to" / "which distributor bought [BU]" → list_clients with that business_unit,
-  inheriting prior city / client type / period when this is a follow-up.
-- Matrix mode: what/show/breakdown/average → matrix; how/performance/doing/trend → analytical.
-- Row grain (query_sales): no BU → Business Unit; one BU → Packing Category (+ BU subtotal);
-  oil set → Packing; packing set → Product SKU.
-  Spoken "product" / "product wise" / "by product" → Packing Category (never SKU).
-  Only "SKU" / "SKU wise" / "break it down further" (from packing) → individual SKU.
-- Columns: client_type | city | month. Tables include row + column totals.
-- Zones: SOUTH, CENTRAL, NORTH. "zone wise" / "by zone" → row_dimension=zone.
-  "city wise" after a zone view → row_dimension=city with zone grouping.
-- [FOLLOW-UP …] / Reply: short mutations keep filters; complete new sales asks reset sticky BU/period/channel.
-- Remove inactive → drop inactive clients (not the whole channel). Sample/marketing → party names.
-- Add city layer → nest City. Only growing → grown-only; sort by AMS growth → rank only.
-
-RESPONSE FORMAT:
-- Start with tool `answer_markdown` tables verbatim.
-- Then ### Analysis: 2–4 one-line executive bullets (no bold labels).
+=== DATA MODEL ===
+sales lines join clients on party=client; join category on product for BU/oil/packing.
+Filters live on clients (city_filter, type) and category (category_1/2, packing).
+Tools below return deterministic tables — you pick which tool and args.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
+
+=== VOCABULARY ===
+{vocab}
+
+=== TOOL GUIDE ===
+{tools}
 
 === DATA CATALOG ===
 {catalog}
@@ -922,7 +890,27 @@ TOOLS: list[dict[str, Any]] = [
                     "sort": {
                         "type": "string",
                         "enum": ["desc", "asc"],
-                        "description": "asc for poorly / behind AMS",
+                        "description": (
+                            "desc = biggest/highest/top; asc = least/lowest/"
+                            "smallest/bottom/declines"
+                        ),
+                    },
+                    "grown_only": {
+                        "type": "boolean",
+                        "description": (
+                            "true only when user asks for growers / only growing "
+                            "— not for 'least gains'"
+                        ),
+                    },
+                    "declined_only": {
+                        "type": "boolean",
+                        "description": (
+                            "true when user asks for declines / drops only"
+                        ),
+                    },
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "true to drop inactive clients",
                     },
                     "limit": {"type": "integer"},
                 },
@@ -2912,8 +2900,9 @@ def _looks_party_growth_rank(text: str) -> bool:
     return bool(
         re.search(
             r"\b("
-            r"grown|grew|growth|grow|growing|"
+            r"grown|grew|growth|grow|growing|gains?|"
             r"declined?|dropped|fallen|fell|"
+            r"ams\s*gains?|ams\s*growth|"
             r"vs\.?\s*ams|against ams|relative to ams|"
             r"year over year|\byoy\b|vs\.?\s*last year|versus last year|"
             r"since last year|from last year"
@@ -4144,52 +4133,8 @@ def _dispatch_tool(
     prior_price_spec: dict[str, Any] | None = None,
     prior_party_spec: dict[str, Any] | None = None,
 ) -> Any:
-    # Channels (= client types) grew / declined → lean Volume + AMS + %
-    if _looks_channel_growth_ask(user_text):
-        return _dispatch_channel_growth(
-            user_text, prior_spec=prior_spec, arguments=arguments
-        )
-
-    # Same-date price differences — never invoices / AMS rankings
-    if _looks_price_dispersion_ask(user_text):
-        return _dispatch_advanced(
-            {"mode": "price_dispersion", **(arguments or {})},
-            user_text,
-            prior_spec,
-        )
-
-    # which/what + distributors|Imtiaz → individual parties (selling BU / most VTF / active)
-    if _looks_which_parties_ask(user_text) or (
-        _looks_sold_to_parties(user_text)
-        and (
-            _extract_business_units_from_text(user_text)
-            or prior_spec
-            or extract_client_type_from_text(user_text)
-        )
-    ):
-        return _dispatch_which_parties(
-            user_text, prior_spec=prior_spec, arguments=arguments
-        )
-
-    # Named client/party sales (do NOT inherit prior city/client_type)
-    if _looks_named_party_sales(user_text):
-        pq = _extract_named_party_query(user_text) or user_text
-        period = _extract_period_phrase(user_text)
-        # Named month → Volume + AMS + %change; else last 6 months + AMS grid.
-        if period and (
-            _wants_named_month_trend(user_text) or _looks_single_month_only(user_text)
-        ):
-            return party_sales(
-                query=pq, period=period, columns="city", mode="trend"
-            )
-        months_back = _months_back_from_text(user_text, 6)
-        return party_sales(
-            query=pq,
-            period=None,
-            columns="month",
-            months_back=months_back,
-            mode="matrix",
-        )
+    # AI-first: honor the model's tool choice. Do not rewrite the tool from
+    # text heuristics. Only keep Reply-style continuity helpers below.
 
     # Period-only follow-up on a party/distributor list → stay on that view
     if prior_party_spec and _looks_period_only_followup(user_text):
@@ -4226,70 +4171,20 @@ def _dispatch_tool(
             user_text, prior_spec=prior_spec, arguments=arguments
         )
 
-    if (
-        name
-        in {"query_sales", "list_clients", "analyze_parties", "lookup_party"}
-        and _looks_party_breakdown(user_text)
-        and (prior_spec or _extract_business_units_from_text(user_text))
-    ):
-        if prior_spec and _wants_party_month_matrix(user_text, prior_spec):
-            return _party_month_matrix_from_prior(
+    if name == "query_sales":
+        # Channel (= client type) grew/declined — lean Volume + AMS + %
+        if _looks_channel_growth_ask(user_text):
+            return _dispatch_channel_growth(
                 user_text, prior_spec=prior_spec, arguments=arguments
             )
-        prior_ctx = _party_filters_from_prior(prior_spec, user_text) if prior_spec else {}
-        units = _extract_business_units_from_text(user_text)
-        bu = (
-            units[0]
-            if len(units) == 1
-            else (
-                arguments.get("business_unit")
-                or prior_ctx.get("business_unit")
-            )
-        )
-        ctype = normalize_client_type(
-            arguments.get("client_type")
-            or prior_ctx.get("client_type")
-            or (
-                "Eva Distributors"
-                if re.search(r"\bdistributors?\b", (user_text or "").lower())
-                else None
-            )
-        )
-        city = (
-            arguments.get("city")
-            or extract_city_from_text(user_text)
-            or prior_ctx.get("city")
-        )
-        zone = normalize_zone(
-            arguments.get("zone")
-            or extract_zone_from_text(user_text)
-            or prior_ctx.get("zone")
-        )
-        if _looks_national_scope(user_text):
-            city = None
-            zone = None
-        return list_clients(
-            city=city,
-            zone=zone,
-            client_type=ctype,
-            business_unit=bu,
-            period=(
-                arguments.get("period")
-                or _extract_period_phrase(user_text)
-                or prior_ctx.get("period")
-            ),
-            date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
-            date_to=arguments.get("date_to") or prior_ctx.get("date_to"),
-            limit=int(arguments.get("limit") or 200),
-            active_only=_wants_active_only(user_text)
-            or bool(prior_ctx.get("active_only")),
-        )
 
-    # v0.4.2: wrong tool under required → still honor show-me X sales defaults
-    if _should_redirect_scoped_sales(name, user_text):
-        name = "query_sales"
+        # Party×month continuity when the model stays on query_sales
+        if prior_spec and _looks_party_breakdown(user_text):
+            if _wants_party_month_matrix(user_text, prior_spec):
+                return _party_month_matrix_from_prior(
+                    user_text, prior_spec=prior_spec, arguments=arguments
+                )
 
-    if name == "query_sales":
         # "Does this include bulk?" — show Bulk-only for prior scope
         if _looks_include_check(user_text) and prior_spec:
             segment = _resolve_include_segment(user_text, prior_spec)
@@ -4692,35 +4587,57 @@ def _dispatch_tool(
             active_only=active_only,
         )
     if name == "lookup_party":
-        # If language is clearly a city+type list, redirect
-        if _looks_client_list(user_text):
-            inferred = infer_party_analytics_from_text(user_text)
-            return list_clients(
-                city=inferred.get("city") or arguments.get("city"),
-                zone=normalize_zone(
-                    inferred.get("zone")
-                    or arguments.get("zone")
-                    or extract_zone_from_text(user_text)
-                ),
-                client_type=inferred.get("client_type")
-                or normalize_client_type(arguments.get("client_type")),
-                limit=int(arguments.get("limit") or inferred.get("limit") or 200),
+        # Named-party sales shape when the model chose lookup_party
+        if _looks_named_party_sales(user_text):
+            pq = (
+                arguments.get("query")
+                or _extract_named_party_query(user_text)
+                or user_text
+            )
+            period = (
+                arguments.get("period")
+                or _extract_period_phrase(user_text)
+            )
+            if period and (
+                _wants_named_month_trend(user_text)
+                or _looks_single_month_only(user_text)
+            ):
+                return party_sales(
+                    query=pq, period=period, columns="city", mode="trend"
+                )
+            months_back = int(
+                arguments.get("months_back")
+                or _months_back_from_text(user_text, 6)
+            )
+            return party_sales(
+                query=pq,
+                period=None,
+                columns="month",
+                months_back=months_back,
+                mode="matrix",
             )
         return lookup_party(
             arguments.get("query") or user_text,
             limit=int(arguments.get("limit") or 10),
         )
     if name == "list_clients":
-        # Growth / AMS / YoY on individuals must not become a plain MT list
-        if _looks_party_growth_rank(user_text):
-            return _dispatch_tool(
-                "analyze_parties",
-                arguments,
-                user_text=user_text,
-                prior_spec=prior_spec,
-                prior_price_spec=prior_price_spec,
-                prior_party_spec=prior_party_spec,
+        # which/what party asks the model routed here
+        if _looks_which_parties_ask(user_text) or (
+            _looks_sold_to_parties(user_text)
+            and (
+                _extract_business_units_from_text(user_text)
+                or prior_spec
+                or extract_client_type_from_text(user_text)
             )
+        ):
+            return _dispatch_which_parties(
+                user_text, prior_spec=prior_spec, arguments=arguments
+            )
+        if prior_spec and _looks_party_breakdown(user_text):
+            if _wants_party_month_matrix(user_text, prior_spec):
+                return _party_month_matrix_from_prior(
+                    user_text, prior_spec=prior_spec, arguments=arguments
+                )
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
         # Period-only on a prior party list (when tool still chosen as list_clients)
@@ -4730,17 +4647,15 @@ def _dispatch_tool(
             )
         units = _extract_business_units_from_text(user_text)
         bu = (
-            units[0]
-            if len(units) == 1
-            else (
-                arguments.get("business_unit")
-                or inferred.get("business_unit")
-                or prior_ctx.get("business_unit")
-            )
+            arguments.get("business_unit")
+            or (units[0] if len(units) == 1 else None)
+            or inferred.get("business_unit")
+            or prior_ctx.get("business_unit")
         )
         city = (
             arguments.get("city")
             or inferred.get("city")
+            or extract_city_from_text(user_text)
             or prior_ctx.get("city")
         )
         zone = normalize_zone(
@@ -4763,12 +4678,15 @@ def _dispatch_tool(
             )
         )
         period = (
-            _extract_period_phrase(user_text)
-            if (
-                _looks_period_only_followup(user_text)
-                or _looks_sold_to_parties(user_text)
+            arguments.get("period")
+            or (
+                _extract_period_phrase(user_text)
+                if (
+                    _looks_period_only_followup(user_text)
+                    or _looks_sold_to_parties(user_text)
+                )
+                else None
             )
-            else None
         )
         return list_clients(
             city=city,
@@ -4776,7 +4694,6 @@ def _dispatch_tool(
             client_type=ctype,
             business_unit=bu,
             period=period
-            or arguments.get("period")
             or inferred.get("period")
             or prior_ctx.get("period"),
             date_from=arguments.get("date_from") or prior_ctx.get("date_from"),
@@ -4787,8 +4704,32 @@ def _dispatch_tool(
             or bool(prior_ctx.get("active_only")),
         )
     if name == "advanced_query":
+        if _looks_price_dispersion_ask(user_text) and not (
+            arguments.get("mode")
+        ):
+            arguments = {
+                **(arguments or {}),
+                "mode": "price_dispersion",
+            }
         return _dispatch_advanced(arguments, user_text, prior_spec=prior_spec)
     if name == "analyze_parties":
+        # which/what + oil/rank — same helper when the model picked analyze_parties
+        if (
+            (
+                _looks_which_parties_ask(user_text)
+                or _looks_sold_to_parties(user_text)
+            )
+            and not _looks_party_growth_rank(user_text)
+            and not _looks_party_mix_query(user_text)
+            and (
+                _looks_party_rank_ask(user_text)
+                or extract_oil_type_from_text(user_text)
+                or extract_packing_from_text(user_text)
+            )
+        ):
+            return _dispatch_which_parties(
+                user_text, prior_spec=prior_spec, arguments=arguments
+            )
         inferred = infer_party_analytics_from_text(user_text)
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
         # Mix / ranking follow-up after a party list: inherit that list's filters
@@ -4809,45 +4750,32 @@ def _dispatch_tool(
                 },
                 user_text,
             )
-        # Context follow-up ("in this"): match the sales table numbers → volume
-        metric = (
-            arguments.get("metric")
-            or inferred.get("metric")
-            or ("volume" if prior_ctx else None)
-            or "ams"
-        )
-        # Growth/decline ranks: heuristics beat model "yoy" / bare "ams"
-        if _looks_party_growth_rank(user_text):
-            inferred_m = str(inferred.get("metric") or "").strip().lower()
-            arg_m = str(arguments.get("metric") or "").strip().lower()
-            t_low = (user_text or "").lower()
-            wants_vol_vs_ams = bool(
-                re.search(r"\bvs\s*ams\b|\bagainst ams\b|\brelative to ams\b", t_low)
-            )
-            if inferred_m in {"ams_growth", "yoy_ams", "yoy", "vs_ams"}:
-                metric = inferred_m
-            elif wants_vol_vs_ams:
-                metric = "yoy_ams"
-            elif re.search(r"\bams\b", t_low) or arg_m in {
-                "yoy",
-                "ams_growth",
-                "yoy_ams",
-                "ams",
-                "",
-            }:
-                # "decline in AMS" / model yoy → AMS current vs prior growth
-                metric = "ams_growth"
-            elif arg_m in {"ams_growth", "yoy_ams", "yoy"}:
-                metric = "ams_growth" if arg_m == "yoy" else arg_m
-            else:
-                metric = inferred_m or "ams_growth"
-        # Mix language always wins — never fall back to volume/AMS tops
+        # Model metric wins. Fill from vocabulary/inference only when omitted.
+        metric = arguments.get("metric")
+        if not metric:
+            metric = inferred.get("metric") or ("volume" if prior_ctx else None) or "ams"
+            if _looks_party_growth_rank(user_text):
+                inferred_m = str(inferred.get("metric") or "").strip().lower()
+                t_low = (user_text or "").lower()
+                wants_vol_vs_ams = bool(
+                    re.search(
+                        r"\bvs\s*ams\b|\bagainst ams\b|\brelative to ams\b",
+                        t_low,
+                    )
+                )
+                if wants_vol_vs_ams:
+                    metric = "yoy_ams"
+                elif inferred_m in {"ams_growth", "yoy_ams", "yoy", "vs_ams"}:
+                    metric = "ams_growth" if inferred_m == "yoy" else inferred_m
+                elif re.search(r"\b(ams|gains?|growth)\b", t_low):
+                    metric = "ams_growth"
+                else:
+                    metric = inferred_m or "ams_growth"
+        # Mix: prefer model packing_mix/product_mix; else infer from language
         if _looks_party_mix_query(user_text):
             inferred_m = str(inferred.get("metric") or "").strip().lower()
             arg_m = str(arguments.get("metric") or "").strip().lower()
-            if inferred_m in {"packing_mix", "product_mix"}:
-                metric = inferred_m
-            elif arg_m in {
+            if arg_m in {
                 "packing_mix",
                 "product_mix",
                 "product_breakdown",
@@ -4861,7 +4789,9 @@ def _dispatch_tool(
                     if arg_m in {"product_mix", "sku_mix", "sku_breakdown", "sku_wise"}
                     else "packing_mix"
                 )
-            else:
+            elif inferred_m in {"packing_mix", "product_mix"}:
+                metric = inferred_m
+            elif not arguments.get("metric"):
                 metric = "packing_mix"
         if (
             prior_ctx
@@ -4877,59 +4807,58 @@ def _dispatch_tool(
                 metric = "volume"
         per_party_mix = bool(
             arguments.get("per_party_mix")
-            or inferred.get("per_party_mix")
-            or _looks_per_party_mix(user_text)
+            if "per_party_mix" in arguments
+            else (
+                inferred.get("per_party_mix")
+                or _looks_per_party_mix(user_text)
+            )
         )
         # Per-party mix: show enough distributors (not default top-10 AMS)
         mix_limit = int(arguments.get("limit") or inferred.get("limit") or 10)
         if per_party_mix and not arguments.get("limit") and not inferred.get("limit"):
             mix_limit = 16
         named_bus = _extract_business_units_from_text(user_text)
-        # Prefer spoken BU; do not trust model-invented business_unit on growth asks
+        # Model BU wins; spoken BU fills when omitted; growth asks do not
+        # inherit sticky prior BU unless the model/text set one.
         bu_arg = (
-            named_bus[0]
-            if named_bus
-            else (
-                inferred.get("business_unit")
-                or (
-                    None
-                    if (
-                        _looks_national_scope(user_text)
-                        or _looks_party_growth_rank(user_text)
-                    )
-                    else (
-                        arguments.get("business_unit")
-                        or prior_ctx.get("business_unit")
-                    )
+            arguments.get("business_unit")
+            or (named_bus[0] if len(named_bus) == 1 else None)
+            or inferred.get("business_unit")
+            or (
+                None
+                if (
+                    _looks_national_scope(user_text)
+                    or _looks_party_growth_rank(user_text)
                 )
+                else prior_ctx.get("business_unit")
             )
         )
         city_arg = (
             None
             if _looks_national_scope(user_text)
             else (
-                extract_city_from_text(user_text)
+                arguments.get("city")
+                or extract_city_from_text(user_text)
                 or inferred.get("city")
                 or (
                     None
                     if _looks_party_growth_rank(user_text)
-                    else arguments.get("city")
+                    else prior_ctx.get("city")
                 )
-                or prior_ctx.get("city")
             )
         )
         zone_arg = (
             None
             if _looks_national_scope(user_text)
             else normalize_zone(
-                extract_zone_from_text(user_text)
+                arguments.get("zone")
+                or extract_zone_from_text(user_text)
                 or inferred.get("zone")
                 or (
                     None
                     if _looks_party_growth_rank(user_text)
-                    else arguments.get("zone")
+                    else prior_ctx.get("zone")
                 )
-                or prior_ctx.get("zone")
             )
         )
         return analyze_parties(
@@ -4968,18 +4897,22 @@ def _dispatch_tool(
             group_by=arguments.get("group_by") or inferred.get("group_by") or "party",
             mix_dimension=arguments.get("mix_dimension")
             or inferred.get("mix_dimension"),
-            sort=(
-                inferred.get("sort")
-                if _looks_party_growth_rank(user_text) and inferred.get("sort")
-                else (arguments.get("sort") or inferred.get("sort") or "desc")
+            sort=_resolve_party_sort(
+                user_text,
+                arguments=arguments,
+                inferred=inferred,
             ),
             limit=mix_limit,
             per_party_mix=per_party_mix,
-            grown_only=bool(
-                arguments.get("grown_only") or inferred.get("grown_only")
+            grown_only=_resolve_party_grown_only(
+                user_text,
+                arguments=arguments,
+                inferred=inferred,
             ),
-            declined_only=bool(
-                arguments.get("declined_only") or inferred.get("declined_only")
+            declined_only=_resolve_party_declined_only(
+                user_text,
+                arguments=arguments,
+                inferred=inferred,
             ),
             active_only=bool(
                 arguments.get("active_only")
@@ -5487,6 +5420,59 @@ def suggest_preferred_tool(
     return "required"
 
 
+def _resolve_party_sort(
+    user_text: str,
+    *,
+    arguments: dict[str, Any],
+    inferred: dict[str, Any],
+) -> str:
+    """Prefer the model's sort; fill from vocabulary only when omitted."""
+    arg = str(arguments.get("sort") or "").strip().lower()
+    if arg in {"asc", "desc"}:
+        return arg
+    inf = str(inferred.get("sort") or "").strip().lower()
+    if inf in {"asc", "desc"}:
+        return inf
+    t = (user_text or "").lower()
+    if re.search(
+        r"\b(least|lowest|smallest|bottom|worst|fewest|declined?|dropped)\b",
+        t,
+    ):
+        return "asc"
+    return "desc"
+
+
+def _resolve_party_grown_only(
+    user_text: str,
+    *,
+    arguments: dict[str, Any],
+    inferred: dict[str, Any],
+) -> bool:
+    """Model wins when it set grown_only; never invent for 'least gains'."""
+    if "grown_only" in arguments:
+        return bool(arguments.get("grown_only"))
+    if inferred.get("grown_only") is False:
+        return False
+    if inferred.get("grown_only") is True:
+        # Guard: least/lowest must not become grown-only via stale heuristics
+        t = (user_text or "").lower()
+        if re.search(r"\b(least|lowest|smallest|bottom|worst|fewest)\b", t):
+            return False
+        return True
+    return False
+
+
+def _resolve_party_declined_only(
+    user_text: str,
+    *,
+    arguments: dict[str, Any],
+    inferred: dict[str, Any],
+) -> bool:
+    if "declined_only" in arguments:
+        return bool(arguments.get("declined_only"))
+    return bool(inferred.get("declined_only"))
+
+
 def resolve_forced_tool(
     user_text: str,
     *,
@@ -5494,11 +5480,10 @@ def resolve_forced_tool(
     prior_party_spec: dict[str, Any] | None = None,
     explicit_followup: bool | None = None,
 ) -> str:
-    """Return the forced OpenAI tool_choice for round 0 (v0.4.0 slim router).
+    """AI-first tool_choice: require a tool; model picks which one.
 
-    Force only high-confidence cases; otherwise require a tool and let the model
-    choose. Values: ``lookup_party``, ``list_clients``, ``analyze_parties``,
-    ``query_sales``, ``required``, or ``auto``.
+    Only pin a named tool for UI table mutations on Reply (remove/regroup/…)
+    where the user is editing the prior grid, not asking a new question.
     """
     text = user_text or ""
     if not _looks_factual(text):
@@ -5510,68 +5495,8 @@ def resolve_forced_tool(
         else _is_explicit_followup(text)
     )
     has_table_prior = bool(prior_table_spec or prior_party_spec)
-    has_party_prior = bool(prior_party_spec)
 
-    # 1) Named party sales / who-is lookup — high confidence, keep forced
-    if _looks_named_party_sales(text) or _looks_party_lookup(text):
-        return "lookup_party"
-
-    # 2) Period-only follow-up on a prior party/distributor list
-    if has_party_prior and _looks_period_only_followup(text):
-        kind = (prior_party_spec or {}).get("kind") or "list_clients"
-        return "analyze_parties" if kind == "analyze_parties" else "list_clients"
-
-    # 2b) Channels grew/declined → client_type Volume + AMS + % (even on Reply)
-    if _looks_channel_growth_ask(text):
-        return "query_sales"
-
-    # 2b2) Same-date price differences across parties
-    if _looks_price_dispersion_ask(text):
-        return "advanced_query"
-
-    # 2b2b) Rate / Price Fetch / cost factor / packing cost / factor breakdown
-    if _looks_price_query(text):
-        return "query_price"
-
-    # 2b3) Which distributors grew / vs AMS / YoY — before advanced filter_entities
-    if _looks_party_growth_rank(text):
-        return "analyze_parties"
-
-    # 2b4) Brand / city / channel performance ("how are … sales/performance")
-    # before which-parties / advanced so Eva/Maan/distributor asks stay on sales.
-    if _looks_scoped_performance_sales(text):
-        return "query_sales"
-
-    # 2c) High-confidence advanced modes (city/client compares, etc.)
-    if looks_advanced(text):
-        adv = infer_advanced_from_text(text)
-        mode = str(adv.get("mode") or "")
-        if mode in {
-            "compare_cities",
-            "compare_client_types",
-            "dumping",
-            "price_dispersion",
-            "expected_month",
-            "filter_entities",
-            "dimension_growth",
-        }:
-            return "advanced_query"
-        return "required"
-
-    # 2d) which/what distributors|Imtiaz … (selling BU / most VTF / active)
-    if _looks_which_parties_ask(text) or _looks_sold_to_parties(text):
-        if (
-            _looks_party_rank_ask(text)
-            or extract_oil_type_from_text(text)
-            or extract_packing_from_text(text)
-        ):
-            return "analyze_parties"
-        # Selling a BU after a month table → party × month sales matrix
-        if _wants_party_month_matrix(text, prior_table_spec):
-            return "query_sales"
-        return "list_clients"
-
-    # 3) Reply / pinned-table follow-ups that must stay on the sales table
+    # Short mutations on a prior sales grid — keep the matrix tool
     table_ops = (
         _looks_include_check(text)
         or _looks_combine_tables(text)
@@ -5582,41 +5507,14 @@ def resolve_forced_tool(
         or _looks_row_drilldown(text)
         or _looks_sales_yoy_compare(text)
     )
-    if (has_table_prior or is_followup) and table_ops:
+    if (
+        (has_table_prior or is_followup)
+        and table_ops
+        and not _looks_complete_sales_ask(text)
+    ):
         return "query_sales"
 
-    # 4) Individual distributor breakdown — month prior keeps the same grid
-    if (has_table_prior or is_followup) and _looks_party_breakdown(text):
-        if _wants_party_month_matrix(text, prior_table_spec):
-            return "query_sales"
-        return "list_clients"
-
-    # 5) Reply follow-up: only force sales when it still looks like a matrix ask.
-    # Ad-hoc party / advanced questions must not be pinned to query_sales.
-    if is_followup and has_table_prior and not has_party_prior:
-        if (
-            looks_advanced(text)
-            or _looks_party_mix_query(text)
-            or _looks_party_analytics(text)
-            or _looks_client_list(text)
-            or _looks_which_parties_ask(text)
-            or _looks_sold_to_parties(text)
-            or _looks_channel_growth_ask(text)
-            or _looks_price_query(text)
-        ):
-            if _looks_price_query(text):
-                return "query_price"
-            return "required"
-        if (
-            _looks_sales_matrix(text)
-            or _looks_analytical(text)
-            or _wants_scoped_month_ams(text)
-            or _wants_named_month_trend(text)
-        ):
-            return "query_sales"
-        return "required"
-
-    # Default factual ask: require a tool; model chooses which one
+    # Default: model chooses among available tools
     return "required"
 
 
@@ -5662,9 +5560,10 @@ def chat_completion(
         if on_status:
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
-        # v0.4.0: require a tool on factual asks; force a name only for
-        # named-party / Reply follow-ups (see resolve_forced_tool).
+        # AI-first: require a tool on factual asks; pin a name only for
+        # short Reply table mutations (see resolve_forced_tool).
         tool_choice: Any = "auto"
+        soft_tool_hint: str | None = None
         if round_i == 0 and _looks_factual(last_user):
             prior_party_guess = forced_prior_party_spec or _last_party_spec(working)
             prior_table_guess = forced_prior_spec or _last_table_spec(working)
@@ -5676,6 +5575,14 @@ def chat_completion(
             )
             if forced_name == "required":
                 tool_choice = "required"
+                preferred = suggest_preferred_tool(
+                    last_user,
+                    prior_table_spec=prior_table_guess,
+                    prior_party_spec=prior_party_guess,
+                    explicit_followup=_is_explicit_followup(last_user),
+                )
+                if preferred not in {"required", "auto", ""}:
+                    soft_tool_hint = preferred
             elif forced_name == "auto":
                 tool_choice = "auto"
             else:
@@ -5685,6 +5592,18 @@ def chat_completion(
                 }
 
         api_messages = _working_messages_for_api(working)
+        if soft_tool_hint:
+            api_messages = [
+                *api_messages,
+                {
+                    "role": "system",
+                    "content": (
+                        f"Soft hint (not binding): a good default tool for this "
+                        f"ask is `{soft_tool_hint}`. Choose freely if another "
+                        "tool or different arguments fit the user's wording better."
+                    ),
+                },
+            ]
         try:
             response = client.chat.completions.create(
                 model=model,

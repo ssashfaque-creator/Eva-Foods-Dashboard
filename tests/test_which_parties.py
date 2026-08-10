@@ -95,7 +95,7 @@ def test_selling_maan_inherits_prior_and_filters_bu() -> None:
             q = "which distributor is selling maan"
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "query_sales"
+                == "required"
             )
             assert suggest_preferred_tool(q, prior_table_spec=prior) == "query_sales"
             out = _dispatch_tool(
@@ -164,13 +164,14 @@ def test_active_distributors_in_lahore() -> None:
                 "column_dimension": "month",
             }
             q = "what distributors are active in Lahore"
-            # Must not be forced back onto the Karachi sales matrix on Reply
+            # Must not be forced onto the Karachi sales matrix on Reply
             assert (
                 resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True)
-                == "list_clients"
+                == "required"
             )
+            assert suggest_preferred_tool(q, prior_table_spec=prior) == "list_clients"
             out = _dispatch_tool(
-                "query_sales", {}, user_text=q, prior_spec=prior
+                "list_clients", {}, user_text=q, prior_spec=prior
             )
             assert out.get("mode") == "list_clients"
             assert out.get("filters", {}).get("city") == "Lahore"

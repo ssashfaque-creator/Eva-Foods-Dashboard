@@ -250,8 +250,14 @@ def test_cost_factor_and_packing_cost_asks() -> None:
                 "what's the packing cost for Eva Canola Oil (StandUpPouch)"
             )
             assert _looks_factor_only_ask("show factor breakdown")
-            assert resolve_forced_tool("what's the cost factor?") == "query_price"
+            assert resolve_forced_tool("what's the cost factor?") == "required"
             assert resolve_forced_tool(
+                "packing cost for standup canola distributors"
+            ) == "required"
+            from eva_dashboard.chatbot import suggest_preferred_tool
+
+            assert suggest_preferred_tool("what's the cost factor?") == "query_price"
+            assert suggest_preferred_tool(
                 "packing cost for standup canola distributors"
             ) == "query_price"
 

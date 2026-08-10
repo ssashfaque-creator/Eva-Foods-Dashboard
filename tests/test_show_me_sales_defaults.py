@@ -6,7 +6,11 @@ import os
 import tempfile
 from pathlib import Path
 
-from eva_dashboard.chatbot import _dispatch_tool, resolve_forced_tool
+from eva_dashboard.chatbot import (
+    _dispatch_tool,
+    resolve_forced_tool,
+    suggest_preferred_tool,
+)
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.sales_query import AMS_3_COL, AMS_6_COL
 
@@ -215,7 +219,8 @@ def test_show_me_party_client_type_city_default_months_ams() -> None:
             party = _dispatch_tool(
                 "lookup_party", {}, user_text="Show me Alpha Dist sales"
             )
-            assert resolve_forced_tool("Show me Alpha Dist sales") == "lookup_party"
+            assert resolve_forced_tool("Show me Alpha Dist sales") == "required"
+            assert suggest_preferred_tool("Show me Alpha Dist sales") == "lookup_party"
             assert party.get("mode") == "party_sales"
             assert party.get("filters", {}).get("party") == "Alpha Dist"
             _assert_month_ams(party)
@@ -281,20 +286,21 @@ def test_show_me_ignores_stale_prior_and_thin_args() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_wrong_tool_redirects_scoped_sales_to_month_ams() -> None:
-    """Under required tool_choice, wrong tool names still get the sales matrix."""
+def test_scoped_sales_via_query_sales_month_ams() -> None:
+    """AI-first: preferred query_sales builds the months + AMS matrix."""
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
         try:
             _seed()
-            for tool in ("list_clients", "analyze_parties", "advanced_query"):
-                out = _dispatch_tool(tool, {}, user_text="Show me distributor sales")
-                assert out.get("filters", {}).get("client_type") == "Eva Distributors", tool
-                _assert_month_ams(out)
+            out = _dispatch_tool(
+                "query_sales", {}, user_text="Show me distributor sales"
+            )
+            assert out.get("filters", {}).get("client_type") == "Eva Distributors"
+            _assert_month_ams(out)
 
             imtiaz = _dispatch_tool(
-                "lookup_party", {}, user_text="Show me Imtiaz sales"
+                "query_sales", {}, user_text="Show me Imtiaz sales"
             )
             assert imtiaz.get("filters", {}).get("client_type") == "Imtiaz Store"
             _assert_month_ams(imtiaz)
@@ -452,11 +458,11 @@ def test_sold_to_followup_filters_business_unit() -> None:
                 "column_dimension": "month",
                 "business_units": [],
             }
-            assert (
-                resolve_forced_tool(q, prior_table_spec=prior) == "query_sales"
-            )
+            assert resolve_forced_tool(q, prior_table_spec=prior) == "required"
+            assert suggest_preferred_tool(q, prior_table_spec=prior) == "query_sales"
+            # Prefer list_clients / which-parties path for sold-to identity+matrix
             out = _dispatch_tool(
-                "query_sales",
+                "list_clients",
                 {},
                 user_text=q,
                 prior_spec=prior,

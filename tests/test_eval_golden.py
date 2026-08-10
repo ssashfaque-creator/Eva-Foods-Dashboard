@@ -1,4 +1,4 @@
-"""Offline golden eval for v0.4.0 slim forced routing + preferred-tool hints."""
+"""Offline golden eval for AI-first routing: required + preferred-tool hints."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _load_cases() -> list[dict]:
     return cases
 
 
-def test_golden_forced_tool_v040() -> None:
+def test_golden_forced_tool_ai_first() -> None:
     failures: list[str] = []
     for case in _load_cases():
         q = case["q"]
@@ -56,28 +56,21 @@ def test_golden_preferred_tool_hint() -> None:
     assert not failures, "Preferred-tool mismatches:\n" + "\n".join(failures)
 
 
-def test_v040_forces_only_high_confidence() -> None:
-    """Force high-confidence tools; leave ambiguous ranking asks as required."""
-    # Scoped city/channel/brand sales are high-confidence → query_sales
-    assert resolve_forced_tool("Show me Lahore sales") == "query_sales"
-    assert resolve_forced_tool("how are Maan sales in Karachi") == "query_sales"
-    assert resolve_forced_tool("how are distributor sales in karachi") == (
-        "query_sales"
-    )
-    # Ambiguous AMS rankings stay unforced (model chooses analyze_parties)
+def test_ai_first_forces_only_reply_mutations() -> None:
+    """New asks are required; only short Reply mutations pin query_sales."""
+    assert resolve_forced_tool("Show me Lahore sales") == "required"
+    assert resolve_forced_tool("how are Maan sales in Karachi") == "required"
+    assert resolve_forced_tool("how are distributor sales in karachi") == "required"
     assert resolve_forced_tool("Top 10 distributors by AMS last month") == "required"
-    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == (
-        "advanced_query"
-    )
-    assert resolve_forced_tool("what Food Panda are active") == "list_clients"
-    assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == (
-        "query_price"
-    )
-    # High-confidence party / named-party asks stay forced
-    assert resolve_forced_tool("Who are the distributors in Lahore?") == "list_clients"
-    assert resolve_forced_tool("which distributor is selling maan") == "list_clients"
-    assert resolve_forced_tool("Show me Alpha Dist sales") == "lookup_party"
-    assert resolve_forced_tool("Who is Al Bari?") == "lookup_party"
+    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == "required"
+    assert resolve_forced_tool("what Food Panda are active") == "required"
+    assert resolve_forced_tool("Price Fetch for Eva Consumer last month") == "required"
+    assert resolve_forced_tool("Who are the distributors in Lahore?") == "required"
+    assert resolve_forced_tool("which distributor is selling maan") == "required"
+    assert resolve_forced_tool("Show me Alpha Dist sales") == "required"
+    assert resolve_forced_tool("Who is Al Bari?") == "required"
+    assert suggest_preferred_tool("Show me Lahore sales") == "query_sales"
+    assert suggest_preferred_tool("Show me Alpha Dist sales") == "lookup_party"
     assert (
         resolve_forced_tool(
             "group by city",

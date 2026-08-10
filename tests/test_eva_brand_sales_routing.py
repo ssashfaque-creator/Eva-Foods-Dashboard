@@ -64,7 +64,7 @@ def test_eva_sales_not_named_party() -> None:
     q = "how are Eva sales in karachi"
     assert _extract_named_party_query(q) is None
     assert not _looks_named_party_sales(q)
-    assert resolve_forced_tool(q) == "query_sales"
+    assert resolve_forced_tool(q) == "required"
     assert suggest_preferred_tool(q) == "query_sales"
     bus = _extract_business_units_from_text(q)
     assert "Eva Consumer" in bus
@@ -78,11 +78,10 @@ def test_eva_sales_karachi_dispatches_sales_not_lookup() -> None:
         try:
             _seed()
             q = "how are Eva sales in Karachi"
-            # Even if the model wrongly picks lookup_party, dispatch redirects
-            out = _dispatch_tool("lookup_party", {}, user_text=q)
+            # AI-first: model should pick query_sales (taught via vocab + soft hint)
+            out = _dispatch_tool("query_sales", {}, user_text=q)
             assert out["ok"] is True
             assert out.get("mode") in {"analytical", "matrix", "trend"}
-            assert "lookup" not in str(out.get("mode") or "").lower()
             filters = out.get("filters") or {}
             assert filters.get("city") == "Karachi"
             # Eva brand → both Eva BUs (Maan not in the filter list)
@@ -111,7 +110,7 @@ def test_maan_sales_not_named_party() -> None:
     q = "how are Maan sales in karachi"
     assert _extract_named_party_query(q) is None
     assert not _looks_named_party_sales(q)
-    assert resolve_forced_tool(q) == "query_sales"
+    assert resolve_forced_tool(q) == "required"
     assert suggest_preferred_tool(q) == "query_sales"
     bus = _extract_business_units_from_text(q)
     assert set(bus) == {"Maan Consumer", "Maan Bulk"}
@@ -124,7 +123,7 @@ def test_maan_sales_karachi_dispatches_sales_not_lookup() -> None:
         try:
             _seed()
             q = "how are Maan sales in Karachi"
-            out = _dispatch_tool("lookup_party", {}, user_text=q)
+            out = _dispatch_tool("query_sales", {}, user_text=q)
             assert out["ok"] is True
             assert out.get("mode") in {"analytical", "matrix", "trend"}
             filters = out.get("filters") or {}
@@ -149,16 +148,16 @@ def test_distributor_sales_not_ams_ranking() -> None:
         try:
             _seed()
             q = "how are distributor sales in karachi"
-            assert resolve_forced_tool(q) == "query_sales"
-            for tool in ("query_sales", "analyze_parties"):
-                out = _dispatch_tool(tool, {}, user_text=q)
-                assert out["ok"] is True
-                assert out.get("mode") in {"analytical", "matrix", "trend"}
-                assert (out.get("filters") or {}).get("client_type") == (
-                    "Eva Distributors"
-                )
-                assert (out.get("filters") or {}).get("city") == "Karachi"
-                assert "Top parties by AMS" not in (out.get("answer_markdown") or "")
+            assert resolve_forced_tool(q) == "required"
+            assert suggest_preferred_tool(q) == "query_sales"
+            out = _dispatch_tool("query_sales", {}, user_text=q)
+            assert out["ok"] is True
+            assert out.get("mode") in {"analytical", "matrix", "trend"}
+            assert (out.get("filters") or {}).get("client_type") == (
+                "Eva Distributors"
+            )
+            assert (out.get("filters") or {}).get("city") == "Karachi"
+            assert "Top parties by AMS" not in (out.get("answer_markdown") or "")
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

@@ -90,8 +90,12 @@ def _seed_exec() -> None:
         conn.commit()
 
 
-def _run(user_text: str, prior: dict | None = None, tool: str = "query_sales") -> dict:
-    return _dispatch_tool(tool, {}, user_text=user_text, prior_spec=prior)
+def _run(user_text: str, prior: dict | None = None, tool: str | None = None) -> dict:
+    # AI-first: use the soft preferred tool (what the model is taught to pick)
+    chosen = tool or suggest_preferred_tool(user_text, prior_table_spec=prior)
+    if chosen in {"required", "auto", ""}:
+        chosen = "query_sales"
+    return _dispatch_tool(chosen, {}, user_text=user_text, prior_spec=prior)
 
 
 def _md(out: dict) -> str:
@@ -434,5 +438,5 @@ def test_executive_routing_hints() -> None:
         if got_force not in {"required", preferred}:
             failures.append(f"forced {got_force!r} not in required|{preferred}: {q}")
         if preferred == "query_sales" and _looks_channel_growth_ask(q):
-            assert got_force == "query_sales"
+            assert got_force == "required"
     assert not failures, "Routing hint failures:\n" + "\n".join(failures)

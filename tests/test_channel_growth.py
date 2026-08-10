@@ -78,9 +78,9 @@ def test_channel_language_routing() -> None:
         "period_phrase": "July 2026",
         "row_dimension": "packing_category",
     }
-    # Reply follow-up must NOT pin to a packing re-query forever
+    # Complete channel-growth ask is not a short Reply mutation → required
     assert resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True) == (
-        "query_sales"
+        "required"
     )
     inf = infer_advanced_from_text(q)
     assert inf.get("entity") == "client_type"
