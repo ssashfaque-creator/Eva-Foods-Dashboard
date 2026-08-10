@@ -245,20 +245,19 @@ def system_prompt() -> str:
 
 {live}
 
-SPEED & TOOL RULES (v0.4.30 AI-first):
-1. MUST call a tool before any numbers. Prefer ONE primary tool. Never invent figures
-   or cite an OpenAI knowledge cutoff.
-2. YOU choose the tool and its arguments. Guides below teach structure and vocabulary
-   — they are not hard scripts. Match least/lowest → sort=asc; biggest/top → sort=desc.
-3. Read-only. Paste tool `answer_markdown` verbatim, then ### Analysis (2–4 bullets
-   that answer the user's actual question).
+SPEED & TOOL RULES (v0.4.31 plan→execute):
+1. For factual data asks, call ``plan_query`` FIRST with a complete QuerySpec.
+   The server executes it and returns tables. Never invent figures or cite a cutoff.
+2. Read PRIOR_QUERY_CONTEXT when present. Use base='prior' + clear[] for follow-ups
+   (e.g. other cities → clear city, group_by=city, keep metric). Fresh ask → base='none'.
+3. After tables arrive, paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
 4. Joins: sales.party↔clients.client; sales.product↔category.product
    (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
 
 === DATA MODEL ===
 sales lines join clients on party=client; join category on product for BU/oil/packing.
 Filters live on clients (city_filter, type) and category (category_1/2, packing).
-Tools below return deterministic tables — you pick which tool and args.
+plan_query decides WHAT to fetch; the executor builds deterministic tables.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -639,7 +638,10 @@ def prepare_report_snapshot(report_date: str) -> dict[str, Any]:
     }
 
 
+from eva_dashboard.query_spec import PLAN_QUERY_TOOL
+
 TOOLS: list[dict[str, Any]] = [
+    PLAN_QUERY_TOOL,
     {
         "type": "function",
         "function": {
@@ -5600,12 +5602,51 @@ def chat_completion(
 
     client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_S)
 
+    from eva_dashboard.query_executor import execute_query_spec, heuristic_plan_query
+    from eva_dashboard.query_spec import (
+        prior_context_for_prompt,
+        prior_context_payload,
+    )
+
     # Drop any prior system message and inject a fresh live briefing + catalog.
     history = [m for m in messages if m.get("role") != "system"]
+    prior_table_guess = forced_prior_spec
+    prior_party_guess = forced_prior_party_spec
+    prior_price_guess = forced_prior_price_spec
+    # Resolve priors from history when Reply did not pin them
+    # (done after working is built for non-forced case)
+
     working: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt()},
         *history,
     ]
+    if prior_table_guess is None:
+        prior_table_guess = _last_table_spec(working)
+    if prior_party_guess is None:
+        prior_party_guess = _last_party_spec(working)
+    if prior_price_guess is None:
+        prior_price_guess = _last_price_spec(working)
+
+    prior_ctx = prior_context_payload(
+        table_spec=prior_table_guess,
+        party_spec=prior_party_guess,
+        price_spec=prior_price_guess,
+    )
+    # Prefer party context when the last answer was a ranking (Reply / follow-up)
+    if forced_prior_party_spec:
+        prior_ctx = prior_context_payload(party_spec=forced_prior_party_spec)
+    elif forced_prior_spec:
+        prior_ctx = prior_context_payload(table_spec=forced_prior_spec)
+    elif forced_prior_price_spec:
+        prior_ctx = prior_context_payload(price_spec=forced_prior_price_spec)
+
+    working.insert(
+        1,
+        {
+            "role": "system",
+            "content": prior_context_for_prompt(prior_ctx),
+        },
+    )
     export_snapshot_acc: dict[str, Any] | None = None
 
     last_user = ""
@@ -5618,50 +5659,15 @@ def chat_completion(
         if on_status:
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
-        # AI-first: require a tool on factual asks; pin a name only for
-        # short Reply table mutations (see resolve_forced_tool).
+        # Plan→execute: factual asks must call plan_query with a QuerySpec.
         tool_choice: Any = "auto"
-        soft_tool_hint: str | None = None
         if round_i == 0 and _looks_factual(last_user):
-            prior_party_guess = forced_prior_party_spec or _last_party_spec(working)
-            prior_table_guess = forced_prior_spec or _last_table_spec(working)
-            forced_name = resolve_forced_tool(
-                last_user,
-                prior_table_spec=prior_table_guess,
-                prior_party_spec=prior_party_guess,
-                explicit_followup=_is_explicit_followup(last_user),
-            )
-            if forced_name == "required":
-                tool_choice = "required"
-                preferred = suggest_preferred_tool(
-                    last_user,
-                    prior_table_spec=prior_table_guess,
-                    prior_party_spec=prior_party_guess,
-                    explicit_followup=_is_explicit_followup(last_user),
-                )
-                if preferred not in {"required", "auto", ""}:
-                    soft_tool_hint = preferred
-            elif forced_name == "auto":
-                tool_choice = "auto"
-            else:
-                tool_choice = {
-                    "type": "function",
-                    "function": {"name": forced_name},
-                }
+            tool_choice = {
+                "type": "function",
+                "function": {"name": "plan_query"},
+            }
 
         api_messages = _working_messages_for_api(working)
-        if soft_tool_hint:
-            api_messages = [
-                *api_messages,
-                {
-                    "role": "system",
-                    "content": (
-                        f"Soft hint (not binding): a good default tool for this "
-                        f"ask is `{soft_tool_hint}`. Choose freely if another "
-                        "tool or different arguments fit the user's wording better."
-                    ),
-                },
-            ]
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -5748,23 +5754,66 @@ def chat_completion(
         for tc in tool_calls:
             name = tc.function.name
             if on_status:
-                on_status(f"Querying database: {name}…")
+                on_status(
+                    "Planning query…"
+                    if name == "plan_query"
+                    else f"Querying database: {name}…"
+                )
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
             try:
-                prior = forced_prior_spec or _last_table_spec(working)
-                prior_price = forced_prior_price_spec or _last_price_spec(working)
-                prior_party = forced_prior_party_spec or _last_party_spec(working)
-                result = _dispatch_tool(
-                    name,
-                    args,
-                    user_text=last_user,
-                    prior_spec=prior,
-                    prior_price_spec=prior_price,
-                    prior_party_spec=prior_party,
-                )
+                if name == "plan_query":
+                    if on_status:
+                        on_status("Running planned query…")
+                    # Empty / invalid plan → offline heuristic planner
+                    if not args or not args.get("intent"):
+                        args = heuristic_plan_query(
+                            last_user, prior=prior_ctx
+                        )
+                    result = execute_query_spec(
+                        args,
+                        prior=prior_ctx,
+                        user_text=last_user,
+                    )
+                    if result.get("ok") is False and round_i == 0:
+                        # One recovery with heuristic plan
+                        args = heuristic_plan_query(
+                            last_user, prior=prior_ctx
+                        )
+                        result = execute_query_spec(
+                            args,
+                            prior=prior_ctx,
+                            user_text=last_user,
+                        )
+                    # Surface as the executed intent for analysis routing
+                    name = {
+                        "sales_matrix": "query_sales",
+                        "sales_trend": "query_sales",
+                        "sales_analytical": "query_sales",
+                        "party_list": "list_clients",
+                        "party_rank": "analyze_parties",
+                        "party_lookup": "lookup_party",
+                        "price": "query_price",
+                        "advanced": "advanced_query",
+                        "overview": "get_sales_overview",
+                    }.get(
+                        str((result.get("query_spec") or {}).get("intent") or ""),
+                        "query_sales",
+                    )
+                else:
+                    prior = forced_prior_spec or _last_table_spec(working)
+                    prior_price = forced_prior_price_spec or _last_price_spec(working)
+                    prior_party = forced_prior_party_spec or _last_party_spec(working)
+                    result = _dispatch_tool(
+                        name,
+                        args,
+                        user_text=last_user,
+                        prior_spec=prior,
+                        prior_price_spec=prior_price,
+                        prior_party_spec=prior_party,
+                    )
             except Exception as exc:  # noqa: BLE001
                 result = {"ok": False, "error": str(exc)}
 
@@ -5776,6 +5825,7 @@ def chat_completion(
                     "query_sales",
                     "query_price",
                     "lookup_party",
+                    "plan_query",
                     "list_clients",
                     "analyze_parties",
                     "advanced_query",

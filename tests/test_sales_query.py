@@ -417,10 +417,11 @@ def test_routing_packing_breakdown_and_silent_and_drill() -> None:
             from eva_dashboard.chatbot import system_prompt, TOOLS
 
             text = system_prompt()
-            assert "query_sales" in text
-            assert "analytical" in text.lower()
+            assert "plan_query" in text or "query_sales" in text
+            assert "analytical" in text.lower() or "party_rank" in text
             names = [t["function"]["name"] for t in TOOLS]
-            assert names[0] == "query_sales"
+            assert names[0] == "plan_query"
+            assert "query_sales" in names
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

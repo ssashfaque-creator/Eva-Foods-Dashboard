@@ -116,4 +116,4 @@ def test_system_prompt_teaches_vocab_and_tools() -> None:
     assert "TOOL GUIDE" in text
     assert "analyze_parties" in text
     assert "least / lowest" in text.lower() or "sort=asc" in text
-    assert "AI-first" in text
+    assert "plan" in text.lower() or "AI-first" in text

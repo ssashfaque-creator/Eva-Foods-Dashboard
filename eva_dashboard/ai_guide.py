@@ -90,37 +90,24 @@ def vocabulary_for_prompt() -> str:
 
 def tool_guide_for_prompt() -> str:
     return """
-TOOLS — you choose which to call and with which arguments:
+PRIMARY TOOL — plan_query (use this for almost every factual ask):
+Emit a QuerySpec JSON. The server executes it. Key fields:
+  intent: sales_matrix|sales_trend|sales_analytical|party_rank|party_list|
+          party_lookup|price|advanced|overview
+  base: none (fresh) | prior (follow-up — start from PRIOR_QUERY_CONTEXT)
+  clear: filter keys to drop from prior (e.g. [\"city\"] for other cities)
+  filters / grain / metric / sort / grown_only / declined_only / title_mode
 
-1) query_sales — volume pivots / month grids / channel×month / BU×packing.
-   Set filters (city, zone, client_type, business_unit(s), oil_type, packing),
-   row_dimension, columns (client_type|city|month), months_back, mode
-   (matrix|analytical|trend). Use for \"show sales\", channel-wise, city sales,
-   brand sales, include/remove/regroup follow-ups on a prior table.
+Examples:
+- \"least AMS gains\" → party_rank, metric=ams_growth, sort=asc,
+  grown_only=false, title_mode=smallest_gains
+- \"growth vs other cities\" (after Lahore party growth) → base=prior,
+  clear=[\"city\"], grain.group_by=city, metric=ams_growth, title_mode=by_growth
+- \"how are Eva sales in Karachi\" → sales_analytical,
+  business_units=[Eva Consumer, Eva Bulk], city=Karachi
+- \"who are distributors in Lahore\" → party_list
+- named store/distributor sales → party_lookup
 
-2) analyze_parties — party/city/zone rankings and AMS/growth.
-   Set metric (ams, ams_growth, yoy, vs_ams, packing_mix, …), group_by
-   (party|city|zone), sort (asc|desc), grown_only / declined_only only when
-   asked. For \"growth vs other cities\": metric=ams_growth, group_by=city,
-   omit city. Keep client_type from prior. Use for least/biggest gains,
-   city leagues, decline in AMS, product mix per distributor.
-
-3) list_clients — who are the parties in a channel/city/BU (identity list).
-   Not for rankings or growth tables.
-
-4) lookup_party — one named party profile / that party's sales.
-   Use when a real distributor/store name is the subject (not \"Eva\" / \"Maan\" brands).
-
-5) query_price — average rate, Price Fetch, cost factor, packing cost.
-
-6) advanced_query — multi-city/client compares, dumping (volume excess),
-   same-date price differences (mode=price_dispersion), expected month,
-   filter entities (sales > N MT, declined > N%).
-
-7) get_sales_overview / report_snapshot — what data is loaded / daily briefing.
-
-8) resolve_product_language → then product_sales for a single spoken SKU.
-
-YOU decide tool + arguments from the user's intent. Prefer one tool call.
-Numbers come only from tool tables — paste answer_markdown verbatim, then Analysis.
+Legacy tools (query_sales, analyze_parties, …) still exist but prefer plan_query.
+Numbers come only from executed tables — paste answer_markdown, then Analysis.
 """.strip()
