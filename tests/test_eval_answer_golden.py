@@ -97,6 +97,12 @@ def _check_case(case: dict[str, Any]) -> list[str]:
     if expect.get("ok") is True and not out.get("ok"):
         failures.append(f"{cid}: expected ok, got {out.get('error') or out}")
         return failures
+    if expect.get("ok") is False and out.get("ok"):
+        failures.append(f"{cid}: expected ok=False, got success")
+
+    if expect.get("has_plan_errors"):
+        if not out.get("plan_errors"):
+            failures.append(f"{cid}: expected plan_errors, got none")
 
     if "mode" in expect and out.get("mode") != expect["mode"]:
         failures.append(f"{cid}: mode {out.get('mode')!r} != {expect['mode']!r}")

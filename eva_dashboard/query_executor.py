@@ -1153,4 +1153,8 @@ def execute_query_spec(
             price_spec=result.get("price_spec"),
             result_mode=str(result.get("mode") or filled_spec.get("intent") or ""),
         )
+        # Phase 4: verify / clarify / multi-hop investigation hints
+        from eva_dashboard.agent_loop import apply_verification
+
+        result = apply_verification(result, user_text=user_text)
     return result

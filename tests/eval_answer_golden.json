@@ -124,6 +124,22 @@
         "business_units_include": ["Eva Consumer"],
         "matrix_total_mt_min": 27.0
       }
+    },
+    {
+      "id": "empty-unknown-party-retries",
+      "user_text": "Completely Unknown Party XYZ sales in July",
+      "plan": {
+        "row_dimensions": ["business_unit"],
+        "metrics": ["volume", "ams"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "none",
+        "filters": {"party": "Completely Unknown Party XYZ"}
+      },
+      "expect": {
+        "ok": false,
+        "has_plan_errors": true
+      }
     }
   ]
 }

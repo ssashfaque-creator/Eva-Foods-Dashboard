@@ -151,6 +151,12 @@ Server executes BLINDLY. plan_errors → fix and call plan_query again.
 Customer follow-ups (price / % AMS / last purchase): context_handling='prior',
 clear_filters=[], keep filters.party from PRIOR_QUERY_CONTEXT.party_scope.
 
+INVESTIGATION (Phase 4):
+- Empty result plan_errors → widen period / clear_filters / fix entities, retry.
+- Clarify markdown (multiple customers) → ask user to pick; do not invent.
+- INVESTIGATION hint on a tool result → call plan_query again before Analysis.
+- Party vs channel compare (al shaheer vs Imtiaz) → two plan_query calls.
+
 Required: row_dimensions, metrics, period_type, context_handling
 Optional: column_dimensions, filters, months_back, clear_filters, operation,
 sort_order, business_units, extracted_entities, party_query, price_flags.

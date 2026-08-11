@@ -55,7 +55,7 @@ from eva_dashboard.seasonality import expected_month_close
 
 DEFAULT_MODEL = "gpt-4o-mini"
 MAX_SQL_ROWS = 200
-MAX_TOOL_ROUNDS = 4  # Prefer one structured query_sales call over many SQL rounds
+MAX_TOOL_ROUNDS = 6  # Plan → verify → optional investigation follow-up plans
 # Hard cap so a stalled OpenAI call cannot sit for the SDK default (10 minutes).
 OPENAI_TIMEOUT_S = 45.0
 MAX_API_HISTORY_MESSAGES = 12  # recent user/assistant turns only
@@ -289,6 +289,10 @@ def system_prompt() -> str:
 15. Customer rundown: \"tell me about X\" / profile / how is X doing →
     operation=party_profile with filters.party (or extracted_entities).
     Engine returns volume, AMS, % vs AMS, last purchase, avg rate, top SKUs.
+16. INVESTIGATION LOOP: if a tool result includes INVESTIGATION instructions
+    or plan_errors about empty rows, call plan_query again (context_handling
+    as directed) before writing Analysis. Mixed party-vs-channel compares
+    need TWO plan_query calls. Clarify markdown → ask the user; do not guess.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
