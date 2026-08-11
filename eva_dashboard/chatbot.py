@@ -268,6 +268,8 @@ def system_prompt() -> str:
     engine computes a dedicated table (not monthly trend). Do not invent math.
 11. UNBREAKABLE: \"SKU\"/\"SKU-wise\" → row_dimensions=[\"product\"].
     Spoken \"product\"/\"product-wise\" → row_dimensions=[\"packing_category\"].
+    \"city wise\" / \"citywide\" → row_dimensions=[\"city\"] (never business_unit).
+    \"zone wise\" → row_dimensions=[\"zone\"]. Channel-wise → row_dimensions=[\"client_type\"].
 12. Channels (metro/LMT/chase/IMT/Imtiaz) → filters.client_type — NEVER party.
     Real customers → filters.party / parties (silent ILIKE). \"who is X\" →
     operation=party_lookup.
@@ -2235,7 +2237,13 @@ def extract_regroup_dimension(text: str) -> str | None:
             r"organise\s+by|organize\s+by)\s+(cities|city)\b",
             "city",
         ),
-        (r"\b(city[- ]?wise|by\s+city|cities\s+wise|show\s+city\s+wise)\b", "city"),
+        (
+            r"\b("
+            r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
+            r"cities\s+wise|show\s+city\s+wise|cities?\s+break(?:up|down)?"
+            r")\b",
+            "city",
+        ),
         (
             r"\b(add(ing)?(\s+a)?|include|with)\s+"
             r"(business\s*units?|bu)\s+layer\b|"

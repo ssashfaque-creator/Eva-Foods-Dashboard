@@ -161,10 +161,65 @@ def _is_factor_only_ask(
     return False
 
 
+def _spoken_wise_dimension(user_text: str) -> str | None:
+    """Detect explicit X-wise / by-X grain from the user sentence."""
+    t = (user_text or "").lower()
+    if not t.strip():
+        return None
+    # Prefer more specific product grains before geo/channel
+    patterns: list[tuple[str, str]] = [
+        (
+            r"\bskus?\b|\bsku[-\s]?wise\b|\bitems?\b|\bitem[-\s]?wise\b|"
+            r"\bby\s+sku\b|\bsku\s+break",
+            "product",
+        ),
+        (
+            r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
+            r"\bproducts?\s+(break|breakup|mix|layer)\b",
+            "packing_category",
+        ),
+        (
+            r"\b("
+            r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
+            r"cities\s+wise|show\s+city\s+wise|cities?\s+break(?:up|down)?"
+            r")\b",
+            "city",
+        ),
+        (
+            r"\b(zone[- ]?wise|by\s+zone|zones?\s+wise|region[- ]?wise|by\s+region)\b",
+            "zone",
+        ),
+        (
+            r"\b("
+            r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
+            r"by\s+channels?|all\s+channels?"
+            r")\b",
+            "client_type",
+        ),
+        (
+            r"\b(bu[- ]?wise|business[- ]?unit[- ]?wise|by\s+business\s*units?)\b",
+            "business_unit",
+        ),
+        (
+            r"\b(packing[- ]?wise|by\s+packing|pack[- ]?wise)\b",
+            "packing_category",
+        ),
+        (
+            r"\b(party[- ]?wise|distributor[- ]?wise|by\s+part(y|ies)|"
+            r"by\s+distributors?)\b",
+            "party",
+        ),
+    ]
+    for pat, dim in patterns:
+        if re.search(pat, t):
+            return dim
+    return None
+
+
 def _coerce_vocab_from_user_text(
     spec: dict[str, Any], user_text: str
 ) -> dict[str, Any]:
-    """Hard safety nets: SKU→product, product→packing_category, price_fetch."""
+    """Hard safety nets: SKU→product, product→packing_category, city-wise, price_fetch."""
     out = dict(spec)
     t = (user_text or "").lower()
     if not t.strip():
@@ -173,15 +228,11 @@ def _coerce_vocab_from_user_text(
     rows = list(out.get("row_dimensions") or [])
     metrics = list(out.get("metrics") or [])
     cols = list(out.get("column_dimensions") or [])
+    filters = dict(out.get("filters") or {})
 
-    has_sku = bool(
-        re.search(
-            r"\bskus?\b|\bsku[-\s]?wise\b|\bitems?\b|\bitem[-\s]?wise\b|"
-            r"\bby\s+sku\b|\bsku\s+break",
-            t,
-        )
-    )
-    has_product_spoken = bool(
+    wise_dim = _spoken_wise_dimension(t)
+    has_sku = wise_dim == "product"
+    has_product_spoken = wise_dim == "packing_category" and bool(
         re.search(
             r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
             r"\bproducts?\s+(break|breakup|mix|layer)\b",
@@ -200,6 +251,25 @@ def _coerce_vocab_from_user_text(
         rows = ["packing_category" if r == "product" else r for r in rows]
         if "packing_category" not in rows:
             rows.append("packing_category")
+    elif wise_dim in {"city", "zone", "client_type", "business_unit", "party"}:
+        # Fresh "Imtiaz city wise" must NOT stay as BU × Month.
+        # Flat cut on the spoken grain; keep month on columns for volume asks.
+        add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
+        if add_layer and rows and wise_dim not in rows:
+            rows = [wise_dim] + [r for r in rows if r != wise_dim]
+        else:
+            rows = [wise_dim]
+        if wise_dim == "city":
+            filters.pop("city", None)
+        if wise_dim == "zone":
+            filters.pop("zone", None)
+        # Default sales volume → month columns (unless price fetch / avg price)
+        vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
+        price_metrics = set(metrics) & {"price_fetch", "avg_price"}
+        if (vol_metrics or not metrics) and not price_metrics:
+            if "month" not in cols:
+                cols = ["month"]
+            metrics = metrics or ["volume"]
 
     # Pure cost-factor asks stay on factor_costs (do not force Price Fetch metric)
     if not _is_factor_only_ask(t, metrics=metrics, flags=out.get("price_flags")) and re.search(
@@ -214,7 +284,6 @@ def _coerce_vocab_from_user_text(
             cols = [c for c in cols if c != "month"]
 
     # Channel words → client_type (never customer ILIKE)
-    filters = dict(out.get("filters") or {})
     if not filters.get("client_type"):
         party_raw = filters.get("party") or out.get("party_query")
         parties = list(filters.get("parties") or [])
@@ -244,8 +313,9 @@ def _coerce_vocab_from_user_text(
         # execute. Channel words must come from filters.party / parties /
         # extracted_entities / filters.client_type (then we redirect/normalize).
         if redirected:
-            out["filters"] = filters
+            pass
 
+    out["filters"] = filters
     out["row_dimensions"] = rows
     out["metrics"] = metrics
     out["column_dimensions"] = cols
