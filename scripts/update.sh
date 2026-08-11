@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# Update Eva Foods Dashboard from GitHub ZIP (no git required).
-# Preserves data/ and .venv/
+# Bootstrap / update Eva Foods Dashboard from GitHub ZIP (no git required).
+# Always installs into ~/Eva-Foods-Dashboard-new unless you pass a folder.
+# Refuses legacy *-sales-dashboard-pdf-* / *-ai-chatbot-data-testing-* paths.
+# Preserves data/ and .venv/ when refreshing an existing install.
 #
-# Usage:
-#   bash scripts/update.sh ~/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203
+# One-liner (does NOT depend on whatever stale eva-dashboard is on PATH):
+#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash
 #
-# One-liner (use commit/raw URL so GitHub CDN cannot serve a stale script):
-#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/45d73270c3ba7ff6cd5eeb1439e0076b14dc7e17/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
+# Then launch with the FULL PATH printed at the end.
 
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
 BRANCH="${EVA_UPDATE_BRANCH:-cursor/phase1-single-planner-50eb}"
-TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard}}"
+MIN_VERSION="${EVA_MIN_VERSION:-1.2.2}"
+TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 
-if [ ! -d "$TARGET" ]; then
-  echo "Install folder not found: $TARGET" >&2
-  echo "Example:" >&2
-  echo "  bash update.sh \$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203" >&2
-  exit 1
-fi
+case "$TARGET" in
+  *sales-dashboard-pdf*|*ai-chatbot-data-testing*)
+    echo "error: refusing legacy install folder:" >&2
+    echo "  $TARGET" >&2
+    echo "Use the canonical home instead (no argument):" >&2
+    echo "  bash update.sh" >&2
+    echo "  # → $HOME/Eva-Foods-Dashboard-new" >&2
+    exit 1
+    ;;
+esac
 
+mkdir -p "$TARGET"
 ROOT="$(cd "$TARGET" && pwd)"
 URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/eva-update.XXXXXX")"
@@ -28,6 +35,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "Updating: $ROOT"
 echo "From:     $URL"
+echo "Need:     >= v${MIN_VERSION}"
 
 curl -fL --progress-bar -o "$TMP/app.zip" "$URL"
 unzip -q "$TMP/app.zip" -d "$TMP/extracted"
@@ -50,54 +58,81 @@ for item in "$SRC"/*; do
   echo "  updated $name"
 done
 
-# Also refresh .gitignore if present in the ZIP
-if [ -f "$SRC/.gitignore" ]; then
-  cp "$SRC/.gitignore" "$ROOT/.gitignore"
+# Dotfiles we care about
+for dot in .gitignore .streamlit; do
+  if [ -e "$SRC/$dot" ]; then
+    rm -rf "$ROOT/$dot"
+    cp -R "$SRC/$dot" "$ROOT/$dot"
+  fi
+done
+
+echo "$BRANCH" > "$ROOT/.eva-install-branch"
+
+# Create venv on first bootstrap
+if [ ! -d "$ROOT/.venv" ]; then
+  echo "Creating .venv ..."
+  python3 -m venv "$ROOT/.venv"
 fi
 
 # Drop stale installed copies that shadow the project source
-if [ -d "$ROOT/.venv" ]; then
-  echo "Clearing stale package installs in .venv ..."
-  find "$ROOT/.venv" -type d -name 'eva_dashboard' -path '*/site-packages/*' -prune -exec rm -rf {} + 2>/dev/null || true
-  find "$ROOT/.venv" -type d -name 'eva_dashboard-*.dist-info' -path '*/site-packages/*' -prune -exec rm -rf {} + 2>/dev/null || true
-  find "$ROOT/.venv" -type d -name 'eva_dashboard*.egg-info' -prune -exec rm -rf {} + 2>/dev/null || true
-  find "$ROOT/.venv" \( -name 'eva_dashboard*.egg-link' -o -name '__editable__.eva_dashboard*' -o -name '__editable___eva_dashboard*' \) -delete 2>/dev/null || true
+echo "Clearing stale package installs in .venv ..."
+find "$ROOT/.venv" -type d -name 'eva_dashboard' -path '*/site-packages/*' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$ROOT/.venv" -type d -name 'eva_dashboard-*.dist-info' -path '*/site-packages/*' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$ROOT/.venv" -type d -name 'eva_dashboard*.egg-info' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$ROOT/.venv" \( -name 'eva_dashboard*.egg-link' -o -name '__editable__.eva_dashboard*' -o -name '__editable___eva_dashboard*' \) -delete 2>/dev/null || true
+if [ -d "$ROOT/eva_dashboard" ]; then
   find "$ROOT/eva_dashboard" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 fi
 
 if [ -x "$ROOT/.venv/bin/pip" ]; then
   PIP="$ROOT/.venv/bin/pip"
   PY="$ROOT/.venv/bin/python"
+  BIN="$ROOT/.venv/bin/eva-dashboard"
 elif [ -x "$ROOT/.venv/Scripts/pip.exe" ]; then
   PIP="$ROOT/.venv/Scripts/pip.exe"
   PY="$ROOT/.venv/Scripts/python.exe"
+  BIN="$ROOT/.venv/Scripts/eva-dashboard.exe"
 else
-  echo "error: .venv not found in $ROOT — create it first with: python3 -m venv .venv" >&2
+  echo "error: .venv pip not found in $ROOT" >&2
   exit 1
 fi
 
 echo "Reinstalling package..."
+"$PIP" install -U pip
 "$PIP" install -e "$ROOT" --force-reinstall --no-deps
 "$PIP" install -e "$ROOT"
 
 echo
 echo "Verify install:"
-"$PY" - <<'PY'
+"$PY" - <<PY
 import inspect
+import re
+import sys
+from pathlib import Path
+
 import eva_dashboard
 import eva_dashboard.app as app
 
-print("  version :", eva_dashboard.__version__)
+version = eva_dashboard.__version__
+print("  version :", version)
 print("  package :", inspect.getfile(eva_dashboard))
 print("  app     :", inspect.getfile(app))
-print("  has _for_display:", hasattr(app, "_for_display"))
-if not hasattr(app, "_for_display"):
-    raise SystemExit("ERROR: old app.py still loaded — update failed")
+root = Path(inspect.getfile(eva_dashboard)).resolve().parent.parent
+text = str(root).lower()
+if "sales-dashboard-pdf" in text or "ai-chatbot-data-testing" in text:
+    raise SystemExit(f"ERROR: still on legacy path: {root}")
+parts = [int(x) for x in re.findall(r"[0-9]+", version)[:3]]
+need = [int(x) for x in re.findall(r"[0-9]+", "${MIN_VERSION}")[:3]]
+if tuple(parts) < tuple(need):
+    raise SystemExit(f"ERROR: got v{version}, need >= ${MIN_VERSION}")
 print("  OK")
 PY
 
 echo
-echo "Update complete. Restart the app:"
-echo "  cd \"$ROOT\""
-echo "  source .venv/bin/activate"
-echo "  eva-dashboard app"
+echo "Update complete."
+echo
+echo "IMPORTANT — launch with the FULL PATH (do not type bare eva-dashboard):"
+echo "  \"$BIN\" app --data-dir ~/Documents/EvaFoodsData"
+echo
+echo "Chat banner must show v${MIN_VERSION}+ and path containing Eva-Foods-Dashboard-new."
+echo "If you still see sales-dashboard-pdf-8203, you launched the wrong binary."

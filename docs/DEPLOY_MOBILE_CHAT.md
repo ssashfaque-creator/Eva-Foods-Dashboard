@@ -12,10 +12,8 @@ Phone  →  Vercel (mobile-chat)  →  Cloudflare Tunnel  →  Mac bridge (:8787
 ## 1. Update the Mac app
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/ce55ad5451db0afcfdf3f98ea2e7f581200d066a/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
-cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
-source .venv/bin/activate
-pip install -U 'fastapi>=0.110' 'uvicorn[standard]>=0.27' openai
+curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/pip" install -U 'fastapi>=0.110' 'uvicorn[standard]>=0.27' openai
 ```
 
 (After this PR lands, the update script already includes those packages.)
@@ -31,10 +29,8 @@ export OPENAI_API_KEY="sk-..."
 ## 2. Start the bridge on the Mac
 
 ```bash
-cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
-source .venv/bin/activate
 export OPENAI_API_KEY="sk-..."
-eva-dashboard bridge --port 8787
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard" bridge --port 8787 --data-dir ~/Documents/EvaFoodsData
 ```
 
 Leave this terminal open. It prints a **Bridge secret** (also saved to `data/bridge_secret.txt`). Copy it.
@@ -134,11 +130,9 @@ Copy the HTTPS URL it prints, e.g. `https://random-words.trycloudflare.com`.
 # one-time
 npm i -g vercel
 
-cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203/mobile-chat"
+cd "$HOME/Eva-Foods-Dashboard-new/mobile-chat"
 # ensure this folder is on the branch that has mobile-chat/
-git fetch origin
-git checkout cursor/ai-chatbot-data-testing-ed65
-git pull origin cursor/ai-chatbot-data-testing-ed65
+# (or unzip from cursor/phase1-single-planner-50eb)
 
 vercel login
 vercel link   # create/link project; root is already mobile-chat if you cd'd here

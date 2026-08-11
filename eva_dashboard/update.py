@@ -1,9 +1,15 @@
-"""Self-update from GitHub ZIP (no git / Xcode required)."""
+"""Self-update from GitHub ZIP (no git / Xcode required).
+
+Always pulls ``DEFAULT_BRANCH`` into a canonical install folder so a stale
+``eva-dashboard`` on PATH (old sales-dashboard-pdf install) cannot keep
+re-downloading the wrong branch into the wrong directory.
+"""
 
 from __future__ import annotations
 
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +21,19 @@ from pathlib import Path
 
 DEFAULT_REPO = "ssashfaque-creator/Eva-Foods-Dashboard"
 DEFAULT_BRANCH = "cursor/phase1-single-planner-50eb"
+# Refuse to treat these as the live install (legacy agent folders).
+LEGACY_PATH_MARKERS = (
+    "sales-dashboard-pdf",
+    "ai-chatbot-data-testing",
+)
+# Back-compat alias used by older call sites / tests
+_LEGACY_PATH_MARKERS = LEGACY_PATH_MARKERS
+CANONICAL_DIRNAMES = (
+    "Eva-Foods-Dashboard-new",
+    "Eva-Foods-Dashboard",
+)
+MIN_VERSION = "1.2.2"
+BRANCH_MARKER = ".eva-install-branch"
 
 # Never overwrite these when applying an update
 PRESERVE_NAMES = {
@@ -36,7 +55,8 @@ def update_repo() -> str:
 
 
 def update_branch() -> str:
-    return os.environ.get("EVA_UPDATE_BRANCH", DEFAULT_BRANCH).strip()
+    # Explicit env override only — never silently fall back to an old branch.
+    return os.environ.get("EVA_UPDATE_BRANCH", DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
 
 
 def zip_url(repo: str | None = None, branch: str | None = None) -> str:
@@ -45,11 +65,34 @@ def zip_url(repo: str | None = None, branch: str | None = None) -> str:
     return f"https://github.com/{repo}/archive/refs/heads/{branch}.zip"
 
 
+def _is_legacy_path(path: Path) -> bool:
+    text = str(path).lower().replace("\\", "/")
+    return any(m in text for m in _LEGACY_PATH_MARKERS)
+
+
+def _looks_like_install(root: Path) -> bool:
+    return (root / "pyproject.toml").exists() or (root / "eva_dashboard").is_dir()
+
+
+def canonical_home() -> Path:
+    """Preferred install directory on this machine."""
+    env = os.environ.get("EVA_HOME")
+    if env:
+        return Path(env).expanduser().resolve()
+    home = Path.home()
+    for name in CANONICAL_DIRNAMES:
+        candidate = home / name
+        if _looks_like_install(candidate):
+            return candidate.resolve()
+    # Default bootstrap location
+    return (home / "Eva-Foods-Dashboard-new").resolve()
+
+
 def find_install_root(explicit: Path | None = None) -> Path:
-    """Locate the project folder that should be updated."""
+    """Locate the project folder that should be updated / launched."""
     if explicit is not None:
         root = explicit.expanduser().resolve()
-        if not (root / "pyproject.toml").exists() and not (root / "eva_dashboard").is_dir():
+        if not _looks_like_install(root):
             raise FileNotFoundError(
                 f"Not an Eva Foods install folder (missing pyproject.toml): {root}"
             )
@@ -60,21 +103,31 @@ def find_install_root(explicit: Path | None = None) -> Path:
         return find_install_root(Path(env))
 
     cwd = Path.cwd().resolve()
-    if (cwd / "pyproject.toml").exists() or (cwd / "eva_dashboard").is_dir():
+    if _looks_like_install(cwd) and not _is_legacy_path(cwd):
         return cwd
 
-    # Editable install: package lives at <root>/eva_dashboard/
+    # Prefer canonical home over whatever stale package is on PATH
+    home = canonical_home()
+    if _looks_like_install(home):
+        return home
+
+    # Editable install of *this* package — only if not a legacy folder
     package_parent = Path(__file__).resolve().parent.parent
-    if (package_parent / "pyproject.toml").exists():
+    if _looks_like_install(package_parent) and not _is_legacy_path(package_parent):
         return package_parent
+
+    if _looks_like_install(cwd):
+        # Last resort: cwd even if legacy (user explicitly standing in it)
+        return cwd
 
     raise FileNotFoundError(
         "Could not find the Eva Foods install folder. "
-        "cd into it first, or pass --dir ~/Eva-Foods-Dashboard"
+        "Run: eva-dashboard update   # bootstraps ~/Eva-Foods-Dashboard-new\n"
+        "Or:  eva-dashboard update --dir ~/Eva-Foods-Dashboard-new"
     )
 
 
-def download_zip(url: str, timeout: int = 120) -> bytes:
+def download_zip(url: str, timeout: int = 180) -> bytes:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "eva-dashboard-updater"},
@@ -103,12 +156,13 @@ def _extract_repo_root(zip_bytes: bytes, dest: Path) -> Path:
 
 def apply_update(source_root: Path, install_root: Path) -> list[str]:
     """Copy updated project files onto install_root. Returns list of top-level names copied."""
+    install_root.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
     for item in sorted(source_root.iterdir()):
         name = item.name
         if name in PRESERVE_NAMES:
             continue
-        if name.startswith(".") and name not in {".gitignore", ".streamlit"}:
+        if name.startswith(".") and name not in {".gitignore", ".streamlit", BRANCH_MARKER}:
             continue
         target = install_root / name
         if item.is_dir():
@@ -131,11 +185,32 @@ def _pip_executable(install_root: Path) -> list[str]:
     return [sys.executable, "-m", "pip"]
 
 
+def _python_executable(install_root: Path) -> str:
+    venv_py = install_root / ".venv" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    venv_py_win = install_root / ".venv" / "Scripts" / "python.exe"
+    if venv_py_win.exists():
+        return str(venv_py_win)
+    return sys.executable
+
+
+def ensure_venv(install_root: Path) -> None:
+    venv = install_root / ".venv"
+    if venv.exists():
+        return
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv)],
+        check=True,
+        cwd=str(install_root),
+    )
+
+
 def reinstall_package(install_root: Path) -> None:
+    ensure_venv(install_root)
     pip = _pip_executable(install_root)
     venv = install_root / ".venv"
     if venv.exists():
-        # Remove stale non-editable copies that shadow the project source
         for pattern in (
             "**/site-packages/eva_dashboard",
             "**/site-packages/eva_dashboard-*.dist-info",
@@ -164,47 +239,134 @@ def reinstall_package(install_root: Path) -> None:
     )
 
 
+def read_installed_version(install_root: Path) -> str:
+    init_file = install_root / "eva_dashboard" / "__init__.py"
+    if init_file.exists():
+        text = init_file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip("\"'")
+    # Probe the venv import
+    py = _python_executable(install_root)
+    try:
+        out = subprocess.check_output(
+            [py, "-c", "import eva_dashboard; print(eva_dashboard.__version__)"],
+            cwd=str(install_root),
+            text=True,
+        ).strip()
+        return out
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", version or "")
+    return tuple(int(p) for p in parts[:3]) if parts else (0,)
+
+
 def run_update(
     *,
     install_dir: Path | None = None,
     repo: str | None = None,
     branch: str | None = None,
     reinstall: bool = True,
+    bootstrap: bool = True,
 ) -> dict:
-    """Download latest ZIP and apply it. Preserves data/ and .venv/."""
-    from eva_dashboard import __version__ as old_version
+    """Download DEFAULT_BRANCH ZIP and apply it. Preserves data/ and .venv/.
 
-    install_root = find_install_root(install_dir)
+    If ``install_dir`` is omitted, uses the canonical home
+    (``~/Eva-Foods-Dashboard-new``), creating it when missing — never the
+    legacy ``*-sales-dashboard-pdf-*`` folder on PATH.
+    """
+    from eva_dashboard import __version__ as running_version
+
     repo = repo or update_repo()
-    branch = branch or update_branch()
-    url = zip_url(repo, branch)
+    # Force known-good branch unless caller passed an explicit override
+    branch = (branch or update_branch()).strip() or DEFAULT_BRANCH
 
+    if install_dir is not None:
+        install_root = install_dir.expanduser().resolve()
+    else:
+        # Prefer canonical home; migrate away from legacy PATH installs
+        running_root = Path(__file__).resolve().parent.parent
+        if _is_legacy_path(running_root) or not _looks_like_install(canonical_home()):
+            install_root = canonical_home()
+        else:
+            try:
+                install_root = find_install_root(None)
+                if _is_legacy_path(install_root):
+                    install_root = canonical_home()
+            except FileNotFoundError:
+                install_root = canonical_home()
+
+    if bootstrap:
+        install_root.mkdir(parents=True, exist_ok=True)
+
+    if _is_legacy_path(install_root):
+        raise RuntimeError(
+            f"Refusing to update legacy folder:\n  {install_root}\n"
+            f"Use: eva-dashboard update --dir ~/{CANONICAL_DIRNAMES[0]}"
+        )
+
+    url = zip_url(repo, branch)
     zip_bytes = download_zip(url)
     with tempfile.TemporaryDirectory(prefix="eva-update-") as tmp:
         extracted = _extract_repo_root(zip_bytes, Path(tmp) / "zip")
+        # Sanity: ZIP must be the phase1 (or requested) tree
+        marker_init = extracted / "eva_dashboard" / "__init__.py"
+        if not marker_init.exists():
+            raise RuntimeError(f"ZIP from {url} is missing eva_dashboard/")
         copied = apply_update(extracted, install_root)
+
+    # Stamp which branch this install came from
+    (install_root / BRANCH_MARKER).write_text(branch + "\n", encoding="utf-8")
 
     if reinstall:
         reinstall_package(install_root)
 
-    # Re-read version from updated package if possible
-    new_version = old_version
-    init_file = install_root / "eva_dashboard" / "__init__.py"
-    if init_file.exists():
-        text = init_file.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if line.startswith("__version__"):
-                new_version = line.split("=", 1)[1].strip().strip("\"'")
-                break
+    new_version = read_installed_version(install_root)
+    if _version_tuple(new_version) < _version_tuple(MIN_VERSION):
+        raise RuntimeError(
+            f"Update landed version {new_version} but need >={MIN_VERSION}. "
+            f"Downloaded from {url}. Delete the folder and retry:\n"
+            f"  rm -rf \"{install_root}\" && eva-dashboard update --dir \"{install_root}\""
+        )
 
+    py = _python_executable(install_root)
     return {
         "install_root": str(install_root),
         "repo": repo,
         "branch": branch,
         "url": url,
         "copied": copied,
-        "old_version": old_version,
+        "old_version": running_version,
         "new_version": new_version,
+        "python": py,
         "data_preserved": (install_root / "data").exists(),
         "venv_preserved": (install_root / ".venv").exists(),
+        "legacy_blocked": True,
     }
+
+
+def assert_launch_path_ok(app_file: Path, version: str) -> None:
+    """Raise RuntimeError if this process is the stale legacy install."""
+    root = app_file.resolve().parent.parent
+    if _is_legacy_path(root):
+        home = canonical_home()
+        raise RuntimeError(
+            "You are launching the OLD install:\n"
+            f"  {root}\n"
+            f"Version on this process: {version}\n\n"
+            "Fix (copy-paste):\n"
+            f'  eva-dashboard update --dir "{home}"\n'
+            f'  "{home}/.venv/bin/eva-dashboard" app '
+            "--data-dir ~/Documents/EvaFoodsData\n"
+        )
+    if _version_tuple(version) < _version_tuple(MIN_VERSION):
+        home = canonical_home()
+        raise RuntimeError(
+            f"Eva Foods v{version} is too old (need >={MIN_VERSION}).\n"
+            f'  eva-dashboard update --dir "{home}"\n'
+            f'  "{home}/.venv/bin/eva-dashboard" app '
+            "--data-dir ~/Documents/EvaFoodsData\n"
+        )

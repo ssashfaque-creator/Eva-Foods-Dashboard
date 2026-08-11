@@ -570,10 +570,19 @@ def page_chat() -> None:
         f"**Engine v{__version__}** — polarity-aware (exclude/without/except "
         f"never becomes an include filter). App file: `{Path(__file__).resolve()}`"
     )
-    if not str(__version__).startswith("1.2"):
+    _ver = str(__version__)
+    _path = str(Path(__file__).resolve()).lower()
+    if (
+        not _ver.startswith("1.2")
+        or "sales-dashboard-pdf" in _path
+        or "ai-chatbot-data-testing" in _path
+    ):
         st.error(
-            "Wrong install — this is not v1.2.x. Stop the app (Ctrl+C) and "
-            "reinstall from branch `cursor/phase1-single-planner-50eb`."
+            f"Wrong install (v{_ver}). Stop the app (Ctrl+C), then run:\n\n"
+            "`curl -fsSL \"https://raw.githubusercontent.com/ssashfaque-creator/"
+            "Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh\" | bash`\n\n"
+            "Then launch with the full path printed at the end "
+            "(`~/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard`)."
         )
     st.markdown(
         '<p class="eva-subtle">Answers come from your <b>live Eva database</b> only '

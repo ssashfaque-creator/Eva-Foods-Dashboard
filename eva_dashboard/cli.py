@@ -119,7 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--dir",
         type=Path,
         default=None,
-        help="Install folder (default: current folder, EVA_HOME, or package root)",
+        help=(
+            "Install folder (default: ~/Eva-Foods-Dashboard-new or EVA_HOME). "
+            "Legacy *-sales-dashboard-pdf-* folders are refused."
+        ),
     )
     update.add_argument(
         "--branch",
@@ -198,10 +201,18 @@ def cmd_app(args: argparse.Namespace) -> int:
     import os
     from streamlit.web import cli as stcli
 
+    from eva_dashboard.update import assert_launch_path_ok
+
     if args.data_dir is not None:
         os.environ["EVA_DATA_DIR"] = str(args.data_dir.expanduser().resolve())
 
     app_path = Path(__file__).resolve().parent / "app.py"
+    try:
+        # Hard-fail if PATH still points at the old sales-dashboard-pdf install.
+        assert_launch_path_ok(app_path, __version__)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     print(f"Eva Foods Dashboard v{__version__}")
     print(f"Launching: {app_path}")
     if not app_path.exists():
@@ -292,31 +303,58 @@ def cmd_costs(args: argparse.Namespace) -> int:
 
 
 def cmd_update(args: argparse.Namespace) -> int:
-    from eva_dashboard.update import run_update
+    from eva_dashboard.update import (
+        DEFAULT_BRANCH,
+        MIN_VERSION,
+        canonical_home,
+        run_update,
+    )
 
+    target = args.dir if args.dir is not None else canonical_home()
+    branch = args.branch or DEFAULT_BRANCH
     print("Downloading latest Eva Foods Dashboard…")
+    print(f"Target folder  : {target}")
+    print(f"Branch         : {branch}")
+    print(f"Need version  >= {MIN_VERSION}")
+    print("(data/ and ~/Documents/EvaFoodsData are never touched)")
     try:
         result = run_update(
-            install_dir=args.dir,
+            install_dir=args.dir,  # None → canonical ~/Eva-Foods-Dashboard-new
             repo=args.repo,
             branch=args.branch,
             reinstall=not args.no_reinstall,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
+        print(file=sys.stderr)
+        print(
+            "Stuck on an old install? Bypass PATH with this one-liner:",
+            file=sys.stderr,
+        )
+        print(
+            '  curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/'
+            'Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash',
+            file=sys.stderr,
+        )
         return 1
 
-    print(f"Install folder : {result['install_root']}")
+    root = result["install_root"]
+    bin_path = Path(root) / ".venv" / "bin" / "eva-dashboard"
+    print(f"Install folder : {root}")
     print(f"Source         : {result['repo']} @ {result['branch']}")
     print(f"Version        : {result['old_version']} → {result['new_version']}")
     print(f"Files updated  : {', '.join(result['copied'])}")
     print(f"Data kept      : {'yes' if result['data_preserved'] else 'n/a'}")
     print(f"venv kept      : {'yes' if result['venv_preserved'] else 'n/a'}")
     print()
-    print("Done. Restart the app:")
-    print(f'  cd "{result["install_root"]}"')
-    print("  source .venv/bin/activate")
-    print("  eva-dashboard app")
+    print("IMPORTANT — restart with the FULL PATH (bare 'eva-dashboard' may be old):")
+    print(f'  "{bin_path}" app --data-dir ~/Documents/EvaFoodsData')
+    print()
+    print("Or:")
+    print(f'  source "{Path(root) / ".venv" / "bin" / "activate"}"')
+    print("  hash -r")
+    print("  which eva-dashboard   # must show the .venv path above")
+    print("  eva-dashboard app --data-dir ~/Documents/EvaFoodsData")
     return 0
 
 

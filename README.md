@@ -16,82 +16,45 @@ Or download from [python.org](https://www.python.org/downloads/). Check with:
 python3 --version
 ```
 
-2. **Get the project**
+2. **Install / update (recommended — no git)**
+
+This always lands in `~/Eva-Foods-Dashboard-new` on branch `cursor/phase1-single-planner-50eb`.
+It does **not** use whatever stale `eva-dashboard` may still be on your PATH.
 
 ```bash
-cd ~
-git clone -b cursor/sales-dashboard-pdf-8203 https://github.com/ssashfaque-creator/Eva-Foods-Dashboard.git
-cd Eva-Foods-Dashboard
+curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash
 ```
 
-If you already have the folder, `cd` into it and switch to the app branch:
+3. **Launch with the FULL PATH** (critical)
 
 ```bash
-cd ~/Eva-Foods-Dashboard
-git fetch origin
-git checkout cursor/sales-dashboard-pdf-8203
-git pull origin cursor/sales-dashboard-pdf-8203
-```
-
-No git? Download the branch ZIP instead:  
-https://github.com/ssashfaque-creator/Eva-Foods-Dashboard/archive/refs/heads/cursor/sales-dashboard-pdf-8203.zip  
-Unzip, then `cd` into that folder for the steps below.
-
-3. **Create a virtual environment and install**
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-```
-
-4. **Launch the app**
-
-```bash
-eva-dashboard app
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard" app --data-dir ~/Documents/EvaFoodsData
 ```
 
 Your browser should open to `http://localhost:8501`.  
 Leave the Terminal window open while you use the app. Stop with `Ctrl+C`.
 
+Chat banner must show **v1.2.2+** and a path containing `Eva-Foods-Dashboard-new`.
+If you still see `sales-dashboard-pdf-8203` or **v1.0.0**, you launched the wrong binary — use the full path above.
+
 Optional:
 
 ```bash
-eva-dashboard app --port 8502
-eva-dashboard app --data-dir ~/Documents/EvaFoodsData
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard" app --port 8502 --data-dir ~/Documents/EvaFoodsData
 ```
 
-Data (database + archived uploads) lives in `./data` by default, or in `EVA_DATA_DIR` / `--data-dir`.
+Keep sales data in `~/Documents/EvaFoodsData` so updates never wipe it.
 
-### Update to latest (no git / no ZIP each time)
+### Update again later
 
-Stop the app (`Ctrl+C`), then:
+Stop the app (`Ctrl+C`), then either re-run the curl one-liner above, or:
 
 ```bash
-cd ~/Eva-Foods-Dashboard
-source .venv/bin/activate
-eva-dashboard update
-eva-dashboard app
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard" update
+"$HOME/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard" app --data-dir ~/Documents/EvaFoodsData
 ```
 
-Your `data/` folder (database + uploads) is kept. Caption under the title should show the new version (currently **v0.4.25**).
-
-**First time only** (if `eva-dashboard update` is not available yet):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/sales-dashboard-pdf-8203/scripts/update.sh | bash -s -- ~/Eva-Foods-Dashboard
-```
-
-Then use `eva-dashboard update` for every future change.
-
-### Next time you open the app
-
-```bash
-cd ~/Eva-Foods-Dashboard
-source .venv/bin/activate
-eva-dashboard app
-```
+Do **not** run bare `eva-dashboard update` / `eva-dashboard app` if `which eva-dashboard` still points at an old `*-sales-dashboard-pdf-*` folder.
 
 ## App tabs
 
