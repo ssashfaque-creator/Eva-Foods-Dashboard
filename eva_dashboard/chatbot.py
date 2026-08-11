@@ -1989,9 +1989,10 @@ def _extract_remove_phrase(text: str) -> str | None:
         phrase,
         flags=re.IGNORECASE,
     ).strip()
-    # Strip trailing filler like "items" / "rows" / "layer" after the value list
+    # Strip trailing filler like "items" / "rows" / "layer" / "sales" after value
     phrase = re.sub(
-        r"\s+(items?|rows?|lines?|entries|layers?|columns?|breakdown)\s*$",
+        r"\s+(items?|rows?|lines?|entries|layers?|columns?|breakdown|"
+        r"sales?|volumes?|data|figures?|numbers?)\s*$",
         "",
         phrase,
         flags=re.IGNORECASE,
@@ -2072,18 +2073,29 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
         frag = re.sub(r"[/]+", " ", key).strip()
         return ("party_like", frag)
 
-    # Client types (distributors, Imtiaz, …) — aliases / extract only,
+    # Client types (distributors, Imtiaz, donations, …) — aliases / extract only,
     # never passthrough unknown text as a client type.
     from eva_dashboard.client_language import CLIENT_TYPE_ALIASES, list_known_client_types
 
-    if key in CLIENT_TYPE_ALIASES:
-        return ("client_type", CLIENT_TYPE_ALIASES[key])
-    ctype = extract_client_type_from_text(raw)
+    # Tolerate "donation sales" / "donation volume" phrasing
+    key_stripped = re.sub(
+        r"\s+(sales?|volumes?|data|figures?|numbers?)$",
+        "",
+        key,
+    ).strip()
+    for candidate in (key, key_stripped):
+        if candidate in CLIENT_TYPE_ALIASES:
+            return ("client_type", CLIENT_TYPE_ALIASES[candidate])
+    ctype = extract_client_type_from_text(raw) or extract_client_type_from_text(
+        key_stripped
+    )
     if ctype:
         return ("client_type", ctype)
     known_types = {re.sub(r"\s+", " ", t.lower()).strip(): t for t in list_known_client_types()}
     if key in known_types:
         return ("client_type", known_types[key])
+    if key_stripped in known_types:
+        return ("client_type", known_types[key_stripped])
 
     from eva_dashboard.party_analytics import extract_city_from_text
 

@@ -88,6 +88,10 @@ CLIENT_TYPE_ALIASES: dict[str, str] = {
     "utility store": "Utility Stores Corporation",
     "utility stores corporation": "Utility Stores Corporation",
     "donations": "DONATIONS",
+    "donation": "DONATIONS",
+    "donation sales": "DONATIONS",
+    "donations sales": "DONATIONS",
+    "donation sale": "DONATIONS",
     "madarsa": "Madarsa",
     "madrasa": "Madarsa",
 }

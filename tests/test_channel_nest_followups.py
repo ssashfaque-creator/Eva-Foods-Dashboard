@@ -277,6 +277,93 @@ def test_execute_add_city_under_bu() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_exclude_donation_sales_resolves() -> None:
+    prior = {
+        "row_dimension": "business_unit",
+        "column_dimension": "month",
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+    }
+    for text in (
+        "exclude donation sales",
+        "exclude donations",
+        "exclude donation",
+        "without donation sales",
+    ):
+        out = resolve_remove_request(text, prior_spec=prior)
+        assert out is not None, text
+        assert out["mode"] == "exclude_value"
+        assert (out.get("excludes") or {}).get("client_type") == ["DONATIONS"]
+
+
+def test_execute_exclude_donation_sales() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('9', 'Donation Lahore', 'DONATIONS', 'Lahore', 'Lahore', "
+                    "'', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                      payload_json
+                    ) VALUES (NULL, 'don-1', datetime('now'), '2026-07-15',
+                      'Donation Lahore', 'P1', 50, 'MT', 50, 100, 5000,
+                      'DONATIONS', '{}')
+                    """
+                )
+                conn.commit()
+            base = execute_query_spec(
+                {
+                    "row_dimensions": ["business_unit"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "none",
+                    "filters": {"city": "Lahore"},
+                    "business_units": ["Eva Consumer", "Eva Bulk"],
+                },
+                user_text="Lahore Eva sales last 6 months",
+            )
+            assert base.get("ok"), base.get("error")
+            prior = prior_context_from_query_state(base.get("query_state"))
+            out = execute_query_spec(
+                {
+                    "row_dimensions": ["business_unit"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "prior",
+                    "clear_filters": [],
+                    "filters": {},
+                },
+                prior=prior,
+                user_text="exclude donation sales",
+            )
+            assert out.get("ok"), out.get("error")
+            ex = (out.get("query_spec") or {}).get("excludes") or {}
+            assert "DONATIONS" in (ex.get("client_type") or [])
+            md = (out.get("answer_markdown") or "").lower()
+            # Donation volume should not remain as a visible channel row
+            assert "donation lahore" not in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_remove_cosine_king_bu_and_party() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
