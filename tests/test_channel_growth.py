@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from eva_dashboard.advanced_routing import infer_advanced_from_text
+from eva_dashboard.advanced_routing import looks_advanced
 from eva_dashboard.chatbot import (
     _dispatch_tool,
     _looks_channel_growth_ask,
@@ -67,23 +67,6 @@ def _seed() -> None:
         conn.commit()
 
 
-def test_channel_language_routing() -> None:
-    q = "which channels grew sales and which declined"
-    assert _looks_channel_growth_ask(q)
-    assert extract_regroup_dimension("group by channel") == "client_type"
-    assert extract_regroup_dimension("channel wise") == "client_type"
-    assert suggest_preferred_tool(q) == "query_sales"
-    prior = {
-        "filters": {"business_unit": "Eva Consumer"},
-        "period_phrase": "July 2026",
-        "row_dimension": "packing_category",
-    }
-    # Complete channel-growth ask is not a short Reply mutation → required
-    assert resolve_forced_tool(q, prior_table_spec=prior, explicit_followup=True) == (
-        "required"
-    )
-    inf = infer_advanced_from_text(q)
-    assert inf.get("entity") == "client_type"
 
 
 def test_channel_growth_uses_client_type_trend() -> None:

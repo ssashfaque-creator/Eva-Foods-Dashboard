@@ -394,21 +394,13 @@ def test_routing_packing_breakdown_and_silent_and_drill() -> None:
         _looks_sales_matrix,
         _looks_row_drilldown,
     )
-    from eva_dashboard.party_analytics import infer_party_analytics_from_text
-
+    
     assert not _looks_party_analytics(
         "Eva Consumer packing breakdown for Karachi in June"
     )
     assert _looks_sales_matrix("Eva Consumer packing breakdown for Karachi in June")
     assert _looks_row_drilldown("Show by product")
     assert not _looks_party_analytics("Show by product")
-    silent = infer_party_analytics_from_text("Silent distributors in Faisalabad")
-    assert silent["metric"] == "lost_parties"
-    assert silent["client_type"] == "Eva Distributors"
-    inv = infer_party_analytics_from_text("Most invoices for distributors")
-    assert inv["metric"] == "invoices"
-    share = infer_party_analytics_from_text("Which Imtiaz has highest VTF share")
-    assert share["metric"] == "share_of_segment"
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)

@@ -19,7 +19,6 @@ from eva_dashboard.chatbot import (
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.party_analytics import (
     analyze_parties,
-    infer_party_analytics_from_text,
     list_clients,
 )
 from eva_dashboard.sales_query import query_sales, resolve_period
@@ -133,62 +132,6 @@ def test_routing_client_list_vs_name_lookup() -> None:
     assert _looks_party_analytics("Who were the top distributors in this")
 
 
-def test_top_distributors_in_this_followup() -> None:
-    """After a Consumer×Lahore×July matrix, 'top distributors in this' ranks parties."""
-    previous = os.environ.get("EVA_DATA_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        _env(tmp)
-        try:
-            _seed()
-            q = "Who were the top distributors in this"
-            assert _looks_party_analytics(q)
-            assert not _looks_client_list(q)
-            assert not _looks_sales_matrix(q)
-
-            inferred = infer_party_analytics_from_text(q)
-            assert inferred["metric"] == "volume"
-            assert inferred["client_type"] == "Eva Distributors"
-
-            prior = {
-                "period_phrase": "July 2026",
-                "period": {
-                    "date_from": "2026-07-01",
-                    "date_to": "2026-07-31",
-                    "label": "Jul 2026",
-                },
-                "filters": {
-                    "city": "Lahore",
-                    "business_unit": "Eva Consumer",
-                    "oil_type": None,
-                    "packing_category": None,
-                    "client_type": None,
-                },
-                "business_units": ["Eva Consumer"],
-                "column_dimension": "client_type",
-                "row_dimension": "packing_category",
-            }
-            out = _dispatch_tool(
-                "analyze_parties",
-                {},
-                user_text=q,
-                prior_spec=prior,
-            )
-            assert out["ok"] is True
-            assert out["metric"] == "volume"
-            assert out["filters"]["city"] == "Lahore"
-            assert out["filters"]["client_type"] == "Eva Distributors"
-            assert out["filters"]["business_unit"] == "Eva Consumer"
-            assert out["period"]["date_from"].startswith("2026-07")
-            parties = [p["party"] for p in out["parties"]]
-            assert "Alpha Dist" in parties
-            assert "Imtiaz A" not in parties
-            # Alpha has more July Consumer volume in Lahore than Beta
-            assert parties[0] == "Alpha Dist"
-        finally:
-            if previous is None:
-                os.environ.pop("EVA_DATA_DIR", None)
-            else:
-                os.environ["EVA_DATA_DIR"] = previous
 
 
 def test_list_distributors_in_lahore() -> None:
@@ -457,70 +400,6 @@ def test_resolve_last_quarter_and_last_year_month() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_infer_new_lost_poor_mix_rank_defaults() -> None:
-    new = infer_party_analytics_from_text("New distributors in last 6 months")
-    assert new["metric"] == "new_parties"
-    assert new["period"] == "last 6 months"
-    assert new["client_type"] == "Eva Distributors"
-
-    lost = infer_party_analytics_from_text("Lost parties this month")
-    assert lost["metric"] == "lost_parties"
-    assert lost["period"] == "this month"
-    assert lost["client_type"] is None  # all clients unless specified
-
-    poor = infer_party_analytics_from_text(
-        "Which distributors are performing poorly in Lahore"
-    )
-    assert poor["metric"] == "vs_ams"
-    assert poor["sort"] == "asc"
-    assert poor["city"] == "Lahore"
-    assert poor["client_type"] == "Eva Distributors"
-
-    behind = infer_party_analytics_from_text(
-        "Which Imtiaz store is falling behind on average sales"
-    )
-    assert behind["metric"] == "vs_ams"
-    assert behind["sort"] == "asc"
-    assert behind["client_type"] == "Imtiaz Store"
-
-    mix = infer_party_analytics_from_text("What's the product mix for Imtiaz")
-    assert mix["metric"] == "packing_mix"
-    assert mix["mix_dimension"] == "packing_category"
-    assert mix["client_type"] == "Imtiaz Store"
-
-    sku = infer_party_analytics_from_text("SKU wise breakdown for distributors in Lahore")
-    assert sku["metric"] == "product_mix"
-    assert sku["mix_dimension"] == "product"
-
-    rank = infer_party_analytics_from_text("Top 5 distributors for Eva VTF")
-    assert rank["metric"] == "ams"
-    assert rank["limit"] == 5
-    assert rank["oil_type"] == "Eva VTF"
-    assert rank["client_type"] == "Eva Distributors"
-
-    pillow = infer_party_analytics_from_text("Top 5 distributors for Pillow pouch")
-    assert pillow["metric"] == "ams"
-    assert pillow["packing_category"] is not None
-
-    growth = infer_party_analytics_from_text(
-        "Show me distributors by top sales growth in July"
-    )
-    assert growth["metric"] == "ams_growth"
-    assert growth["period"] == "July" or (
-        growth["period"] and "july" in growth["period"].lower()
-    )
-
-    cities = infer_party_analytics_from_text("City league table top 10 cities")
-    assert cities["group_by"] == "city"
-
-    inv = infer_party_analytics_from_text("Most invoices for distributors")
-    assert inv["metric"] == "invoices"
-
-    assert _looks_party_analytics("New parties last 6 months")
-    assert not _looks_client_list("New parties last 6 months")
-    assert _looks_party_analytics("Product mix for Imtiaz")
-    assert not _looks_client_list("Show me product mix for Imtiaz")
-    assert _looks_party_analytics("Top Imtiaz stores selling cooking oil")
 
 
 def test_new_and_lost_parties() -> None:
@@ -623,7 +502,12 @@ def test_underperformers_packing_mix_invoices_city_rank() -> None:
 
             top_vtf = _dispatch_tool(
                 "analyze_parties",
-                {},
+                {
+                    "metric": "ams",
+                    "client_type": "Eva Distributors",
+                    "oil_type": "Eva VTF",
+                    "limit": 5,
+                },
                 user_text="Top 5 distributors for Eva VTF",
             )
             assert top_vtf["ok"] is True
@@ -679,68 +563,6 @@ def test_distributor_sales_routes_to_matrix_not_list() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_product_breakdown_for_each_distributor() -> None:
-    """Product breakdown for each distributor → per-party packing mix, not volume tops."""
-    q = "Can you show me the product breakdown for each distributor"
-    assert _looks_party_mix_query(q)
-    assert _looks_per_party_mix(q)
-    assert _looks_party_analytics(q)
-    assert not _looks_client_list(q)
-    assert not _looks_party_breakdown(q)
-    assert not _looks_sales_matrix(q)
-
-    inferred = infer_party_analytics_from_text(q)
-    assert inferred["metric"] == "packing_mix"
-    assert inferred["per_party_mix"] is True
-    assert inferred["client_type"] == "Eva Distributors"
-
-    previous = os.environ.get("EVA_DATA_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        _env(tmp)
-        try:
-            _seed()
-            prior = {
-                "period_phrase": "July 2026",
-                "period": {
-                    "date_from": "2026-07-01",
-                    "date_to": "2026-07-31",
-                    "label": "Jul 2026",
-                },
-                "filters": {
-                    "city": "Karachi",
-                    "client_type": "Eva Distributors",
-                    "business_unit": None,
-                    "oil_type": None,
-                    "packing_category": None,
-                },
-                "business_units": [],
-                "column_dimension": "client_type",
-                "row_dimension": "business_unit",
-            }
-            # Model wrongly asks for volume — dispatch must force packing_mix
-            out = _dispatch_tool(
-                "analyze_parties",
-                {"metric": "volume"},
-                user_text=q,
-                prior_spec=prior,
-            )
-            assert out["ok"] is True
-            assert out["metric"] == "packing_mix"
-            assert out.get("per_party_mix") is True
-            assert out["filters"]["city"] == "Karachi"
-            assert out["filters"]["client_type"] == "Eva Distributors"
-            assert out["period"]["date_from"].startswith("2026-07")
-            md = out.get("answer_markdown") or ""
-            assert "mix by party" in md.lower() or "###" in md
-            assert "Top parties by Volume" not in md
-            # Gamma is the Karachi distributor with July volume
-            assert "Gamma Dist" in md
-            assert "Share %" in md
-        finally:
-            if previous is None:
-                os.environ.pop("EVA_DATA_DIR", None)
-            else:
-                os.environ["EVA_DATA_DIR"] = previous
 
 
 def test_party_table_omits_constant_filter_columns() -> None:

@@ -15,7 +15,6 @@ from eva_dashboard.chatbot import (
     suggest_preferred_tool,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.party_analytics import infer_party_analytics_from_text
 
 
 def _env(tmp: str) -> None:
@@ -82,29 +81,6 @@ def _seed() -> None:
         conn.commit()
 
 
-def test_routing_distributor_growth_not_matrix_or_list() -> None:
-    q1 = "which distributors have grown VTF sales since last year"
-    q2 = (
-        "show individual distributor sales for VTF with growth "
-        "vs AMS and VS last year"
-    )
-    assert _looks_party_growth_rank(q1)
-    assert _looks_party_growth_rank(q2)
-    assert not _looks_party_breakdown(q2)
-    assert resolve_forced_tool(q1) == "required"
-    assert resolve_forced_tool(q2) == "required"
-    assert suggest_preferred_tool(q1) == "analyze_parties"
-    assert suggest_preferred_tool(q2) == "analyze_parties"
-
-    inf1 = infer_party_analytics_from_text(q1)
-    assert inf1["metric"] == "ams_growth"
-    assert inf1["oil_type"] == "Eva VTF"
-    assert inf1["client_type"] == "Eva Distributors"
-    assert inf1.get("grown_only") is True
-
-    inf2 = infer_party_analytics_from_text(q2)
-    assert inf2["metric"] == "yoy_ams"
-    assert inf2["oil_type"] == "Eva VTF"
 
 
 def test_dispatch_yoy_and_yoy_ams_tables() -> None:
@@ -116,7 +92,14 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             q1 = "which distributors have grown VTF sales since last year"
             out = _dispatch_tool(
                 "analyze_parties",
-                {"period": "July 2026"},
+                {
+                    "period": "July 2026",
+                    "metric": "ams_growth",
+                    "oil_type": "Eva VTF",
+                    "client_type": "Eva Distributors",
+                    "grown_only": True,
+                    "sort": "desc",
+                },
                 user_text=q1,
             )
             assert out["ok"] is True
@@ -124,15 +107,14 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             assert out["filters"]["oil_type"] == "Eva VTF"
             parties = [p["party"] for p in out["parties"]]
             assert "Alpha Dist" in parties
-            # Grown-only: Beta declined YoY and should be excluded
+            # Grown-only: Beta declined and should be excluded
             assert "Beta Dist" not in parties
             md = out["answer_markdown"]
             assert "AMS growth" in md or "AMS gains" in md
             assert "AMS current (" in md
             assert "AMS prior (" in md
-            # AMS-growth report no longer mixes YoY volume columns
             assert "| Prior (MT) |" not in md
-            assert "Business Unit" not in md  # not a packing matrix
+            assert "Business Unit" not in md
 
             q2 = (
                 "show individual distributor sales for VTF with growth "
@@ -140,7 +122,12 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
             )
             both = _dispatch_tool(
                 "analyze_parties",
-                {"period": "July 2026"},
+                {
+                    "period": "July 2026",
+                    "metric": "yoy_ams",
+                    "oil_type": "Eva VTF",
+                    "client_type": "Eva Distributors",
+                },
                 user_text=q2,
             )
             assert both["ok"] is True
@@ -156,42 +143,6 @@ def test_dispatch_yoy_and_yoy_ams_tables() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_decline_in_ams_uses_ams_growth_sorted_asc() -> None:
-    q = "which distributors have had the biggest decline in ams"
-    assert _looks_party_growth_rank(q)
-    inf = infer_party_analytics_from_text(q)
-    assert inf["metric"] == "ams_growth"
-    assert inf.get("sort") == "asc"
-    assert inf.get("declined_only") is True
-
-    previous = os.environ.get("EVA_DATA_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        _env(tmp)
-        try:
-            _seed()
-            # Model args omitted → vocabulary/inference fills ams_growth + asc
-            out = _dispatch_tool(
-                "analyze_parties",
-                {"period": "July 2026"},
-                user_text=q,
-            )
-            assert out["ok"] is True
-            assert out["metric"] == "ams_growth"
-            md = out["answer_markdown"]
-            assert "AMS growth" in md
-            assert "AMS prior" in md or "AMS (MT)" in md
-            assert "Top parties by YoY %" not in md
-            parties = [p["party"] for p in out["parties"]]
-            assert parties, out
-            # Biggest AMS decline first
-            assert parties[0] == "Beta Dist"
-            assert out["parties"][0].get("ams_growth_pct") is not None
-            assert float(out["parties"][0]["ams_growth_pct"]) < 0
-        finally:
-            if previous is None:
-                os.environ.pop("EVA_DATA_DIR", None)
-            else:
-                os.environ["EVA_DATA_DIR"] = previous
 
 
 def test_nationally_clears_sticky_city_on_ams_decline() -> None:

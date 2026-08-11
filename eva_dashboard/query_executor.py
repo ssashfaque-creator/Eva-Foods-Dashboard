@@ -73,7 +73,7 @@ def execute_query_spec(
     if resolved.get("months_back") is not None:
         spec["months_back"] = resolved["months_back"]
 
-    errors = validate_query_spec(spec)
+    errors = validate_query_spec(spec, prior=prior)
     if errors:
         return {
             "ok": False,
@@ -238,6 +238,7 @@ def execute_query_spec(
     if isinstance(result, dict):
         result = dict(result)
         filled_spec = dict(spec)
+        filled_spec.pop("_clear_omitted", None)
         filled_spec["period"] = period
         filled_spec["grain"] = grain
         filled_spec["filters"] = filters
@@ -247,182 +248,3 @@ def execute_query_spec(
     return result
 
 
-def heuristic_plan_query(
-    user_text: str,
-    *,
-    prior: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Offline / test-only planner. NOT used to override live LLM plans.
-
-    Kept so unit tests can build valid QuerySpecs without an API key.
-    """
-    from eva_dashboard.analytics_reshape import resolve_analytics_reshape
-    from eva_dashboard.chatbot import (
-        _extract_business_units_from_text,
-        _extract_period_phrase,
-        _looks_month_wise,
-        _looks_named_party_sales,
-        _looks_price_query,
-        _looks_scoped_performance_sales,
-        _months_back_from_text,
-        suggest_preferred_tool,
-    )
-    from eva_dashboard.client_language import (
-        extract_client_type_from_text,
-        is_distributor_party_grain,
-    )
-    from eva_dashboard.party_analytics import (
-        extract_city_from_text,
-        infer_party_analytics_from_text,
-    )
-    from eva_dashboard.geo import extract_zone_from_text, normalize_zone
-    from eva_dashboard.advanced_routing import looks_advanced, infer_advanced_from_text
-
-    preferred = suggest_preferred_tool(user_text)
-    inf = infer_party_analytics_from_text(user_text)
-    text_l = (user_text or "").lower()
-
-    intent_map = {
-        "query_sales": "sales_analytical"
-        if _looks_scoped_performance_sales(user_text)
-        else "sales_matrix",
-        "analyze_parties": "party_rank",
-        "list_clients": "party_list",
-        "lookup_party": "party_lookup",
-        "query_price": "price",
-        "advanced_query": "advanced",
-    }
-    intent = intent_map.get(preferred, "sales_matrix")
-    if looks_advanced(user_text):
-        intent = "advanced"
-
-    grain_distributors = is_distributor_party_grain(user_text)
-    is_followup = bool(prior) and (
-        "this growth" in text_l
-        or "compared" in text_l
-        or "other cities" in text_l
-        or "other zones" in text_l
-        or "same format" in text_l
-        or "show this" in text_l
-        or "this distributor" in text_l
-        or grain_distributors
-        or text_l.strip().startswith("[follow-up")
-    )
-    if grain_distributors and (
-        "lowest" in text_l
-        or "worst" in text_l
-        or "performing" in text_l
-        or "show this" in text_l
-        or bool(prior)
-    ):
-        intent = "party_rank"
-    base = "prior" if is_followup and prior else "none"
-
-    reshape = resolve_analytics_reshape(
-        user_text,
-        arguments={},
-        inferred=inf,
-        prior_party_spec=prior if (prior or {}).get("source") == "party" else None,
-        prior_ctx=dict((prior or {}).get("filters") or {}),
-    )
-
-    filters: dict[str, Any] = {
-        "city": extract_city_from_text(user_text) or inf.get("city"),
-        "zone": normalize_zone(extract_zone_from_text(user_text) or inf.get("zone")),
-        "client_type": None
-        if grain_distributors
-        else (extract_client_type_from_text(user_text) or inf.get("client_type")),
-        "business_unit": inf.get("business_unit"),
-        "oil_type": inf.get("oil_type"),
-        "packing_category": inf.get("packing_category"),
-    }
-    bus = _extract_business_units_from_text(user_text)
-    if not bus and base == "prior" and prior:
-        bus = list(prior.get("business_units") or [])
-        if not bus:
-            pbu = (prior.get("filters") or {}).get("business_unit")
-            if pbu:
-                bus = [pbu]
-
-    clear: list[str] = []
-    if reshape.get("clear_city"):
-        clear.append("city")
-        filters["city"] = None
-    if reshape.get("clear_zone"):
-        clear.append("zone")
-        filters["zone"] = None
-    if grain_distributors:
-        clear.append("client_type")
-        filters["client_type"] = None
-
-    grain: dict[str, Any] = {}
-    group_by = None
-    if intent == "party_rank":
-        group_by = reshape.get("group_by") or inf.get("group_by") or "party"
-        grain["group_by"] = group_by
-    if intent.startswith("sales"):
-        if _looks_month_wise(user_text) or ("month" in text_l and "wise" in text_l):
-            grain["column_dimension"] = "month"
-            grain["months_back"] = _months_back_from_text(user_text, 6)
-            if intent == "sales_analytical":
-                intent = "sales_matrix"
-        if "city wise" in text_l or "city-wise" in text_l:
-            grain["row_dimension"] = "city"
-        if "channel" in text_l:
-            grain["row_dimension"] = "client_type"
-
-    metric = reshape.get("metric") or inf.get("metric")
-    if intent == "party_rank" and not metric:
-        metric = "ams"
-    sort = reshape.get("sort") or inf.get("sort") or "desc"
-    title_mode = reshape.get("title_mode") or inf.get("title_mode")
-
-    period_phrase = _extract_period_phrase(user_text) or inf.get("period")
-    months_back = grain.get("months_back")
-    if period_phrase and __import__("re").search(
-        r"\blast\s+(\d{1,2})\s+months?\b", period_phrase
-    ):
-        period_type = "LAST_N_MONTHS"
-        months_back = _months_back_from_text(user_text, 6)
-        grain["column_dimension"] = grain.get("column_dimension") or "month"
-        grain["months_back"] = months_back
-    elif period_phrase in {"this month", "mtd", "so far"} or not period_phrase:
-        period_type = "MTD"
-        period_phrase = period_phrase or "this month"
-    elif period_phrase == "last month":
-        period_type = "LAST_MONTH"
-    elif period_phrase == "last week":
-        period_type = "LAST_WEEK"
-    else:
-        period_type = "NAMED_MONTH"
-
-    spec: dict[str, Any] = {
-        "intent": intent,
-        "context_handling": base,
-        "clear_filters": clear,
-        "filters": {k: v for k, v in filters.items() if v is not None},
-        "grain": grain,
-        "group_by": group_by,
-        "ranking_metric": metric,
-        "sort_order": sort,
-        "grown_only": bool(reshape.get("grown_only") or False),
-        "declined_only": bool(reshape.get("declined_only") or False),
-        "title_mode": title_mode,
-        "business_units": bus,
-        "period_type": period_type,
-        "months_back": months_back,
-        "period": {"phrase": period_phrase} if period_phrase else {},
-        "named_month": period_phrase if period_type == "NAMED_MONTH" else None,
-        "rationale": f"test planner via {preferred}",
-    }
-    if intent == "party_lookup" and _looks_named_party_sales(user_text):
-        from eva_dashboard.chatbot import _extract_named_party_query
-
-        spec["party_query"] = _extract_named_party_query(user_text)
-    if intent == "advanced":
-        adv = infer_advanced_from_text(user_text)
-        spec["advanced_mode"] = adv.get("mode")
-    if intent == "price" and _looks_price_query(user_text):
-        spec["price_flags"] = {"include_price_fetch": "price fetch" in text_l}
-
-    return normalize_query_spec(spec)

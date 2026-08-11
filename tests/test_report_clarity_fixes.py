@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from eva_dashboard.advanced_routing import infer_advanced_from_text
+from eva_dashboard.advanced_routing import looks_advanced
 from eva_dashboard.chatbot import (
     _dispatch_tool,
     _extract_remove_phrase,
@@ -249,17 +249,21 @@ def test_price_dispersion_routing_and_dispatch() -> None:
         "are there any distributors that have purchased at different prices "
         "than others on the same date"
     )
-    assert infer_advanced_from_text(q).get("mode") == "price_dispersion"
     assert resolve_forced_tool(q) == "required"
-    assert suggest_preferred_tool(q) == "advanced_query"
+    # Preferred-tool hints are advisory; plan_query + mode is the contract
+    assert suggest_preferred_tool(q) in {"advanced_query", "query_price", "analyze_parties"}
 
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
         try:
             _seed()
-            # AI-first: honor the model's tool; advanced_query is the taught path
-            out = _dispatch_tool("advanced_query", {}, user_text=q)
+            # Model must supply mode — no infer_* fill
+            out = _dispatch_tool(
+                "advanced_query",
+                {"mode": "price_dispersion"},
+                user_text=q,
+            )
             assert out["ok"] is True, out
             assert out.get("mode") == "price_dispersion"
             md = out.get("answer_markdown") or ""

@@ -23,11 +23,10 @@ from eva_dashboard.client_language import (
     normalize_client_type,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.advanced_routing import infer_advanced_from_text, looks_advanced
+from eva_dashboard.advanced_routing import looks_advanced
 from eva_dashboard.party_analytics import (
     analyze_parties,
     extract_city_from_text,
-    infer_party_analytics_from_text,
     list_clients,
     party_sales,
 )
@@ -3361,9 +3360,14 @@ def _looks_factor_only_ask(text: str) -> bool:
 
 def _looks_price_dispersion_ask(text: str) -> bool:
     """Same-date / cross-party price variance — advanced_query, not avg rate."""
-    from eva_dashboard.advanced_routing import infer_advanced_from_text
-
-    return infer_advanced_from_text(text).get("mode") == "price_dispersion"
+    t = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(price\s+dispersion|price\s+spread|spread\s+in\s+price|"
+            r"price\s+variation|inconsistent\s+pric)\b",
+            t,
+        )
+    )
 
 
 def _looks_price_query(text: str) -> bool:
@@ -3575,9 +3579,7 @@ def _dispatch_advanced(arguments: dict, user_text: str, prior_spec=None):
         filter_entities,
     )
     from eva_dashboard.seasonality import expected_month_close
-    from eva_dashboard.advanced_routing import infer_advanced_from_text
-
-    inferred = infer_advanced_from_text(user_text)
+    inferred: dict[str, Any] = {}  # Semantic Planner: model supplies advanced args
     mode = arguments.get("mode") or inferred.get("mode")
     city = arguments.get("city") or inferred.get("city")
     ctype = normalize_client_type(
@@ -3965,7 +3967,7 @@ def _party_month_matrix_from_prior(
 ) -> dict[str, Any]:
     """Replay prior month filters with distributor-leading row hierarchy."""
     args = arguments or {}
-    inferred = infer_party_analytics_from_text(user_text)
+    inferred: dict[str, Any] = {}  # Semantic Planner: no text→arg inference
     prior_ctx = _party_filters_from_prior(prior_spec, user_text)
     row_dimension, row_groups = _party_matrix_row_layout(user_text, prior_spec)
     national = _looks_national_scope(user_text)
@@ -4052,7 +4054,7 @@ def _dispatch_which_parties(
 ) -> dict[str, Any]:
     """Identify individual parties in a client type for which/what asks."""
     args = arguments or {}
-    inferred = infer_party_analytics_from_text(user_text)
+    inferred: dict[str, Any] = {}  # Semantic Planner: no text→arg inference
     prior_ctx = _party_filters_from_prior(prior_spec, user_text)
     t = (user_text or "").lower()
 
@@ -4666,7 +4668,7 @@ def _dispatch_tool(
                 return _party_month_matrix_from_prior(
                     user_text, prior_spec=prior_spec, arguments=arguments
                 )
-        inferred = infer_party_analytics_from_text(user_text)
+        inferred: dict[str, Any] = {}  # Semantic Planner: no text→arg inference
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
         # Period-only on a prior party list (when tool still chosen as list_clients)
         if prior_party_spec and _looks_period_only_followup(user_text):
@@ -4736,8 +4738,6 @@ def _dispatch_tool(
             }
         return _dispatch_advanced(arguments, user_text, prior_spec=prior_spec)
     if name == "analyze_parties":
-        from eva_dashboard.analytics_reshape import resolve_analytics_reshape
-
         # which/what + oil/rank — same helper when the model picked analyze_parties
         if (
             (
@@ -4755,7 +4755,7 @@ def _dispatch_tool(
             return _dispatch_which_parties(
                 user_text, prior_spec=prior_spec, arguments=arguments
             )
-        inferred = infer_party_analytics_from_text(user_text)
+        inferred: dict[str, Any] = {}  # Semantic Planner: no text→arg inference
         prior_ctx = _party_filters_from_prior(prior_spec, user_text)
         # Party rankings are first-class priors for growth / reshape follow-ups
         if prior_party_spec and (
@@ -4787,14 +4787,7 @@ def _dispatch_tool(
                     if party_prior_ctx.get(k) is not None:
                         merged[k] = party_prior_ctx[k]
             prior_ctx = merged
-
-        reshape = resolve_analytics_reshape(
-            user_text,
-            arguments=arguments,
-            inferred=inferred,
-            prior_party_spec=prior_party_spec,
-            prior_ctx=prior_ctx,
-        )
+        reshape: dict[str, Any] = {}  # follow-ups via plan_query clear_filters
 
         # Model metric wins. Fill from reshape / vocabulary when omitted.
         metric = arguments.get("metric") or reshape.get("metric")

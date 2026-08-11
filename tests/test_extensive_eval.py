@@ -111,6 +111,7 @@ def test_extensive_offline_eval_bank() -> None:
                 tool: str,
                 prior_spec: dict[str, Any] | None = None,
                 prior_price_spec: dict[str, Any] | None = None,
+                args: dict[str, Any] | None = None,
             ) -> dict[str, Any]:
                 is_fu = "[FOLLOW-UP" in q
                 forced = resolve_forced_tool(
@@ -123,7 +124,7 @@ def test_extensive_offline_eval_bank() -> None:
                 t0 = time.time()
                 out = _dispatch_tool(
                     tool,
-                    {},
+                    args or {},
                     user_text=q,
                     prior_spec=prior_spec,
                     prior_price_spec=prior_price_spec,
@@ -167,6 +168,12 @@ def test_extensive_offline_eval_bank() -> None:
                     "which distributors have grown VTF sales since last year",
                     forced_exp="required",
                     tool="analyze_parties",
+                    args={
+                        "metric": "ams_growth",
+                        "oil_type": "Eva VTF",
+                        "client_type": "Eva Distributors",
+                        "grown_only": True,
+                    },
                 )
                 assert out.get("metric") == "ams_growth"
                 md = out.get("answer_markdown") or ""
@@ -181,6 +188,11 @@ def test_extensive_offline_eval_bank() -> None:
                     "vs AMS and VS last year",
                     forced_exp="required",
                     tool="analyze_parties",
+                    args={
+                        "metric": "yoy_ams",
+                        "oil_type": "Eva VTF",
+                        "client_type": "Eva Distributors",
+                    },
                 )
                 assert out.get("metric") == "yoy_ams"
                 md = out.get("answer_markdown") or ""
@@ -193,6 +205,11 @@ def test_extensive_offline_eval_bank() -> None:
                     "Compare Lahore vs Karachi vs Islamabad for July",
                     forced_exp="required",
                     tool="advanced_query",
+                    args={
+                        "mode": "compare_cities",
+                        "entities": ["Lahore", "Karachi", "Islamabad"],
+                        "period": "July",
+                    },
                 )
                 assert len(out.get("entities") or []) == 3
             except Exception as exc:
@@ -203,6 +220,11 @@ def test_extensive_offline_eval_bank() -> None:
                     "Imtiaz vs Metro vs Chase Up this month",
                     forced_exp="required",
                     tool="advanced_query",
+                    args={
+                        "mode": "compare_client_types",
+                        "entities": ["Imtiaz Store", "METRO HABIB", "CHASE UP"],
+                        "period": "this month",
+                    },
                 )
                 assert len(out.get("entities") or []) == 3
                 names = {e.get("name") for e in (out.get("entities") or [])}

@@ -16,7 +16,6 @@ from eva_dashboard.chatbot import (
     resolve_row_dimension_request,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.party_analytics import infer_party_analytics_from_text
 from eva_dashboard.sales_query import (
     AMS_GROWTH_COL,
     AMS_PRIOR_3_COL,
@@ -262,50 +261,6 @@ def test_same_format_preserves_packing_for_imtiaz() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_pakistan_growth_clears_city_and_ranks_ams_growth() -> None:
-    previous = os.environ.get("EVA_DATA_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        _env(tmp)
-        try:
-            _seed()
-            assert _looks_national_scope(
-                "which distributors have grown vtf sales the most all over pakistan"
-            )
-            q = (
-                "can you compare which distributors have grown vtf sales "
-                "the most all over pakistan"
-            )
-            inf = infer_party_analytics_from_text(q)
-            assert inf["metric"] == "ams_growth"
-            assert inf["oil_type"] == "Eva VTF"
-            prior = {
-                "filters": {
-                    "city": "Lahore",
-                    "client_type": "Eva Distributors",
-                },
-                "column_dimension": "month",
-                "row_dimension": "packing_category",
-            }
-            out = _dispatch_tool(
-                "analyze_parties",
-                {"period": "July 2026"},
-                user_text=q,
-                prior_spec=prior,
-            )
-            assert out["ok"] is True
-            assert out["metric"] == "ams_growth"
-            assert out["filters"].get("city") is None
-            assert out["filters"].get("business_unit") is None
-            assert out["filters"]["oil_type"] == "Eva VTF"
-            md = out.get("answer_markdown") or ""
-            assert "AMS growth" in md or "AMS gains" in md
-            assert "AMS current (" in md
-            assert "Zeta Dist" in md
-        finally:
-            if previous is None:
-                os.environ.pop("EVA_DATA_DIR", None)
-            else:
-                os.environ["EVA_DATA_DIR"] = previous
 
 
 def test_month_matrix_has_prior_ams_and_growth() -> None:

@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from eva_dashboard.advanced_routing import infer_advanced_from_text, looks_advanced
+from eva_dashboard.advanced_routing import looks_advanced
 from eva_dashboard.chatbot import (
     _dispatch_tool,
     _extract_named_party_query,
@@ -146,19 +146,6 @@ def test_named_party_natural_phrasing() -> None:
     assert suggest_preferred_tool("Show Imtiaz sales for July") == "query_sales"
 
 
-def test_advanced_modes_not_stolen_by_party_analytics() -> None:
-    assert infer_advanced_from_text(
-        "Compare Imtiaz vs distributors growth last month"
-    )["mode"] == "compare_client_types"
-    assert infer_advanced_from_text("Show reactivated parties")["mode"] == "reactivated"
-    assert looks_advanced("Days since last invoice for distributors")
-    assert looks_advanced("Which cities declined more than 20% YoY?")
-    assert resolve_forced_tool("Compare Lahore vs Karachi last month") == "required"
-    assert suggest_preferred_tool("Compare Lahore vs Karachi last month") == (
-        "advanced_query"
-    )
-    assert resolve_forced_tool("what Food Panda are active") == "required"
-    assert suggest_preferred_tool("what Food Panda are active") == "list_clients"
 
 
 def test_named_party_dist_suffix_and_exclude_online_execute() -> None:

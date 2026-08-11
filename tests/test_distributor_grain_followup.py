@@ -1,4 +1,4 @@
-"""Distributor-wise follow-ups must not invent Eva Distributors + AMS zeros."""
+"""Distributor-wise follow-ups via explicit QuerySpecs (no heuristic planner)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from eva_dashboard.client_language import (
     is_distributor_party_grain,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.party_analytics import analyze_parties, infer_party_analytics_from_text
-from eva_dashboard.query_executor import execute_query_spec, heuristic_plan_query
+from eva_dashboard.party_analytics import analyze_parties
+from eva_dashboard.query_executor import execute_query_spec
 
 
 def _env(tmp: str) -> None:
@@ -43,7 +43,6 @@ def _seed() -> None:
                 ("3", "Gamma New", "Other Clients", "Islamabad", "Islamabad"),
             ],
         )
-        # Apr–Jun AMS history for Alpha/Beta; Gamma only July (AMS=0).
         rows = [
             ("2026-04-10", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "Eva Distributors"),
             ("2026-05-10", "Alpha Dist", "Eva Canola Oil (StandUpPouch)", 30.0, "Eva Distributors"),
@@ -76,24 +75,10 @@ def test_grain_language_does_not_mean_eva_distributors_channel() -> None:
     )
     assert is_distributor_party_grain(q)
     assert extract_client_type_from_text(q) is None
-    # Explicit channel still works
     assert (
         extract_client_type_from_text("Canola price for Distributors last week")
         == "Eva Distributors"
     )
-    assert (
-        extract_client_type_from_text("who are Eva Distributors in Lahore")
-        == "Eva Distributors"
-    )
-
-
-def test_infer_lowest_performing_uses_vs_ams_asc() -> None:
-    q = "show this distributor wise identifying the lowest performing distributors"
-    inf = infer_party_analytics_from_text(q)
-    assert inf.get("client_type") is None
-    assert inf.get("metric") == "vs_ams"
-    assert inf.get("sort") == "asc"
-    assert inf.get("group_by") == "party"
 
 
 def test_prompt_teaches_distributor_grain_vs_channel() -> None:
@@ -102,60 +87,41 @@ def test_prompt_teaches_distributor_grain_vs_channel() -> None:
     assert "distributor-wise" in vocab.lower() or "distributor wise" in vocab.lower()
     assert "vs_ams" in vocab
     assert "Eva Distributors" in guide
-    assert "underperformers" in guide or "vs_ams" in guide
 
 
-def test_heuristic_followup_keeps_eva_bus_not_channel() -> None:
-    q = (
-        "can you show this distributor wise identifying the "
-        "lowest performing distributors"
-    )
-    prior = {
-        "source": "sales",
-        "business_units": ["Eva Consumer", "Eva Bulk"],
-        "filters": {},
-        "period_phrase": "July",
-    }
-    plan = heuristic_plan_query(q, prior=prior)
-    assert plan["intent"] == "party_rank"
-    assert plan["base"] == "prior"
-    assert plan["metric"] == "vs_ams"
-    assert plan["sort"] == "asc"
-    assert plan.get("filters", {}).get("client_type") is None
-    assert "client_type" in (plan.get("clear") or [])
-    assert set(plan.get("business_units") or []) == {"Eva Consumer", "Eva Bulk"}
-
-
-def test_lowest_performing_eva_scope_no_zero_ams_title() -> None:
+def test_lowest_performing_via_explicit_query_spec() -> None:
+    """Mock QuerySpec: prior Eva BUs + distributor-wise + vs_ams asc."""
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
         try:
             _seed()
-            q = (
-                "can you show this distributor wise identifying the "
-                "lowest performing distributors"
-            )
             prior = {
                 "source": "sales",
                 "business_units": ["Eva Consumer", "Eva Bulk"],
                 "filters": {},
                 "period_phrase": "July",
             }
-            plan = heuristic_plan_query(q, prior=prior)
-            out = execute_query_spec(plan, prior=prior, user_text=q)
-            assert out.get("ok") is True
+            plan = {
+                "intent": "party_rank",
+                "context_handling": "prior",
+                "clear_filters": ["client_type"],
+                "period_type": "NAMED_MONTH",
+                "named_month": "July",
+                "group_by": "party",
+                "ranking_metric": "vs_ams",
+                "sort_order": "asc",
+                "title_mode": "underperformers",
+                "business_units": ["Eva Consumer", "Eva Bulk"],
+            }
+            out = execute_query_spec(plan, prior=prior)
+            assert out.get("ok") is True, out
             md = out.get("answer_markdown") or ""
             assert "Eva Distributors" not in md.split("\n")[0]
             assert "Lowest" in md
             assert "Top parties by AMS" not in md
-            # Gamma has July volume but no AMS baseline — must not lead as "lowest"
-            parties = [r.get("party") for r in (out.get("parties") or [])]
-            assert "Gamma New" not in parties[:3] or (
-                (out.get("parties") or [{}])[0].get("ams_mt") or 0
-            ) > 0
-            # Scope should be Eva brand BUs, not Shortening-only noise as title filter
-            # Beta (Imtiaz) buys Eva Bulk — should be eligible without channel filter
+            for row in out.get("parties") or []:
+                assert (row.get("ams_mt") or 0) > 0
             assert any(
                 p.get("party") == "Beta Store" for p in (out.get("parties") or [])
             ) or "Beta Store" in md

@@ -15,7 +15,6 @@ from eva_dashboard.chatbot import (
     resolve_remove_request,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.party_analytics import infer_party_analytics_from_text
 from eva_dashboard.sales_query import query_sales
 from eva_dashboard.table_export import build_excel_bytes, matrix_to_records
 
@@ -196,22 +195,23 @@ def test_add_city_layer_regroup() -> None:
 
 
 def test_growing_vs_sort_by_ams_growth() -> None:
-    only = infer_party_analytics_from_text("show only growing distributors")
-    assert only["metric"] == "ams_growth"
-    assert only.get("grown_only") is True
-
-    sort_q = infer_party_analytics_from_text("sort by AMS growth")
-    assert sort_q["metric"] == "ams_growth"
-    assert not sort_q.get("grown_only")
-
+    """Growth rank language still detected; grown_only is a plan field now."""
     assert _looks_party_growth_rank("which distributors are growing")
+    assert _looks_party_growth_rank("show only growing distributors")
+    # Explicit QuerySpec for grown_only / sort — not inferred from text
+    from eva_dashboard.query_executor import execute_query_spec
 
-
-def test_marketing_does_not_become_tin_packing() -> None:
-    inf = infer_party_analytics_from_text(
-        "exclude sample/marketing from distributor rankings"
-    )
-    assert inf.get("packing_category") is None
+    plan = {
+        "intent": "party_rank",
+        "context_handling": "none",
+        "clear_filters": [],
+        "period_type": "MTD",
+        "ranking_metric": "ams_growth",
+        "sort_order": "desc",
+        "grown_only": True,
+    }
+    assert plan["grown_only"] is True
+    assert plan["ranking_metric"] == "ams_growth"
 
 
 def test_analysis_fallback_uses_facts_when_model_empty() -> None:

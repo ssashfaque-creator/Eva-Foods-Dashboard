@@ -280,7 +280,7 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 },
                 "rationale": {"type": "string"},
             },
-            "required": ["intent", "period_type"],
+            "required": ["intent", "period_type", "context_handling"],
             "additionalProperties": False,
         },
     },
@@ -365,15 +365,21 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
     return (
         "PRIOR_QUERY_CONTEXT (last answer the user can Reply on):\n"
         f"{json.dumps(prior, indent=2, default=str)}\n\n"
-        "Follow-up rules:\n"
+        "Follow-up rules (STRICT):\n"
         "- Reshape / 'this…' / 'compared to…' → context_handling='prior'.\n"
-        "- You MUST list clear_filters for anything that no longer applies "
-        "(e.g. clear city when ranking other cities).\n"
+        "- When context_handling='prior', clear_filters is REQUIRED "
+        "(use [] only if every prior filter still applies).\n"
+        "- Lahore → national / all Pakistan → clear_filters:[\"city\"] "
+        "(and \"zone\" if set). Omit filters.city.\n"
+        "- Lahore → other cities league → clear_filters:[\"city\"], "
+        "group_by=city.\n"
+        "- Lahore → Karachi → clear_filters:[\"city\"], "
+        "filters.city=\"Karachi\".\n"
         "- Fresh complete ask → context_handling='none'.\n"
         "- Keep business_units from prior when the user says 'this' and does "
         "not rename the brand.\n"
         "- distributor-wise after a brand table → group_by=party, "
-        "clear_filters include client_type if it was sticky; metric vs_ams "
+        "clear_filters include client_type if sticky; ranking_metric=vs_ams "
         "for lowest performing. Do NOT invent Eva Distributors.\n"
     )
 
@@ -429,9 +435,14 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     if base not in {"none", "prior"}:
         base = "none"
 
+    clear_omitted = (
+        "clear_filters" not in raw and "clear" not in raw
+    )
     clear_raw = raw.get("clear_filters")
     if clear_raw is None:
-        clear_raw = raw.get("clear") or []
+        clear_raw = raw.get("clear")
+    if clear_raw is None:
+        clear_raw = []
     clear = []
     for c in clear_raw or []:
         key = str(c)
@@ -491,6 +502,7 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "intent": intent,
         "base": base,
         "clear": clear,
+        "_clear_omitted": clear_omitted,
         "period_type": period_type,
         "period": period,
         "months_back": months_back,
@@ -512,7 +524,11 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def validate_query_spec(spec: dict[str, Any]) -> list[str]:
+def validate_query_spec(
+    spec: dict[str, Any],
+    *,
+    prior: dict[str, Any] | None = None,
+) -> list[str]:
     """Return human-readable plan errors for the LLM (empty = ok)."""
     errors: list[str] = []
     if not spec.get("intent"):
@@ -526,6 +542,30 @@ def validate_query_spec(spec: dict[str, Any]) -> list[str]:
             "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6. "
             "If unspecified, use MTD."
         )
+    # Follow-up state: when using prior, clear_filters must be explicit
+    # (empty list is OK — means keep all prior filters).
+    if spec.get("base") == "prior":
+        raw_clear = spec.get("clear")
+        # normalize_query_spec always sets clear to a list; detect omission via
+        # a sentinel set during normalize when neither clear nor clear_filters given.
+        if spec.get("_clear_omitted"):
+            errors.append(
+                "context_handling='prior' requires clear_filters (array). "
+                "Use [] to keep all prior filters, or e.g. [\"city\"] when the "
+                "user switches to national / other cities / a new city."
+            )
+        # Sticky city while ranking other cities / national
+        grain = spec.get("grain") or {}
+        filters = spec.get("filters") or {}
+        clear = set(spec.get("clear") or [])
+        if (grain.get("group_by") or "") == "city" and filters.get("city") and (
+            "city" not in clear
+        ):
+            errors.append(
+                "group_by=city while filters.city is set will rank inside one city. "
+                "For 'other cities' / national city league, add clear_filters:[\"city\"] "
+                "and omit filters.city."
+            )
     pt = spec.get("period_type")
     if pt == "LAST_N_MONTHS":
         mb = spec.get("months_back") or (spec.get("grain") or {}).get("months_back")

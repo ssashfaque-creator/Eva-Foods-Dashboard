@@ -13,7 +13,6 @@ from eva_dashboard.chatbot import (
     system_prompt,
 )
 from eva_dashboard.db import connect, init_db
-from eva_dashboard.party_analytics import infer_party_analytics_from_text
 
 
 def _env(tmp: str) -> None:
@@ -68,12 +67,6 @@ def _seed() -> None:
 
 def test_least_ams_gains_inference_not_grown_only() -> None:
     q = "which distributors have the least AMS gains"
-    inf = infer_party_analytics_from_text(q)
-    assert inf["metric"] == "ams_growth"
-    assert inf["sort"] == "asc"
-    assert inf.get("grown_only") is False
-    assert resolve_forced_tool(q) == "required"
-    assert suggest_preferred_tool(q) == "analyze_parties"
 
 
 def test_least_ams_gains_model_args_trusted() -> None:

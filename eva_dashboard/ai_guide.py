@@ -55,9 +55,13 @@ def vocabulary_for_prompt() -> str:
         "",
         "7. GEOGRAPHY",
         "- city / city_filter ← City-Filter (Lahore, Karachi, …)",
-        "- zone ← SOUTH | CENTRAL | NORTH",
-        "- nationally / all over Pakistan → clear_filters include city (+ zone)",
-        "- other cities → group_by=city + clear_filters: [\"city\"]",
+        "- zone ← SOUTH | CENTRAL | NORTH — ONLY when the user names a zone.",
+        "- Do NOT invent a zone for unrecognized cities. The Python engine maps "
+        "blank/unmapped/undefined City-Filter → Karachi → SOUTH automatically.",
+        "- nationally / all over Pakistan → context_handling=prior (if follow-up) "
+        "+ clear_filters:[\"city\",\"zone\"] (omit city filter).",
+        "- other cities / city league → group_by=city + clear_filters:[\"city\"]",
+        "- Switching Lahore → national: MUST clear_filters:[\"city\"].",
         "",
         "8. PERIOD (period_type is REQUIRED on every plan)",
         "- unspecified → period_type=MTD",
