@@ -529,6 +529,144 @@ def test_exclude_al_shaheer_keeps_table_grain() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_party_like_exclude_works_without_clients_master() -> None:
+    """Regression: exclude al shaheer must drop sales parties even when
+    they are missing from the clients master (was a silent no-op)."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+            from eva_dashboard.sales_query import query_sales
+
+            sq._CLIENTS_CACHE = None
+            sq._CLIENTS_CACHE_SIG = None
+            init_db()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "('P1', 'Eva Consumer', 'Eva Canola', 'Stand up', '{}', "
+                    "datetime('now'))"
+                )
+                # Only OTHER STORE on master — Shaheer variants unmapped
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('10', 'OTHER STORE', 'Eva Distributors', 'Lahore', "
+                    "'Lahore', '', '{}', datetime('now'))"
+                )
+                for i, (dt, party, mt) in enumerate(
+                    [
+                        ("2026-07-15", "AL SHAHEER CORPORATION LIMITED", 40),
+                        ("2026-07-15", "OTHER STORE", 10),
+                        ("2026-07-16", "AL SHAHEER TRADERS (LAHORE)", 20),
+                    ]
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO sales (
+                          source_file_id, row_hash, imported_at, date, party,
+                          product, qty, unit, mt_qty, rate, incl_gst_fed_amount,
+                          client_type, payload_json
+                        ) VALUES (NULL, ?, datetime('now'), ?, ?, 'P1', ?,
+                          'MT', ?, 100, ?, 'Eva Distributors', '{}')
+                        """,
+                        (f"pl-{i}", dt, party, mt, mt, mt * 100),
+                    )
+                conn.commit()
+
+            # Direct engine path
+            r = query_sales(
+                period=None,
+                columns="month",
+                row_dimension="party",
+                months_back=6,
+                date_from="2026-01-01",
+                date_to="2026-07-31",
+                excludes={"party_like": ["al shaheer"]},
+            )
+            parties = [
+                str(x.get("party") or "")
+                for x in (r.get("matrix") or {}).get("rows") or []
+            ]
+            assert not any("SHAHEER" in p.upper() for p in parties), parties
+            assert "OTHER STORE" in parties
+
+            # Chat follow-up path: remove / exclude must both resolve + apply
+            for text in ("remove al shaheer", "exclude al shaheer"):
+                rm = resolve_remove_request(
+                    text,
+                    prior_spec={
+                        "row_dimension": "party",
+                        "column_dimension": "month",
+                        "filters": {},
+                        "row_groups": [],
+                    },
+                )
+                assert rm is not None, text
+                blob = " ".join(
+                    str(v).lower()
+                    for vals in (rm.get("excludes") or {}).values()
+                    for v in vals
+                )
+                assert "shaheer" in blob, (text, rm)
+
+                coerced = _coerce_vocab_from_user_text(
+                    {
+                        "row_dimensions": ["party"],
+                        "column_dimensions": ["month"],
+                        "metrics": ["volume", "ams"],
+                        "filters": {},
+                        "excludes": {},
+                    },
+                    text,
+                    prior={
+                        "row_dimensions": ["party"],
+                        "column_dimensions": ["month"],
+                        "filters": {},
+                        "excludes": {},
+                    },
+                )
+                ex = coerced.get("excludes") or rm.get("excludes") or {}
+                assert "shaheer" in " ".join(
+                    str(v).lower()
+                    for vals in ex.values()
+                    for v in vals
+                ), (text, ex)
+                r2 = query_sales(
+                    period=None,
+                    columns="month",
+                    row_dimension="party",
+                    months_back=6,
+                    date_from="2026-01-01",
+                    date_to="2026-07-31",
+                    excludes=ex,
+                )
+                parties2 = [
+                    str(x.get("party") or "")
+                    for x in (r2.get("matrix") or {}).get("rows") or []
+                ]
+                assert not any("SHAHEER" in p.upper() for p in parties2), (
+                    text,
+                    parties2,
+                )
+                assert "OTHER STORE" in parties2
+                md = (r2.get("answer_markdown") or "").upper()
+                assert "AL SHAHEER CORPORATION LIMITED" not in md or "EXCL" in md
+        finally:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            sq._CLIENTS_CACHE_SIG = None
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_exclude_donation_sales_resolves() -> None:
     prior = {
         "row_dimension": "business_unit",

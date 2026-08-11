@@ -2244,6 +2244,13 @@ def resolve_remove_request(
         bucket = excludes.setdefault(ex_dim, [])
         if ex_val not in bucket:
             bucket.append(ex_val)
+        # Exact party + spoken stem → also party_like so unmapped / sister
+        # branches matching the spoken name are dropped from sales.
+        if ex_dim == "party" and len(str(part).strip()) >= 3:
+            like_bucket = excludes.setdefault("party_like", [])
+            stem = str(part).strip()
+            if stem not in like_bucket:
+                like_bucket.append(stem)
     if not excludes:
         return None
     # Also drop excluded BUs from an active multi-BU filter list

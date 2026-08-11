@@ -844,7 +844,21 @@ def _fetch_lines(
         for v in (ex.get("party_like") or [])
         if str(v).strip()
     ]
-    # Prefer master-driven party exclusions when we can resolve names.
+    # Always apply fragment excludes on sales.party via SQL LIKE.
+    # Do NOT rely only on the clients master — many live sales names are
+    # unmapped or diverge slightly, and master-only drops silently no-op.
+    party_norm_expr = (
+        "lower(trim(replace(replace(COALESCE(s.party, ''), '  ', ' '), '  ', ' ')))"
+    )
+    for frag in party_like_frags:
+        needle = re.sub(r"\s+", " ", frag).strip().lower()
+        if len(needle) < 3:
+            continue
+        where.append(f"{party_norm_expr} NOT LIKE ?")
+        params.append(f"%{needle}%")
+
+    # Prefer master-driven party exclusions when we can resolve names
+    # (covers inactive + exact master aliases for the same fragment).
     drop_party_keys: set[str] = set()
     if drop_inactive:
         drop_party_keys |= _inactive_party_keys()
@@ -860,8 +874,7 @@ def _fetch_lines(
         if drop_names:
             placeholders = ",".join("?" for _ in drop_names)
             where.append(
-                f"lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
-                f"NOT IN ({placeholders})"
+                f"{party_norm_expr} NOT IN ({placeholders})"
             )
             params.extend(_norm_party_key(n) for n in drop_names)
 
@@ -941,6 +954,21 @@ def _fetch_lines(
             frame = frame[
                 ~frame[col].astype(str).str.strip().str.lower().eq(tk)
             ]
+    # Post-filter party_like on the resolved frame (belt-and-suspenders for
+    # any path that bypassed SQL, and for whitespace/case variants).
+    if party_like_frags and not frame.empty and "party" in frame.columns:
+        party_series = (
+            frame["party"]
+            .astype(str)
+            .map(lambda v: re.sub(r"\s+", " ", v).strip().lower())
+        )
+        mask = pd.Series(True, index=frame.index)
+        for frag in party_like_frags:
+            needle = re.sub(r"\s+", " ", frag).strip().lower()
+            if len(needle) < 3:
+                continue
+            mask &= ~party_series.str.contains(re.escape(needle), na=False)
+        frame = frame[mask]
     # Canonical packing labels so "Pet bottle" / "Pet Bottle" collapse.
     if not frame.empty and "packing_category" in frame.columns:
         frame = frame.copy()
@@ -1432,6 +1460,7 @@ def _ams_fetch_filters(
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
+    excludes: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "city": city,
@@ -1446,6 +1475,7 @@ def _ams_fetch_filters(
         "party": party,
         "parties": parties,
         "party_ilike": party_ilike,
+        "excludes": excludes,
     }
 
 
@@ -1465,6 +1495,7 @@ def _load_ams_window_frame(
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
+    excludes: dict[str, list[str]] | None = None,
     frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One window covering the N prior full months (reuse ``frame`` when it already covers it)."""
@@ -1499,6 +1530,7 @@ def _load_ams_window_frame(
             party=party,
             parties=parties,
             party_ilike=party_ilike,
+            excludes=excludes,
         ),
     )
 
@@ -1639,6 +1671,7 @@ def _enrich_month_matrix_with_ams(
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
+    excludes: dict[str, list[str]] | None = None,
     lines_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Insert AMS columns before Total on a month matrix.
@@ -1688,6 +1721,7 @@ def _enrich_month_matrix_with_ams(
         party=party,
         parties=parties,
         party_ilike=party_ilike,
+        excludes=excludes,
         frame=lines_frame,
     )
 
@@ -1759,12 +1793,18 @@ def _enrich_month_matrix_with_ams(
         prior = _ams_val(kind, raw, AMS_PRIOR_3_COL)
         for label in ams_cols:
             if label == AMS_GROWTH_COL:
-                growth = pct_change(cur, prior)
-                row[label] = (
-                    round(float(growth), 1) if growth is not None else None
-                )
+                # No current AMS → blank (avoid a wall of -100.0% rows)
+                if float(cur or 0) == 0:
+                    row[label] = None
+                else:
+                    growth = pct_change(cur, prior)
+                    row[label] = (
+                        round(float(growth), 1) if growth is not None else None
+                    )
                 continue
-            row[label] = mt_round(_ams_val(kind, raw, label))
+            # Store None for zero AMS so the table doesn't look like empty data
+            ams_v = float(_ams_val(kind, raw, label) or 0)
+            row[label] = mt_round(ams_v) if ams_v else None
         row.pop("Average", None)
 
     col_tot = dict(matrix.get("column_totals") or {})
@@ -2450,6 +2490,7 @@ def query_sales(
             party=party_f,
             parties=parties_f,
             party_ilike=party_ilike_f,
+            excludes=ex_map or None,
             lines_frame=frame,
         )
     else:
@@ -2957,6 +2998,18 @@ def _matrix_row_css_class(row: dict[str, Any], row_key: str) -> str:
     return ""
 
 
+def _format_matrix_cell(key: str, val: Any) -> str:
+    """Format a matrix numeric cell; blank out pure zeros (except Total)."""
+    if val is None or val == "":
+        return ""
+    if isinstance(val, (int, float)):
+        # Month / AMS / growth zeros → blank so tables don't look empty
+        if key != "Total" and float(val) == 0:
+            return ""
+        return mt_str(val)
+    return _html_escape(val)
+
+
 def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
     """Render matrix as an HTML table (rowspan merges + bold subtotals/totals)."""
     columns = list(matrix.get("columns") or [])
@@ -2999,12 +3052,7 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
                 lines.append(f"<td{cls}{rs}>{_html_escape(text)}</td>")
             for key in columns:
                 val = row.get(key, 0)
-                if val is None or val == "":
-                    text = ""
-                elif isinstance(val, (int, float)):
-                    text = mt_str(val)
-                else:
-                    text = _html_escape(val)
+                text = _format_matrix_cell(key, val)
                 if key == "Total":
                     cls = "num total-col"
                 elif str(key).startswith("AMS"):
@@ -3039,12 +3087,7 @@ def _matrix_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
         lines.append(f'<td class="dim">{lab}</td>')
         for key in columns:
             val = row.get(key, 0)
-            if isinstance(val, (int, float)):
-                text = mt_str(val)
-            elif val is None:
-                text = "—"
-            else:
-                text = _html_escape(val)
+            text = _format_matrix_cell(key, val)
             if key == "Total":
                 cls = "num total-col"
             elif str(key).startswith("AMS"):

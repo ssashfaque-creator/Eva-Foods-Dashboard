@@ -119,9 +119,9 @@ def _resolve_spoken_excludes(user_text: str) -> dict[str, list[str]]:
     for phrase in _spoken_exclude_phrases(user_text):
         for part in _split_remove_value_phrases(phrase) or [phrase]:
             resolved = _resolve_exclude_value(part)
+            part_s = str(part or "").strip()
             if not resolved:
                 # Last resort: treat as party fragment so we never INCLUDE it
-                part_s = str(part or "").strip()
                 if len(part_s) >= 3:
                     resolved = ("party_like", part_s)
                 else:
@@ -130,6 +130,12 @@ def _resolve_spoken_excludes(user_text: str) -> dict[str, list[str]]:
             bucket = out.setdefault(dim, [])
             if val not in bucket:
                 bucket.append(val)
+            # Exact party resolve still adds a fragment exclude so sister
+            # branches / unmapped sales spellings drop too ("al shaheer").
+            if dim == "party" and len(part_s) >= 3:
+                like_bucket = out.setdefault("party_like", [])
+                if part_s not in like_bucket:
+                    like_bucket.append(part_s)
     return out
 
 
