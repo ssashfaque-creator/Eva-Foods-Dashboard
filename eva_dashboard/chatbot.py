@@ -244,18 +244,20 @@ def system_prompt() -> str:
 
 {live}
 
-# HOW YOU WORK (v1.0 Semantic Planner)
-1. YOU are the planner. Resolve vocabulary, period, filters, grain, and metrics.
-2. Call ``plan_query`` with a COMPLETE QuerySpec. Required: intent + period_type.
+# HOW YOU WORK (v1.0 Universal Pivot Planner)
+1. YOU describe a pivot: row_dimensions, column_dimensions, metrics, filters.
+2. Call ``plan_query`` with a COMPLETE QuerySpec. Required: row_dimensions +
+   metrics + period_type + context_handling. Do NOT pick rigid intents.
 3. The server executes your plan BLINDLY. It will NOT rewrite filters or periods.
 4. If you get plan_errors, fix them and call plan_query again — do not invent numbers.
 5. After tables arrive: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
 6. Follow-ups: context_handling='prior' + clear_filters for anything that drops.
    Fresh ask → context_handling='none'.
-7. TREND DEFAULT: sales with no period → sales_trend + LAST_N_MONTHS +
-   months_back=6 + group_by=["business_unit"]. Never invent a static
-   Channel×BU matrix unless asked. Composite SKUs ("canola standup") →
-   oil_type + packing_category filters (AND). Monthly price → time_grain=month.
+7. TREND DEFAULT: sales with no period → LAST_N_MONTHS/6,
+   row_dimensions=["business_unit"], column_dimensions=["month"],
+   metrics=["volume","ams"]. customer/party/account/buyer/store →
+   row_dimensions=["party"]. price/rates → metrics=["avg_price"]
+   (+ column_dimensions=["month"] when monthly).
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -5784,8 +5786,8 @@ def chat_completion(
                             "ok": False,
                             "error": "Empty plan_query arguments.",
                             "plan_errors": [
-                                "Emit intent, period_type, context_handling, "
-                                "and filters/grain for the user ask."
+                                "Emit row_dimensions, metrics, period_type, "
+                                "context_handling (Universal Pivot)."
                             ],
                             "response_instructions": (
                                 "REQUIRED: Call plan_query again with a "

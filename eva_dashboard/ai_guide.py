@@ -23,34 +23,30 @@ def vocabulary_for_prompt() -> str:
         return lines
 
     parts = [
-        "VOCABULARY (YOU translate spoken words → QuerySpec fields):",
+        "VOCABULARY (YOU translate spoken words → Universal Pivot fields):",
         "",
-        "1. BRANDS → business_units",
+        "1. BRANDS → filters.business_units",
         "- Eva → [\"Eva Consumer\", \"Eva Bulk\"] (BOTH). Never Shortening/Meal.",
         "- Maan → [\"Maan Consumer\", \"Maan Bulk\"] (BOTH).",
         "- Consumer (alone) → [\"Eva Consumer\"].",
         "- Bulk (Eva context) → Eva Bulk; \"Maan bulk\" → Maan Bulk.",
-        "- Full names: Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk, Cusine King.",
         "",
-        "2. DISTRIBUTOR AMBIGUITY (CRITICAL)",
+        "2. PARTY / CUSTOMER → row_dimensions=['party'] (STRICT)",
+        "- customer, customer-wise, party, party-wise, account, buyer, store,",
+        "  distributor-wise, by distributor → ALWAYS row_dimensions=[\"party\"].",
+        "- Do NOT invent filters.client_type unless a channel is named.",
         "- \"distributor sales\" / \"who are distributors\" → filters.client_type="
-        "\"Eva Distributors\".",
-        "- \"distributor-wise\" / \"by distributor\" / \"party-wise\" → group_by="
-        "\"party\". Do NOT invent client_type unless the channel is named.",
-        "- \"Eva distributor sales\" → BOTH brand BUs AND client_type=Eva Distributors.",
+        "\"Eva Distributors\" (channel filter) — different from distributor-wise.",
+        "- \"Eva distributor sales\" → brand BUs AND client_type=Eva Distributors.",
         "",
         "3. CHANNEL TYPES (only when named as a channel):",
         *_group(CLIENT_TYPE_ALIASES),
         "",
-        "4. PRODUCT vs SKU vs COMPOSITE FILTERS (CRITICAL)",
-        "- \"product-wise\" / \"by product\" → group_by or row_dimension="
-        "packing_category.",
-        "- \"SKU-wise\" / \"by SKU\" → product.",
-        "- Named oil+packing combos are FILTERS, not a whole BU:",
-        "  \"canola standup\" / \"Eva canola stand-up\" →",
-        "  filters={oil_type:\"Eva Canola\", packing_category:\"Stand up\"}.",
-        "  Do NOT broaden to all of Eva Consumer.",
-        "- \"cooking tin\" → oil_type=Eva Cooking + packing_category=Tin (same pattern).",
+        "4. PRODUCT / SKU / COMPOSITE FILTERS",
+        "- product-wise → row_dimensions=[\"packing_category\"]",
+        "- SKU-wise → row_dimensions=[\"product\"]",
+        "- \"canola standup\" → filters={oil_type:\"Eva Canola\", "
+        "packing_category:\"Stand up\"} (AND). Do NOT broaden to all Eva Consumer.",
         "",
         "5. PACKING:",
         *_group(PACKING_ALIASES),
@@ -59,87 +55,69 @@ def vocabulary_for_prompt() -> str:
         *_group(OIL_TYPE_ALIASES),
         "",
         "7. GEOGRAPHY",
-        "- city / city_filter ← City-Filter (Lahore, Karachi, …)",
-        "- zone ← SOUTH | CENTRAL | NORTH — ONLY when the user names a zone.",
-        "- Do NOT invent a zone for unrecognized cities. The Python engine maps "
-        "blank/unmapped/undefined City-Filter → Karachi → SOUTH automatically.",
-        "- nationally / all over Pakistan → context_handling=prior (if follow-up) "
-        "+ clear_filters:[\"city\",\"zone\"] (omit city filter).",
-        "- other cities / city league → group_by=city + clear_filters:[\"city\"]",
-        "- Switching Lahore → national: MUST clear_filters:[\"city\"].",
+        "- city / city_filter ← City-Filter; zone ONLY when named.",
+        "- Do NOT invent zones for unrecognized cities (engine → Karachi/SOUTH).",
+        "- nationally / other cities → clear_filters:[\"city\"] (+ zone if set).",
         "",
-        "8. PERIOD + INTENT DEFAULTS (Trend Default Rule)",
-        "- Rule A: sales ask with NO period spoken → period_type=LAST_N_MONTHS, "
-        "months_back=6, intent=sales_trend. Do NOT default to MTD or a static "
-        "Channel×BU matrix unless the user asks for that breakdown.",
-        "- Rule B: \"last 6 months\" / \"last N months\" → intent=sales_trend "
-        "(month columns + AMS). Never sales_matrix with client_type columns.",
-        "- Rule C: sales_trend default grain → group_by=[\"business_unit\"] "
-        "(BU rows × Month columns), matching the distributor monthly AMS table.",
-        "- \"channel monthly\" / \"channel × BU monthly\" → sales_trend, "
-        "group_by=[\"client_type\",\"business_unit\"], period LAST_N_MONTHS.",
-        "- \"this month\" / \"MTD\" / \"so far\" → period_type=MTD "
-        "(named-month Volume+AMS when a calendar month is named).",
-        "- \"July\" / \"July 2026\" → period_type=NAMED_MONTH, named_month=…, "
-        "intent=sales_trend (Volume+AMS pack).",
-        "- \"last month\" → LAST_MONTH; \"last week\" → LAST_WEEK",
+        "8. PERIOD + TREND DEFAULT",
+        "- Sales with NO period → period_type=LAST_N_MONTHS, months_back=6,",
+        "  column_dimensions=[\"month\"], row_dimensions=[\"business_unit\"],",
+        "  metrics=[\"volume\",\"ams\"].",
+        "- \"last N months\" → MUST set column_dimensions=[\"month\"].",
+        "- \"this month\"/MTD/so far → period_type=MTD.",
+        "- Named month → NAMED_MONTH + named_month=…",
         "",
-        "9. PRICE TIME-SERIES",
-        "- \"monthly average price\" / \"price by month\" → intent=price, "
-        "time_grain=month (or group_by=[\"month\"]), plus oil/packing filters.",
-        "- Do NOT return a single 6-month aggregate when the user said monthly.",
+        "9. PRICE → metrics=['avg_price'] (STRICT)",
+        "- price / rates / average price / Price Fetch → metrics=[\"avg_price\"].",
+        "- monthly / last N months price → also column_dimensions=[\"month\"].",
+        "- customer-wise price trends → row_dimensions=[\"party\"],",
+        "  column_dimensions=[\"month\"], metrics=[\"avg_price\"].",
         "",
-        "10. PERFORMANCE METRICS (party_rank)",
-        "- lowest/worst performing → ranking_metric=vs_ams, sort_order=asc",
-        "- least/lowest gains → ranking_metric=ams_growth, sort_order=asc "
-        "(grown_only=false)",
-        "- biggest/highest gains → ams_growth, sort_order=desc",
-        "- AMS = prior 3 full months mean (engine handles this; parties with "
-        "AMS=0 are excluded from vs_ams / ams_growth ranks).",
+        "10. PERFORMANCE METRICS",
+        "- lowest/worst performing → metrics=[\"vs_ams\"], sort_order=asc,",
+        "  row_dimensions=[\"party\"].",
+        "- least/lowest gains → metrics=[\"ams_growth\"], sort_order=asc.",
+        "- biggest gains → metrics=[\"ams_growth\"], sort_order=desc.",
     ]
     return "\n".join(parts)
 
 
 def tool_guide_for_prompt() -> str:
     return """
-PRIMARY TOOL — plan_query (use for almost every factual ask):
-Emit a complete QuerySpec. Server executes BLINDLY — it will not rewrite your plan.
-If you omit required fields you get plan_errors; fix and call plan_query again.
+PRIMARY TOOL — plan_query (Universal Pivot):
+Emit row_dimensions + column_dimensions + metrics + period_type + context_handling.
+Do NOT pick rigid intents like sales_matrix vs sales_trend — describe the pivot.
+Server executes BLINDLY. plan_errors → fix and call plan_query again.
 
-Required every time: intent, period_type, context_handling
-Also set: filters, group_by (string OR array for MultiIndex rows), column_dimension,
-time_grain (for price), business_units, ranking_metric, sort_order,
-clear_filters when following up.
-
-TREND DEFAULT (mandatory):
-- Sales with no period → sales_trend + LAST_N_MONTHS + months_back=6 +
-  group_by=["business_unit"] (NOT MTD, NOT client_type matrix).
-- \"last N months\" sales → always sales_trend (month+AMS grid).
+Required: row_dimensions, metrics, period_type, context_handling
+Optional: column_dimensions, filters, months_back, clear_filters, operation,
+sort_order, business_units, party_query (for lookup), price_flags.
 
 Examples:
+- \"customer-wise price trends last 6 months\" →
+  row_dimensions=["party"], column_dimensions=["month"], metrics=["avg_price"],
+  period_type=LAST_N_MONTHS, months_back=6
 - \"how Eva distributor sales in Lahore are doing last 6 months\" →
-  intent=sales_trend, period_type=LAST_N_MONTHS, months_back=6,
-  group_by=["business_unit"],
-  filters={city:Lahore, client_type:Eva Distributors},
-  business_units=[Eva Consumer, Eva Bulk]
-- \"show me Eva sales in Lahore\" (no period) → same as above (trend default),
-  city=Lahore, business_units=[Eva Consumer, Eva Bulk]
-- \"channel monthly table\" → sales_trend, LAST_N_MONTHS, months_back=6,
-  group_by=["client_type","business_unit"]
-- \"Eva canola standup sales last 6 months\" → sales_trend, LAST_N_MONTHS,
+  row_dimensions=["business_unit"], column_dimensions=["month"],
+  metrics=["volume","ams"], filters={city:Lahore, client_type:Eva Distributors},
+  business_units=[Eva Consumer, Eva Bulk], LAST_N_MONTHS/6
+- \"show me Eva sales in Lahore\" (no period) → same trend default (BU×Month+AMS)
+- \"channel monthly table\" →
+  row_dimensions=["client_type","business_unit"], column_dimensions=["month"],
+  metrics=["volume","ams"], LAST_N_MONTHS/6
+- \"Eva canola standup sales last 6 months\" →
+  filters={oil_type:Eva Canola, packing_category:Stand up},
+  row_dimensions=["business_unit"], column_dimensions=["month"],
+  metrics=["volume","ams"]
+- \"monthly average price for Eva canola standup\" →
+  metrics=["avg_price"], column_dimensions=["month"], LAST_N_MONTHS/6,
   filters={oil_type:Eva Canola, packing_category:Stand up}
-- \"monthly average price for Eva canola standup\" → intent=price,
-  period_type=LAST_N_MONTHS, months_back=6, time_grain=month,
-  filters={oil_type:Eva Canola, packing_category:Stand up}
-- After Eva Consumer vs Bulk: \"show this distributor-wise, lowest performing\" →
-  context_handling=prior, intent=party_rank, group_by=party,
-  clear_filters=[\"client_type\"], ranking_metric=vs_ams, sort_order=asc,
-  keep business_units from prior
-- \"least AMS gains\" → party_rank, ranking_metric=ams_growth, sort_order=asc
-- \"growth vs other cities\" → prior, clear_filters=[\"city\"], group_by=city,
-  ranking_metric=ams_growth
-- \"who are Eva Distributors in Lahore\" → party_list + that channel
+- After brand table: \"distributor-wise, lowest performing\" →
+  context_handling=prior, row_dimensions=["party"], metrics=["vs_ams"],
+  sort_order=asc, clear_filters=["client_type"]
+- \"who are Eva Distributors in Lahore\" →
+  operation=party_list, row_dimensions=["party"], metrics=["volume"],
+  filters={client_type:Eva Distributors, city:Lahore}
 
 After tables: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
-Numbers come only from executed tables.
 """.strip()

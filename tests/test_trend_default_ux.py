@@ -74,14 +74,14 @@ def test_prompt_teaches_trend_default_and_composite_sku() -> None:
     vocab = vocabulary_for_prompt()
     tools = tool_guide_for_prompt()
     sys = system_prompt()
-    assert "LAST_N_MONTHS" in vocab and "sales_trend" in vocab
+    assert "LAST_N_MONTHS" in vocab
     assert "canola standup" in vocab.lower() or "canola stand" in vocab.lower()
-    assert "time_grain" in tools or "time_grain" in vocab
-    assert "TREND DEFAULT" in sys or "Trend Default" in vocab
-    # Schema accepts array group_by
-    gb = PLAN_QUERY_TOOL["function"]["parameters"]["properties"]["group_by"]
-    assert "oneOf" in gb
-    assert "time_grain" in PLAN_QUERY_TOOL["function"]["parameters"]["properties"]
+    assert "avg_price" in vocab or "avg_price" in tools
+    assert "customer" in vocab.lower()
+    assert "TREND DEFAULT" in sys or "LAST_N_MONTHS" in sys
+    props = PLAN_QUERY_TOOL["function"]["parameters"]["properties"]
+    assert "row_dimensions" in props and "metrics" in props
+    assert "month" in props["column_dimensions"]["items"]["enum"]
 
 
 def test_group_by_array_promotes_to_row_groups() -> None:

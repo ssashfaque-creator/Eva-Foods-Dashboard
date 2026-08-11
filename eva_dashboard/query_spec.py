@@ -58,33 +58,79 @@ GROUP_BY_DIMS = (
     "client_type",
 )
 
+ROW_DIMENSIONS = GROUP_BY_DIMS
+COLUMN_DIMENSIONS = (
+    "month",
+    "client_type",
+    "business_unit",
+    "city",
+    "oil_type",
+    "packing_category",
+)
+PIVOT_METRICS = (
+    "volume",
+    "avg_price",
+    "ams",
+    "vs_ams",
+    "ams_growth",
+)
+OPERATIONS = (
+    "pivot",
+    "party_list",
+    "party_lookup",
+    "overview",
+    "advanced",
+)
+
 
 PLAN_QUERY_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "plan_query",
         "description": (
-            "Semantic planner: translate ANY analytical ask into a QuerySpec. "
-            "You choose filters, grain, period, and metrics. The server executes "
-            "blindly — it will NOT rewrite your plan. If the plan is incomplete, "
-            "you get an error and must retry. "
-            "Follow-ups: context_handling='prior' + clear_filters for what drops."
+            "Universal pivot planner: translate ANY analytical ask into rows, "
+            "columns, and metrics. The server executes blindly. "
+            "Example — customer-wise price trends → "
+            "row_dimensions=['party'], column_dimensions=['month'], "
+            "metrics=['avg_price']. "
+            "Follow-ups: context_handling='prior' + clear_filters."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "intent": {
-                    "type": "string",
-                    "enum": sorted(INTENTS),
+                "row_dimensions": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(ROW_DIMENSIONS)},
                     "description": (
-                        "sales_trend = DEFAULT for sales / last-N-months "
-                        "(BU×Month + AMS, or named-month Volume+AMS); "
-                        "sales_matrix = ONLY when user asks a static cross-tab "
-                        "(e.g. Channel×BU without months); "
-                        "sales_analytical = performance pack; "
-                        "party_rank = compare parties/cities/zones; "
-                        "party_list = who are the parties; party_lookup = one "
-                        "named party; price; advanced; overview"
+                        "Row groupings. customer/party/account/buyer/store-wise "
+                        "→ ['party']; product-wise → ['packing_category']; "
+                        "channel monthly → ['client_type','business_unit']; "
+                        "default sales trend → ['business_unit']."
+                    ),
+                },
+                "column_dimensions": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(COLUMN_DIMENSIONS)},
+                    "description": (
+                        "Pivot columns. Trends / 'last N months' / monthly "
+                        "price MUST include 'month'."
+                    ),
+                },
+                "metrics": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(PIVOT_METRICS)},
+                    "description": (
+                        "volume=MT; avg_price=PKR rate; ams / vs_ams / "
+                        "ams_growth for performance. price/rates/Price Fetch → "
+                        "['avg_price']."
+                    ),
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": list(OPERATIONS),
+                    "description": (
+                        "Optional. Default 'pivot'. Use party_list / "
+                        "party_lookup / overview / advanced only for non-table asks."
                     ),
                 },
                 "context_handling": {
@@ -92,7 +138,7 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "enum": ["none", "prior"],
                     "description": (
                         "prior = follow-up from PRIOR_QUERY_CONTEXT; "
-                        "none = fresh topic. Alias of 'base'."
+                        "none = fresh topic."
                     ),
                 },
                 "base": {
@@ -107,8 +153,7 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "enum": list(FILTER_KEYS) + ["business_units", "city_filter"],
                     },
                     "description": (
-                        "When context_handling=prior, filter keys to REMOVE "
-                        "(e.g. ['city'] when going to other cities / nationally)."
+                        "When context_handling=prior, filter keys to REMOVE."
                     ),
                 },
                 "clear": {
@@ -120,12 +165,9 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": sorted(PERIOD_TYPES),
                     "description": (
-                        "REQUIRED. Always choose a period. "
-                        "If the user did NOT specify a period for a sales ask, "
-                        "use LAST_N_MONTHS + months_back=6 (Trend Default) — "
-                        "NOT MTD. LAST_N_MONTHS for 'last 6 months'; "
-                        "NAMED_MONTH for 'July'; MTD only when user says "
-                        "'this month'/'MTD'/'so far'; CUSTOM_DATE for ISO bounds."
+                        "REQUIRED. Sales with no period → LAST_N_MONTHS + "
+                        "months_back=6 + column_dimensions=['month']. "
+                        "MTD only when user says this month/MTD/so far."
                     ),
                 },
                 "months_back": {
@@ -134,50 +176,15 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 },
                 "named_month": {
                     "type": "string",
-                    "description": (
-                        "When period_type=NAMED_MONTH: e.g. 'July' or 'July 2026'."
-                    ),
+                    "description": "When period_type=NAMED_MONTH.",
                 },
                 "period": {
                     "type": "object",
-                    "description": "Optional phrase / ISO bounds (CUSTOM_DATE).",
                     "properties": {
                         "phrase": {"type": "string"},
                         "date_from": {"type": "string"},
                         "date_to": {"type": "string"},
                     },
-                },
-                "group_by": {
-                    "oneOf": [
-                        {
-                            "type": "string",
-                            "enum": list(GROUP_BY_DIMS) + ["month"],
-                        },
-                        {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "enum": list(GROUP_BY_DIMS) + ["month"],
-                            },
-                            "minItems": 1,
-                        },
-                    ],
-                    "description": (
-                        "Row grain. String OR array for MultiIndex rows "
-                        "(e.g. [\"client_type\",\"business_unit\"] for channel "
-                        "monthly). distributor-wise→party; product-wise→"
-                        "packing_category; SKU-wise→product; city-wise→city; "
-                        "sales_trend default→[\"business_unit\"]; "
-                        "monthly price→[\"month\"] (or set time_grain=month)."
-                    ),
-                },
-                "time_grain": {
-                    "type": "string",
-                    "enum": ["none", "month"],
-                    "description": (
-                        "For intent=price: 'month' returns a calendar-month "
-                        "time-series of Avg Rate (not a single aggregate)."
-                    ),
                 },
                 "filters": {
                     "type": "object",
@@ -185,26 +192,11 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "business_units": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": (
-                                "Eva→[Eva Consumer, Eva Bulk]; "
-                                "Maan→[Maan Consumer, Maan Bulk]; "
-                                "Consumer→[Eva Consumer]."
-                            ),
                         },
                         "business_unit": {"type": "string"},
-                        "client_type": {
-                            "type": "string",
-                            "description": (
-                                "Channel filter only when named. "
-                                "'distributor sales'→Eva Distributors. "
-                                "Do NOT set for distributor-wise grain."
-                            ),
-                        },
+                        "client_type": {"type": "string"},
                         "city": {"type": "string"},
-                        "city_filter": {
-                            "type": "string",
-                            "description": "Alias for city (City-Filter).",
-                        },
+                        "city_filter": {"type": "string"},
                         "zone": {"type": "string"},
                         "oil_type": {"type": "string"},
                         "packing_category": {"type": "string"},
@@ -213,82 +205,20 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "active_only": {"type": "boolean"},
                     },
                 },
-                "column_dimension": {
-                    "type": "string",
-                    "description": (
-                        "Pivot columns for sales_matrix. LAST_N_MONTHS implies "
-                        "'month'. Else often client_type or city."
-                    ),
-                },
-                "ranking_metric": {
-                    "type": "string",
-                    "enum": [
-                        "volume",
-                        "ams",
-                        "vs_ams",
-                        "ams_growth",
-                        "yoy",
-                        "yoy_ams",
-                        "invoices",
-                        "invoice_mt",
-                        "new_parties",
-                        "lost_parties",
-                        "doing_well",
-                        "packing_mix",
-                        "product_mix",
-                    ],
-                    "description": (
-                        "party_rank metric. lowest/worst performing→vs_ams; "
-                        "least gains→ams_growth."
-                    ),
-                },
-                "metric": {
-                    "type": "string",
-                    "description": "Legacy alias for ranking_metric.",
-                },
                 "sort_order": {
                     "type": "string",
                     "enum": ["asc", "desc"],
-                    "description": "desc=highest/best; asc=lowest/worst.",
                 },
-                "sort": {
-                    "type": "string",
-                    "enum": ["asc", "desc"],
-                    "description": "Legacy alias for sort_order.",
-                },
+                "sort": {"type": "string", "enum": ["asc", "desc"]},
                 "grown_only": {"type": "boolean"},
                 "declined_only": {"type": "boolean"},
                 "limit": {"type": "integer"},
-                "title_mode": {
-                    "type": "string",
-                    "enum": [
-                        "biggest_gains",
-                        "smallest_gains",
-                        "biggest_declines",
-                        "by_growth",
-                        "underperformers",
-                    ],
-                },
+                "title_mode": {"type": "string"},
                 "excludes": {
                     "type": "object",
                     "additionalProperties": {
                         "type": "array",
                         "items": {"type": "string"},
-                    },
-                },
-                "grain": {
-                    "type": "object",
-                    "description": "Legacy nested grain; prefer top-level group_by.",
-                    "properties": {
-                        "row_dimension": {"type": "string"},
-                        "row_groups": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "column_dimension": {"type": "string"},
-                        "months_back": {"type": "integer"},
-                        "group_by": {"type": "string"},
-                        "mix_dimension": {"type": "string"},
                     },
                 },
                 "compare": {"type": "string"},
@@ -308,8 +238,30 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "items": {"type": "string"},
                 },
                 "rationale": {"type": "string"},
+                # ---- legacy compat (tests / old clients; prefer universal fields) ----
+                "intent": {"type": "string"},
+                "group_by": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                },
+                "column_dimension": {"type": "string"},
+                "time_grain": {"type": "string", "enum": ["none", "month"]},
+                "ranking_metric": {"type": "string"},
+                "metric": {"type": "string"},
+                "grain": {"type": "object"},
+                "row_groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
             },
-            "required": ["intent", "period_type", "context_handling"],
+            "required": [
+                "row_dimensions",
+                "metrics",
+                "period_type",
+                "context_handling",
+            ],
             "additionalProperties": False,
         },
     },
@@ -482,12 +434,100 @@ def _promote_group_by(raw_gb: Any, grain: dict[str, Any]) -> None:
         grain["row_dimension"] = d
 
 
+def _as_dim_list(value: Any, *, allowed: tuple[str, ...] | set[str]) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        items = [str(x).strip().lower() for x in value if str(x).strip()]
+    else:
+        items = [str(value).strip().lower()]
+    allow = set(allowed)
+    return [x for x in items if x in allow]
+
+
+def _derive_intent_from_universal(
+    *,
+    operation: str,
+    row_dimensions: list[str],
+    column_dimensions: list[str],
+    metrics: list[str],
+) -> str:
+    """Internal routing label derived from the universal pivot (not LLM-facing)."""
+    if operation and operation != "pivot":
+        return {
+            "party_list": "party_list",
+            "party_lookup": "party_lookup",
+            "overview": "overview",
+            "advanced": "advanced",
+        }.get(operation, operation)
+    mets = set(metrics)
+    if mets & {"vs_ams", "ams_growth"} and "month" not in column_dimensions:
+        return "party_rank"
+    if "avg_price" in mets:
+        return "price"
+    if "month" in column_dimensions:
+        return "sales_trend"
+    return "sales_matrix"
+
+
+def _legacy_intent_to_universal(
+    intent: str,
+    grain: dict[str, Any],
+    metric: str | None,
+    *,
+    period_type: str | None,
+) -> tuple[list[str], list[str], list[str], str]:
+    """Map old intent/group_by plans → row/col/metric arrays + operation."""
+    rows: list[str] = []
+    cols: list[str] = []
+    metrics: list[str] = []
+    operation = "pivot"
+
+    if intent == "party_list":
+        return ["party"], [], ["volume"], "party_list"
+    if intent == "party_lookup":
+        return ["party"], [], ["volume"], "party_lookup"
+    if intent == "overview":
+        return [], [], ["volume"], "overview"
+    if intent == "advanced":
+        return [], [], ["volume"], "advanced"
+    if intent == "party_rank":
+        gb = grain.get("group_by") or "party"
+        rows = [str(gb)]
+        metrics = [str(metric or "ams")]
+        return rows, cols, metrics, "pivot"
+    if intent == "price":
+        metrics = ["avg_price"]
+        if grain.get("time_grain") == "month" or grain.get("column_dimension") == "month":
+            cols = ["month"]
+        return rows, cols, metrics, "pivot"
+    if intent in {"sales_trend", "sales_matrix", "sales_analytical"}:
+        if grain.get("row_groups") and grain.get("row_dimension"):
+            rows = list(grain.get("row_groups") or []) + [grain["row_dimension"]]
+        elif grain.get("row_dimension"):
+            rows = [grain["row_dimension"]]
+        elif grain.get("group_by") in GROUP_BY_DIMS:
+            rows = [grain["group_by"]]
+        else:
+            rows = ["business_unit"]
+        col = grain.get("column_dimension")
+        if col:
+            cols = [str(col)]
+        elif intent == "sales_trend" or period_type == "LAST_N_MONTHS":
+            cols = ["month"]
+        metrics = ["volume"]
+        if "month" in cols:
+            metrics.append("ams")
+        return rows, cols, metrics, "pivot"
+    return rows, cols, metrics, operation
+
+
 def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
-    """Coerce model JSON into a canonical QuerySpec (no silent intent fills)."""
+    """Coerce model JSON into a canonical universal QuerySpec."""
     raw = dict(raw or {})
     intent = str(raw.get("intent") or "").strip().lower()
     aliases = {
-        "sales": "sales_trend",  # bare "sales" → trend default, not static matrix
+        "sales": "sales_trend",
         "matrix": "sales_matrix",
         "trend": "sales_trend",
         "analytical": "sales_analytical",
@@ -525,14 +565,12 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         clear.append(key)
 
     filters = dict(raw.get("filters") or {})
-    # city_filter alias → city
     if filters.get("city_filter") and not filters.get("city"):
         filters["city"] = filters.pop("city_filter")
     elif "city_filter" in filters:
         filters.pop("city_filter", None)
 
     grain = dict(raw.get("grain") or {})
-    # Promote top-level group_by / column_dimension / months_back / time_grain
     _promote_group_by(raw.get("group_by"), grain)
     if raw.get("column_dimension") and not grain.get("column_dimension"):
         grain["column_dimension"] = raw["column_dimension"]
@@ -557,7 +595,6 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     months_back = grain.get("months_back")
     if months_back is None and raw.get("months_back") is not None:
         months_back = int(raw["months_back"])
-    # Derive months_back from "last N months" phrase when omitted
     if months_back is None and period_type == "LAST_N_MONTHS":
         import re as _re
 
@@ -570,13 +607,92 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
 
     metric = raw.get("ranking_metric") or raw.get("metric")
     sort = raw.get("sort_order") or raw.get("sort") or "desc"
-
     bus = list(
         filters.get("business_units") or raw.get("business_units") or []
     )
 
+    # ---- Universal pivot fields ----
+    row_dimensions = _as_dim_list(raw.get("row_dimensions"), allowed=ROW_DIMENSIONS)
+    column_dimensions = _as_dim_list(
+        raw.get("column_dimensions"), allowed=COLUMN_DIMENSIONS
+    )
+    metrics = _as_dim_list(raw.get("metrics"), allowed=PIVOT_METRICS)
+    operation = str(raw.get("operation") or "").strip().lower()
+    if operation and operation not in OPERATIONS:
+        operation = ""
+
+    # Legacy → universal when new fields omitted
+    if (not row_dimensions and not metrics) and intent:
+        lr, lc, lm, lop = _legacy_intent_to_universal(
+            intent, grain, str(metric) if metric else None, period_type=period_type
+        )
+        row_dimensions = lr
+        column_dimensions = lc or column_dimensions
+        metrics = lm
+        if not operation:
+            operation = lop
+
+    # group_by / grain still promote into row_dimensions when missing
+    if not row_dimensions:
+        if grain.get("row_groups") and grain.get("row_dimension"):
+            row_dimensions = list(grain.get("row_groups") or []) + [
+                str(grain["row_dimension"])
+            ]
+        elif grain.get("row_dimension"):
+            row_dimensions = [str(grain["row_dimension"])]
+        elif grain.get("group_by") in GROUP_BY_DIMS:
+            row_dimensions = [str(grain["group_by"])]
+
+    if not column_dimensions:
+        if grain.get("column_dimension"):
+            column_dimensions = _as_dim_list(
+                grain.get("column_dimension"), allowed=COLUMN_DIMENSIONS
+            )
+        elif grain.get("time_grain") == "month":
+            column_dimensions = ["month"]
+
+    if metric and not metrics:
+        metrics = _as_dim_list(metric, allowed=PIVOT_METRICS)
+
+    if not operation:
+        operation = "pivot"
+
+    # Sync grain from universal (executor + resolve_period still read grain)
+    if row_dimensions:
+        if len(row_dimensions) >= 2:
+            grain["row_groups"] = row_dimensions[:-1]
+            grain["row_dimension"] = row_dimensions[-1]
+        else:
+            grain["row_dimension"] = row_dimensions[0]
+            if row_dimensions[0] in {"party", "city", "zone"}:
+                grain["group_by"] = row_dimensions[0]
+    if column_dimensions:
+        grain["column_dimension"] = column_dimensions[0]
+        if column_dimensions[0] == "month":
+            grain["time_grain"] = "month"
+
+    # Derive internal intent for routing / prior_context compat
+    if not intent:
+        intent = _derive_intent_from_universal(
+            operation=operation,
+            row_dimensions=row_dimensions,
+            column_dimensions=column_dimensions,
+            metrics=metrics,
+        )
+
+    # Ranking metric from metrics array
+    if not metric:
+        for m in metrics:
+            if m in {"vs_ams", "ams_growth", "ams", "volume"}:
+                metric = m
+                break
+
     return {
         "intent": intent,
+        "operation": operation,
+        "row_dimensions": row_dimensions,
+        "column_dimensions": column_dimensions,
+        "metrics": metrics,
         "base": base,
         "clear": clear,
         "_clear_omitted": clear_omitted,
@@ -608,17 +724,27 @@ def validate_query_spec(
 ) -> list[str]:
     """Return human-readable plan errors for the LLM (empty = ok)."""
     errors: list[str] = []
-    if not spec.get("intent"):
-        errors.append(
-            "Missing intent. Choose sales_matrix, party_rank, sales_trend, …"
-        )
+    operation = str(spec.get("operation") or "pivot")
+    metrics = list(spec.get("metrics") or [])
+    rows = list(spec.get("row_dimensions") or [])
+    if operation == "pivot":
+        if not metrics:
+            errors.append(
+                "Missing metrics. Use e.g. [\"volume\",\"ams\"] or [\"avg_price\"]."
+            )
+        if not rows and "avg_price" not in metrics:
+            errors.append(
+                "Missing row_dimensions. Example: customer-wise → [\"party\"]; "
+                "default sales trend → [\"business_unit\"]."
+            )
     if not spec.get("period_type"):
         errors.append(
             "Missing period_type. REQUIRED: MTD | LAST_N_MONTHS | LAST_MONTH | "
             "LAST_WEEK | NAMED_MONTH | CUSTOM_DATE. "
-            "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6. "
+            "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6 "
+            "+ column_dimensions=[\"month\"]. "
             "If unspecified for a sales ask, use LAST_N_MONTHS + months_back=6 "
-            "+ intent=sales_trend (Trend Default) — not MTD."
+            "(Trend Default) — not MTD."
         )
     # Follow-up state: when using prior, clear_filters must be explicit
     # (empty list is OK — means keep all prior filters).
@@ -636,12 +762,14 @@ def validate_query_spec(
         grain = spec.get("grain") or {}
         filters = spec.get("filters") or {}
         clear = set(spec.get("clear") or [])
-        if (grain.get("group_by") or "") == "city" and filters.get("city") and (
-            "city" not in clear
-        ):
+        row_dims = list(spec.get("row_dimensions") or [])
+        city_row = (grain.get("group_by") or "") == "city" or (
+            len(row_dims) == 1 and row_dims[0] == "city"
+        )
+        if city_row and filters.get("city") and ("city" not in clear):
             errors.append(
-                "group_by=city while filters.city is set will rank inside one city. "
-                "For 'other cities' / national city league, add clear_filters:[\"city\"] "
+                "row_dimensions=['city'] while filters.city is set ranks inside "
+                "one city. For 'other cities' / national, clear_filters:[\"city\"] "
                 "and omit filters.city."
             )
     pt = spec.get("period_type")
@@ -664,7 +792,10 @@ def validate_query_spec(
             errors.append(
                 "period_type=CUSTOM_DATE requires period.date_from and period.date_to."
             )
-    if spec.get("intent") == "party_lookup" and not (
+    if (
+        spec.get("intent") == "party_lookup"
+        or spec.get("operation") == "party_lookup"
+    ) and not (
         spec.get("party_query") or (spec.get("filters") or {}).get("party")
     ):
         errors.append("party_lookup requires party_query (the party name).")
@@ -692,18 +823,40 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         period["phrase"] = f"last {n} months"
         grain["column_dimension"] = grain.get("column_dimension") or "month"
         grain["months_back"] = n
-        # Trend Default Rule C: sales_trend → BU × Month when row grain omitted
-        if str(spec.get("intent") or "") == "sales_trend":
-            if not grain.get("row_dimension") and not grain.get("group_by"):
-                grain["row_dimension"] = "business_unit"
+        cols = list(spec.get("column_dimensions") or [])
+        if "month" not in cols:
+            cols = ["month"] + [c for c in cols if c != "month"]
+        # Trend default: BU rows when planner omitted row grain on a volume trend
+        rows = list(spec.get("row_dimensions") or [])
+        mets = set(spec.get("metrics") or [])
+        if not rows and not grain.get("row_dimension") and not grain.get("group_by"):
+            if "avg_price" not in mets and str(spec.get("operation") or "pivot") == "pivot":
+                if str(spec.get("intent") or "") in {
+                    "",
+                    "sales_trend",
+                    "sales_matrix",
+                }:
+                    grain["row_dimension"] = "business_unit"
+                    rows = ["business_unit"]
+        return {
+            "period": period,
+            "grain": grain,
+            "months_back": n,
+            "row_dimensions": rows,
+            "column_dimensions": cols,
+        }
     elif pt == "NAMED_MONTH":
-        # phrase already set from named_month
         pass
     elif pt == "CUSTOM_DATE":
-        # date_from / date_to already on period
         pass
 
-    return {"period": period, "grain": grain, "months_back": grain.get("months_back") or mb}
+    return {
+        "period": period,
+        "grain": grain,
+        "months_back": grain.get("months_back") or mb,
+        "row_dimensions": list(spec.get("row_dimensions") or []),
+        "column_dimensions": list(spec.get("column_dimensions") or []),
+    }
 
 
 def merge_prior_into_spec(
@@ -729,6 +882,12 @@ def merge_prior_into_spec(
 
     if not out.get("metric") and prior.get("metric"):
         out["metric"] = prior.get("metric")
+    if not out.get("row_dimensions") and prior.get("row_dimensions"):
+        out["row_dimensions"] = list(prior.get("row_dimensions") or [])
+    if not out.get("column_dimensions") and prior.get("column_dimensions"):
+        out["column_dimensions"] = list(prior.get("column_dimensions") or [])
+    if not out.get("metrics") and prior.get("metrics"):
+        out["metrics"] = list(prior.get("metrics") or [])
     grain = dict(out.get("grain") or {})
     if not grain.get("group_by") and prior.get("group_by"):
         grain["group_by"] = prior.get("group_by")

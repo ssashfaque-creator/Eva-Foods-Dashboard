@@ -1,10 +1,10 @@
-"""Blind execution of a QuerySpec — no silent intent mutation.
+"""Blind execution of a QuerySpec — universal pivot + legacy intent compat.
 
 The LLM is the sole source of query parameters. This module:
-1. Normalizes / validates the plan
+1. Normalizes / validates the plan (universal rows/cols/metrics)
 2. Merges prior only when base/context_handling='prior' + clear[]
 3. Maps period_type → date windows (deterministic)
-4. Runs engines
+4. Runs engines (query_sales / analyze_parties / universal_pivot / …)
 5. On invalid plans, returns ok=False + errors for the LLM to self-correct
 """
 
@@ -32,6 +32,7 @@ from eva_dashboard.query_spec import (
     validate_query_spec,
 )
 from eva_dashboard.sales_query import query_price, query_sales
+from eva_dashboard.universal_pivot import execute_universal_pivot
 
 
 def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
@@ -46,7 +47,6 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
 
     oil = out.get("oil_type")
     pack = out.get("packing_category")
-    # Defensive: composite phrases left in oil_type / product → split
     if oil and not pack:
         o2, p2 = extract_oil_and_packing(str(oil))
         if o2 and p2:
@@ -62,9 +62,7 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
             oil = o2
         if p2 and not pack:
             pack = p2
-        # Composite spoken product is not an exact SKU — drop product filter
         if o2 and p2 and " " in str(product).strip():
-            # Keep exact SKU when it looks like a real product name with size codes
             if not any(ch.isdigit() for ch in str(product)):
                 out.pop("product", None)
 
@@ -79,23 +77,39 @@ def execute_query_spec(
     raw_spec: dict[str, Any],
     *,
     prior: dict[str, Any] | None = None,
-    user_text: str = "",  # kept for API compat; NOT used to mutate the plan
+    user_text: str = "",
 ) -> dict[str, Any]:
-    """Execute a planned QuerySpec blindly.
-
-    ``user_text`` is ignored for planning — the LLM owns intent. Invalid specs
-    return ``{ok: False, error, plan_errors}`` so the model can retry.
-    """
-    del user_text  # explicit: no spoken-text mutation
+    """Execute a planned QuerySpec blindly (universal pivot or legacy)."""
+    del user_text
     spec = normalize_query_spec(raw_spec)
     spec = merge_prior_into_spec(spec, prior)
 
-    # Resolve period_type → phrase / month grain (deterministic semantic layer)
     resolved = resolve_period_from_spec(spec)
     spec["period"] = resolved["period"]
     spec["grain"] = resolved["grain"]
     if resolved.get("months_back") is not None:
         spec["months_back"] = resolved["months_back"]
+    if resolved.get("row_dimensions"):
+        spec["row_dimensions"] = resolved["row_dimensions"]
+    if resolved.get("column_dimensions"):
+        spec["column_dimensions"] = resolved["column_dimensions"]
+        grain = dict(spec.get("grain") or {})
+        grain["column_dimension"] = resolved["column_dimensions"][0]
+        if resolved["column_dimensions"][0] == "month":
+            grain["time_grain"] = "month"
+        spec["grain"] = grain
+    # Sync grain row dims from resolved/defaulted row_dimensions
+    rows = list(spec.get("row_dimensions") or [])
+    if rows:
+        grain = dict(spec.get("grain") or {})
+        if len(rows) >= 2:
+            grain["row_groups"] = rows[:-1]
+            grain["row_dimension"] = rows[-1]
+        else:
+            grain["row_dimension"] = rows[0]
+            if rows[0] in {"party", "city", "zone"}:
+                grain["group_by"] = rows[0]
+        spec["grain"] = grain
 
     errors = validate_query_spec(spec, prior=prior)
     if errors:
@@ -113,7 +127,11 @@ def execute_query_spec(
     filters = _canon_filters(spec.get("filters") or {})
     grain = dict(spec.get("grain") or {})
     period = dict(spec.get("period") or {})
-    intent = spec["intent"]
+    intent = spec.get("intent") or ""
+    operation = str(spec.get("operation") or "pivot")
+    row_dimensions = list(spec.get("row_dimensions") or [])
+    column_dimensions = list(spec.get("column_dimensions") or [])
+    metrics = list(spec.get("metrics") or [])
     bus = list(spec.get("business_units") or filters.get("business_units") or [])
     if filters.get("business_unit") and not bus:
         bus = [filters["business_unit"]]
@@ -121,18 +139,167 @@ def execute_query_spec(
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")
     date_to = period.get("date_to")
+    mb = int(spec.get("months_back") or grain.get("months_back") or 6)
 
     result: dict[str, Any]
-    if intent in {"sales_matrix", "sales_trend", "sales_analytical"}:
+
+    # ---- Special non-pivot operations ----
+    if operation == "party_list" or intent == "party_list":
+        result = list_clients(
+            city=filters.get("city"),
+            zone=filters.get("zone"),
+            client_type=filters.get("client_type"),
+            business_unit=filters.get("business_unit") or (bus[0] if bus else None),
+            period=phrase,
+            date_from=date_from,
+            date_to=date_to,
+            limit=int(spec.get("limit") or 200),
+            active_only=bool(filters.get("active_only")),
+        )
+    elif operation == "party_lookup" or intent == "party_lookup":
+        q = spec.get("party_query") or filters.get("party") or ""
+        if phrase:
+            result = party_sales(
+                query=q, period=phrase, columns="city", mode="trend"
+            )
+        else:
+            result = party_sales(
+                query=q,
+                period=None,
+                columns="month",
+                months_back=mb,
+                mode="matrix",
+            )
+        if result.get("ok") is False:
+            result = lookup_party(q, limit=int(spec.get("limit") or 10))
+    elif operation == "overview" or intent == "overview":
+        from eva_dashboard.chatbot import sales_overview
+
+        result = sales_overview()
+    elif operation == "advanced" or intent == "advanced":
+        from eva_dashboard.chatbot import _dispatch_advanced
+
+        result = _dispatch_advanced(
+            {
+                "mode": spec.get("advanced_mode"),
+                **filters,
+                "period": phrase,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+            "",
+            prior_spec=None,
+        )
+    elif intent == "party_rank" or (
+        set(metrics) & {"vs_ams", "ams_growth"} and "month" not in column_dimensions
+    ):
+        group_by = grain.get("group_by") or (
+            row_dimensions[0] if row_dimensions else "party"
+        )
+        limit = int(spec.get("limit") or 25)
+        brand = None
+        single_bu = filters.get("business_unit") or (
+            bus[0] if len(bus) == 1 else None
+        )
+        if len(bus) > 1 and not single_bu:
+            lowers = [str(b).lower() for b in bus]
+            if all(b.startswith("eva") for b in lowers):
+                brand = "eva"
+            elif all(b.startswith("maan") for b in lowers):
+                brand = "maan"
+        rank_metric = str(
+            spec.get("metric") or (metrics[0] if metrics else "ams")
+        )
+        result = analyze_parties(
+            period=phrase,
+            date_from=date_from,
+            date_to=date_to,
+            city=filters.get("city"),
+            zone=filters.get("zone"),
+            client_type=filters.get("client_type"),
+            business_unit=single_bu,
+            brand=brand,
+            oil_type=filters.get("oil_type"),
+            packing_category=filters.get("packing_category"),
+            metric=rank_metric,
+            group_by=group_by,
+            sort=str(spec.get("sort") or "desc"),
+            grown_only=bool(spec.get("grown_only")),
+            declined_only=bool(spec.get("declined_only")),
+            limit=limit,
+            active_only=bool(filters.get("active_only")),
+            title_mode=spec.get("title_mode"),
+            mix_dimension=grain.get("mix_dimension"),
+        )
+    elif "avg_price" in metrics:
+        # Universal price pivot when rows or month columns are set;
+        # plain aggregate (optional Price Fetch flags) uses query_price.
+        flags = spec.get("price_flags") or {}
+        # Row grain (e.g. customer-wise) → universal PKR pivot.
+        # Month-only / aggregate (+ Price Fetch flags) → query_price.
+        has_row_grain = bool(row_dimensions)
+        want_fetch = bool(
+            flags.get("include_price_fetch")
+            or flags.get("include_cost_factor")
+            or flags.get("factor_breakdown")
+        )
+        if has_row_grain and not want_fetch:
+            result = execute_universal_pivot(
+                row_dimensions=row_dimensions,
+                column_dimensions=column_dimensions,
+                metrics=metrics,
+                period=phrase,
+                date_from=date_from,
+                date_to=date_to,
+                months_back=mb,
+                city=filters.get("city"),
+                zone=filters.get("zone"),
+                business_unit=bus[0] if len(bus) == 1 else filters.get("business_unit"),
+                business_units=bus if len(bus) > 1 else None,
+                oil_type=filters.get("oil_type"),
+                packing_category=filters.get("packing_category"),
+                client_type=filters.get("client_type"),
+                party=filters.get("party"),
+                active_only=bool(filters.get("active_only")),
+            )
+        else:
+            time_grain = "month" if "month" in column_dimensions else None
+            if not time_grain and grain.get("time_grain") == "month":
+                time_grain = "month"
+            result = query_price(
+                period=phrase,
+                date_from=date_from,
+                date_to=date_to,
+                city=filters.get("city"),
+                business_unit=filters.get("business_unit") or (bus[0] if bus else None),
+                oil_type=filters.get("oil_type"),
+                packing_category=filters.get("packing_category"),
+                client_type=filters.get("client_type"),
+                product=filters.get("product"),
+                include_price_fetch=bool(flags.get("include_price_fetch")),
+                include_cost_factor=bool(flags.get("include_cost_factor")),
+                factor_breakdown=bool(flags.get("factor_breakdown")),
+                time_grain=time_grain,
+            )
+    elif intent in {"sales_matrix", "sales_trend", "sales_analytical"} or (
+        set(metrics) & {"volume", "ams"}
+    ):
         mode = {
             "sales_matrix": "matrix",
             "sales_trend": "trend",
             "sales_analytical": "analytical",
-        }[intent]
-        # LAST_N_MONTHS semantic → month columns (already set in resolve_period)
-        columns = grain.get("column_dimension") or "client_type"
-        # Row grain from group_by / row_dimension when it is a sales dimension
-        row_dim = grain.get("row_dimension")
+        }.get(intent, "trend" if "month" in column_dimensions else "matrix")
+        columns = (
+            column_dimensions[0]
+            if column_dimensions
+            else (grain.get("column_dimension") or "client_type")
+        )
+        if row_dimensions:
+            row_dim = row_dimensions[-1]
+            row_groups = row_dimensions[:-1] or None
+        else:
+            row_dim = grain.get("row_dimension")
+            row_groups = list(grain.get("row_groups") or []) or None
         bu = bus[0] if len(bus) == 1 else None
         bus_param = bus if len(bus) > 1 else None
         result = query_sales(
@@ -148,119 +315,22 @@ def execute_query_spec(
             client_type=filters.get("client_type"),
             party=filters.get("party"),
             columns=columns,
-            months_back=int(spec.get("months_back") or grain.get("months_back") or 6),
+            months_back=mb,
             row_dimension=row_dim,
-            row_groups=list(grain.get("row_groups") or []) or None,
+            row_groups=row_groups,
             excludes=spec.get("excludes") or None,
             mode=mode,
             compare=spec.get("compare"),
             active_only=bool(filters.get("active_only")),
             prior_spec=None,
         )
-    elif intent == "party_list":
-        result = list_clients(
-            city=filters.get("city"),
-            zone=filters.get("zone"),
-            client_type=filters.get("client_type"),
-            business_unit=filters.get("business_unit") or (bus[0] if bus else None),
-            period=phrase,
-            date_from=date_from,
-            date_to=date_to,
-            limit=int(spec.get("limit") or 200),
-            active_only=bool(filters.get("active_only")),
-        )
-    elif intent == "party_rank":
-        group_by = grain.get("group_by") or "party"
-        limit = int(spec.get("limit") or 25)
-        brand = None
-        single_bu = filters.get("business_unit") or (
-            bus[0] if len(bus) == 1 else None
-        )
-        if len(bus) > 1 and not single_bu:
-            lowers = [str(b).lower() for b in bus]
-            if all(b.startswith("eva") for b in lowers):
-                brand = "eva"
-            elif all(b.startswith("maan") for b in lowers):
-                brand = "maan"
-        result = analyze_parties(
-            period=phrase,
-            date_from=date_from,
-            date_to=date_to,
-            city=filters.get("city"),
-            zone=filters.get("zone"),
-            client_type=filters.get("client_type"),
-            business_unit=single_bu,
-            brand=brand,
-            oil_type=filters.get("oil_type"),
-            packing_category=filters.get("packing_category"),
-            metric=str(spec.get("metric") or "ams"),
-            group_by=group_by,
-            sort=str(spec.get("sort") or "desc"),
-            grown_only=bool(spec.get("grown_only")),
-            declined_only=bool(spec.get("declined_only")),
-            limit=limit,
-            active_only=bool(filters.get("active_only")),
-            title_mode=spec.get("title_mode"),
-            mix_dimension=grain.get("mix_dimension"),
-        )
-    elif intent == "party_lookup":
-        q = spec.get("party_query") or filters.get("party") or ""
-        if phrase:
-            result = party_sales(
-                query=q, period=phrase, columns="city", mode="trend"
-            )
-        else:
-            result = party_sales(
-                query=q,
-                period=None,
-                columns="month",
-                months_back=int(spec.get("months_back") or grain.get("months_back") or 6),
-                mode="matrix",
-            )
-        if result.get("ok") is False:
-            result = lookup_party(q, limit=int(spec.get("limit") or 10))
-    elif intent == "price":
-        flags = spec.get("price_flags") or {}
-        time_grain = str(
-            grain.get("time_grain") or (spec.get("time_grain") or "none")
-        ).strip().lower()
-        result = query_price(
-            period=phrase,
-            date_from=date_from,
-            date_to=date_to,
-            city=filters.get("city"),
-            business_unit=filters.get("business_unit") or (bus[0] if bus else None),
-            oil_type=filters.get("oil_type"),
-            packing_category=filters.get("packing_category"),
-            client_type=filters.get("client_type"),
-            product=filters.get("product"),
-            include_price_fetch=bool(flags.get("include_price_fetch")),
-            include_cost_factor=bool(flags.get("include_cost_factor")),
-            factor_breakdown=bool(flags.get("factor_breakdown")),
-            time_grain=time_grain if time_grain in {"month"} else None,
-        )
-    elif intent == "advanced":
-        from eva_dashboard.chatbot import _dispatch_advanced
-
-        result = _dispatch_advanced(
-            {
-                "mode": spec.get("advanced_mode"),
-                **filters,
-                "period": phrase,
-                "date_from": date_from,
-                "date_to": date_to,
-            },
-            "",
-            prior_spec=None,
-        )
-    elif intent == "overview":
-        from eva_dashboard.chatbot import sales_overview
-
-        result = sales_overview()
     else:
         result = {
             "ok": False,
-            "error": f"Unsupported intent: {intent}",
+            "error": (
+                f"Unsupported plan (operation={operation}, metrics={metrics}, "
+                f"rows={row_dimensions}, cols={column_dimensions})."
+            ),
         }
 
     if isinstance(result, dict):
@@ -271,8 +341,9 @@ def execute_query_spec(
         filled_spec["grain"] = grain
         filled_spec["filters"] = filters
         filled_spec["business_units"] = bus
+        filled_spec["row_dimensions"] = row_dimensions
+        filled_spec["column_dimensions"] = column_dimensions
+        filled_spec["metrics"] = metrics
         result["query_spec"] = filled_spec
         result.setdefault("ok", True)
     return result
-
-

@@ -16,20 +16,26 @@ from eva_dashboard.db import connect, init_db
 from eva_dashboard.chatbot import system_prompt
 
 
-def test_plan_query_schema_requires_period_type() -> None:
+def test_plan_query_schema_is_universal_pivot() -> None:
     params = PLAN_QUERY_TOOL["function"]["parameters"]
     assert "period_type" in params["required"]
-    assert "intent" in params["required"]
+    assert "row_dimensions" in params["required"]
+    assert "metrics" in params["required"]
+    assert "context_handling" in params["required"]
+    assert "intent" not in params["required"]
     enums = params["properties"]["period_type"]["enum"]
     assert "MTD" in enums and "LAST_N_MONTHS" in enums
+    assert "avg_price" in params["properties"]["metrics"]["items"]["enum"]
+    assert "party" in params["properties"]["row_dimensions"]["items"]["enum"]
 
 
 def test_prompt_is_semantic_planner() -> None:
     text = system_prompt()
-    assert "Semantic Planner" in text or "plan_query" in text
+    assert "plan_query" in text
     assert "BLINDLY" in text or "blindly" in text.lower()
     assert "period_type" in text
-    assert "distributor-wise" in text.lower() or "DISTRIBUTOR" in text
+    assert "row_dimensions" in text or "Universal Pivot" in text
+    assert "customer" in text.lower() or "party" in text.lower()
 
 
 def test_executor_does_not_invent_filters_from_user_text() -> None:
