@@ -1348,7 +1348,14 @@ def analyze_parties(
 
     compare_info = None
     compare_vol: dict[str, float] = {}
-    if metric_n in {"yoy", "yoy_ams", "ams_growth"}:
+    mom_vol: dict[str, float] = {}
+    want_yoy = metric_n in {"yoy", "yoy_ams", "ams_growth"} or any(
+        str(f.get("metric") or "") == "yoy" for f in (metric_filters or [])
+    )
+    want_mom = any(
+        str(f.get("metric") or "") == "mom" for f in (metric_filters or [])
+    ) or metric_n == "mom"
+    if want_yoy:
         if compare_period:
             compare_info = resolve_period(compare_period)
         else:
@@ -1390,6 +1397,26 @@ def analyze_parties(
             if not cmp_frame.empty
             else {}
         )
+    if want_mom:
+        from eva_dashboard.advanced_analytics import _mom_prior_dates
+
+        m0, m1 = _mom_prior_dates(d0, d1)
+        mom_frame = _fetch_party_lines(
+            date_from=m0,
+            date_to=m1,
+            city=city_f,
+            zone=zone_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        mom_vol = (
+            mom_frame.groupby(entity_key)["mt"].sum().to_dict()
+            if not mom_frame.empty
+            else {}
+        )
 
     # Prior 3-month AMS window (the 3 full months before current AMS window)
     prior_ams: dict[str, float] = {}
@@ -1424,7 +1451,12 @@ def analyze_parties(
 
     rows = []
     entities = (
-        set(volume) | set(ams) | set(compare_vol) | set(invoice_counts) | set(prior_ams)
+        set(volume)
+        | set(ams)
+        | set(compare_vol)
+        | set(mom_vol)
+        | set(invoice_counts)
+        | set(prior_ams)
     )
     for ent in entities:
         vol = float(volume.get(ent, 0.0))
@@ -1436,11 +1468,9 @@ def analyze_parties(
         baseline = expected if (partial and expected is not None) else ams_v
         vs = pct_change(vol, baseline) if baseline else None
         prior = float(compare_vol.get(ent, 0.0))
-        yoy = (
-            pct_change(vol, prior)
-            if metric_n in {"yoy", "yoy_ams", "ams_growth"}
-            else None
-        )
+        yoy = pct_change(vol, prior) if want_yoy else None
+        mom_prior = float(mom_vol.get(ent, 0.0))
+        mom = pct_change(vol, mom_prior) if want_mom else None
         ams_growth = (
             pct_change(ams_v, ams_prior_v) if metric_n == "ams_growth" else None
         )
@@ -1466,12 +1496,10 @@ def analyze_parties(
             ),
             "expected_mt": mt_round(expected) if expected is not None else None,
             "pct_vs_ams": round(vs, 1) if vs is not None else None,
-            "prior_mt": (
-                mt_round(prior)
-                if metric_n in {"yoy", "yoy_ams", "ams_growth"}
-                else None
-            ),
+            "prior_mt": mt_round(prior) if want_yoy else None,
             "yoy_pct": round(yoy, 1) if yoy is not None else None,
+            "mom_prior_mt": mt_round(mom_prior) if want_mom else None,
+            "mom_pct": round(mom, 1) if mom is not None else None,
             "invoices": inv_n,
             "avg_invoice_mt": mt_round(avg_inv) if avg_inv is not None else None,
             "doing_well": bool(vs is not None and vs >= 0),

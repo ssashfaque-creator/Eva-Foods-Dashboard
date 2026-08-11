@@ -90,6 +90,155 @@ def _enforce_exclude_wins(
     return apply_spoken_constraints(spec, user_text=user_text)
 
 
+def _build_party_polarity_preview(
+    *,
+    needles: list[str],
+    polarity: str,
+    period_phrase: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    filters: dict[str, Any],
+    bus: list[str] | None = None,
+) -> str:
+    """Identification table for parties being excluded or included.
+
+    Shown *before* the main result so fuzzy names like "al shaheer" are
+    confirmed against the live clients/sales master.
+    """
+    from eva_dashboard.client_language import lookup_party
+    from eva_dashboard.party_match import list_party_matches
+    from eva_dashboard.sales_query import resolve_period
+
+    clean = [str(n).strip() for n in needles if str(n or "").strip()]
+    if not clean:
+        return ""
+
+    matched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for needle in clean:
+        names = list_party_matches(needle, limit=8)
+        if not names:
+            fuzzy = lookup_party(needle, limit=5)
+            for m in fuzzy.get("matches") or []:
+                name = str(m.get("client") or "").strip()
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
+                    matched.append(
+                        {
+                            "party": name,
+                            "client_type": m.get("client_type"),
+                            "city": m.get("city_filter") or m.get("city"),
+                            "needle": needle,
+                            "score": m.get("match_score"),
+                        }
+                    )
+            continue
+        for name in names:
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            matched.append(
+                {
+                    "party": name,
+                    "client_type": None,
+                    "city": None,
+                    "needle": needle,
+                    "score": None,
+                }
+            )
+
+    if not matched:
+        joined = ", ".join(f"**{n}**" for n in clean)
+        return (
+            f"### Clients identified for {polarity}\n\n"
+            f"No customers matched {joined} in clients/sales. "
+            f"The main table below is unchanged by this {polarity}.\n\n---\n\n"
+        )
+
+    period_info = resolve_period(
+        period_phrase, date_from=date_from, date_to=date_to
+    )
+    d0 = period_info.get("date_from") if period_info.get("ok") is not False else None
+    d1 = period_info.get("date_to") if period_info.get("ok") is not False else None
+
+    # Volume for matched parties under current scope (before exclude)
+    vol_by: dict[str, float] = {}
+    if d0 and d1:
+        try:
+            from eva_dashboard.db import connect, init_db
+
+            init_db()
+            names = [m["party"] for m in matched]
+            placeholders = ",".join("?" for _ in names)
+            params: list[Any] = [d0, d1, *[n.lower() for n in names]]
+            where = [
+                "s.date >= ?",
+                "s.date <= ?",
+                f"lower(trim(s.party)) IN ({placeholders})",
+            ]
+            city = filters.get("city")
+            if city:
+                where.append(
+                    "lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))"
+                )
+                params.append(city)
+            bu = filters.get("business_unit") or (
+                bus[0] if bus and len(bus) == 1 else None
+            )
+            if bu:
+                where.append(
+                    "lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))"
+                )
+                params.append(bu)
+            sql = f"""
+                SELECT s.party,
+                       ROUND(SUM(CASE WHEN COALESCE(s.mt_qty,0)<>0
+                         THEN s.mt_qty ELSE 0 END), 3) AS mt
+                FROM sales s
+                LEFT JOIN clients cl
+                  ON lower(trim(cl.client)) = lower(trim(s.party))
+                LEFT JOIN category c
+                  ON lower(trim(c.product)) = lower(trim(s.product))
+                WHERE {' AND '.join(where)}
+                GROUP BY s.party
+            """
+            with connect() as conn:
+                for row in conn.execute(sql, params).fetchall():
+                    vol_by[str(row["party"]).lower()] = float(row["mt"] or 0)
+        except Exception:  # noqa: BLE001
+            vol_by = {}
+
+    verb = "excluded" if polarity == "exclude" else "included"
+    title = (
+        "### Clients identified — these sales were excluded\n"
+        if polarity == "exclude"
+        else "### Clients identified — these sales were included\n"
+    )
+    period_lbl = period_info.get("label") or period_phrase or "selected period"
+    lines = [
+        title,
+        f"_Matched for **{' / '.join(clean)}** in {period_lbl}:_\n",
+        "| Party | Client Type | City | Volume in scope (MT) |",
+        "| --- | --- | --- | --- |",
+    ]
+    for m in matched:
+        mt = vol_by.get(m["party"].lower())
+        mt_txt = f"{mt:,.3f}" if mt is not None else "—"
+        lines.append(
+            "| {party} | {ctype} | {city} | {mt} |".format(
+                party=str(m["party"]).replace("|", "/"),
+                ctype=str(m.get("client_type") or "—").replace("|", "/"),
+                city=str(m.get("city") or "—").replace("|", "/"),
+                mt=mt_txt,
+            )
+        )
+    lines.append("")
+    lines.append(
+        f"_These customers are **{verb}** from the table below._\n\n---\n"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _apply_extracted_entities(
     spec: dict[str, Any],
     *,
@@ -1146,6 +1295,34 @@ def execute_query_spec(
     user_text: str = "",
 ) -> dict[str, Any]:
     """Execute a planned QuerySpec blindly (universal pivot or legacy)."""
+    # Hard short-circuit: "who is X" never enters the pivot / retry loop
+    if user_text and re.search(
+        r"\b(who\s+is|who'?s)\b", user_text, flags=re.I
+    ) and not re.search(
+        r"\b(sales?|volume|ams|price|growth|doing|performance|exclude)\b",
+        user_text,
+        flags=re.I,
+    ):
+        m = re.search(
+            r"\b(?:who\s+is|who'?s)\s+(.+?)(?:\?|$)",
+            user_text,
+            flags=re.I,
+        )
+        q = (m.group(1).strip(" .,!?") if m else "") or (
+            (raw_spec or {}).get("party_query")
+            or ((raw_spec or {}).get("filters") or {}).get("party")
+            or ""
+        )
+        result = lookup_party(str(q), limit=int((raw_spec or {}).get("limit") or 10))
+        result["query_spec"] = {
+            "operation": "party_lookup",
+            "intent": "party_lookup",
+            "party_query": result.get("query") or q,
+        }
+        from eva_dashboard.agent_loop import apply_verification
+
+        return apply_verification(result, user_text=user_text)
+
     spec = normalize_query_spec(raw_spec)
     # Soft-stick party scope before merge so short follow-ups keep the customer
     # (skipped automatically when the user asked to exclude/remove a party).
@@ -1703,6 +1880,63 @@ def execute_query_spec(
         filled_spec["metrics"] = metrics
         result["query_spec"] = filled_spec
         result.setdefault("ok", True)
+
+        # Identify matched parties before exclude/include so fuzzy names are clear
+        excludes = dict(spec.get("excludes") or {})
+        ex_needles = _party_exclude_needles(excludes)
+        if ex_needles and result.get("ok") and result.get("answer_markdown"):
+            preview = _build_party_polarity_preview(
+                needles=ex_needles,
+                polarity="exclude",
+                period_phrase=phrase,
+                date_from=date_from,
+                date_to=date_to,
+                filters=filters,
+                bus=bus,
+            )
+            if preview:
+                result["answer_markdown"] = preview + str(result["answer_markdown"])
+                result["exclude_preview"] = True
+        elif (
+            result.get("ok")
+            and result.get("answer_markdown")
+            and re.search(
+                r"\b(only\s+show|just\s+show|include|keep\s+only)\b",
+                user_text or "",
+                flags=re.I,
+            )
+        ):
+            inc_needles: list[str] = []
+            if filters.get("party"):
+                inc_needles.append(str(filters["party"]))
+            for p in filters.get("parties") or []:
+                if p:
+                    inc_needles.append(str(p))
+            for p in filters.get("party_ilike") or []:
+                if p:
+                    inc_needles.append(str(p))
+            if not inc_needles and spec.get("party_query"):
+                inc_needles.append(str(spec["party_query"]))
+            if inc_needles:
+                preview = _build_party_polarity_preview(
+                    needles=inc_needles,
+                    polarity="include",
+                    period_phrase=phrase,
+                    date_from=date_from,
+                    date_to=date_to,
+                    filters={
+                        k: v
+                        for k, v in filters.items()
+                        if k not in PARTY_SCOPE_KEYS
+                    },
+                    bus=bus,
+                )
+                if preview:
+                    result["answer_markdown"] = preview + str(
+                        result["answer_markdown"]
+                    )
+                    result["include_preview"] = True
+
         # Ensure follow-up specs retain party scope for PRIOR_QUERY_CONTEXT
         party_bits = {
             k: filters[k]

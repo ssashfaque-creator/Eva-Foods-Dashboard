@@ -461,20 +461,91 @@ def _score_name(query: str, candidate: str) -> float:
     if q in c or c in q:
         # Containment bonus scaled by length ratio
         return 0.85 + 0.1 * min(len(q), len(c)) / max(len(q), len(c))
-    # Token overlap
-    q_toks = set(q.split())
+    # Token overlap — "al shaheer" vs "AL SHAHEER CORPORATION LIMITED"
+    q_toks = [t for t in q.split() if len(t) > 1]
     c_toks = set(c.split())
-    if q_toks and q_toks <= c_toks:
+    if q_toks and set(q_toks) <= c_toks:
         return 0.88
+    if q_toks:
+        # Each query token that appears as a substring of the candidate
+        hits = sum(1 for t in q_toks if t in c)
+        if hits == len(q_toks) and hits >= 1:
+            return 0.82 + 0.05 * min(hits, 3)
+        if hits >= 1:
+            partial = 0.40 + 0.40 * (hits / len(q_toks))
+            ratio = SequenceMatcher(None, q, c).ratio()
+            return max(partial, ratio)
     ratio = SequenceMatcher(None, q, c).ratio()
     return ratio
 
 
+def _sales_stats_for_parties(
+    conn: Any,
+    names: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Cheap per-party MT stats for a small name list (no full sales scan)."""
+    clean = [str(n).strip() for n in names if str(n or "").strip()]
+    if not clean:
+        return {}
+    placeholders = ",".join("?" for _ in clean)
+    rows = conn.execute(
+        f"""
+        SELECT s.party,
+               COALESCE(NULLIF(trim(MAX(cl.type)), ''),
+                        NULLIF(trim(MAX(s.client_type)), ''),
+                        'Unmapped') AS client_type,
+               NULLIF(trim(MAX(cl.city_filter)), '') AS city_filter,
+               NULLIF(trim(MAX(cl.city)), '') AS city,
+               ROUND(SUM(
+                 CASE WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty ELSE 0 END
+               ), 3) AS mt_total,
+               COUNT(*) AS sales_lines,
+               MIN(s.date) AS first_sale,
+               MAX(s.date) AS last_sale
+        FROM sales s
+        LEFT JOIN clients cl
+          ON lower(trim(replace(replace(cl.client, '  ', ' '), '  ', ' ')))
+           = lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' ')))
+        WHERE lower(trim(s.party)) IN ({placeholders})
+        GROUP BY s.party
+        """,
+        [n.lower() for n in clean],
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row["party"] or "").strip()
+        if not name:
+            continue
+        out[name.lower()] = {
+            "mt_total": float(row["mt_total"] or 0),
+            "sales_lines": int(row["sales_lines"] or 0),
+            "first_sale": row["first_sale"],
+            "last_sale": row["last_sale"],
+            "client_type": str(row["client_type"] or "").strip() or None,
+            "city_filter": row["city_filter"],
+            "city": row["city"],
+        }
+    return out
+
+
 def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
-    """Fuzzy-search clients / sales parties and return close matches with metadata."""
+    """Fuzzy-search clients / sales parties and return close matches with metadata.
+
+    Never hangs on a full sales GROUP BY — clients are scored first; sales are
+    only queried for token LIKE candidates or to enrich the shortlist.
+    """
     q = (query or "").strip()
     if not q:
-        return {"ok": False, "error": "Empty query", "matches": []}
+        return {
+            "ok": True,
+            "error": None,
+            "matches": [],
+            "answer_markdown": (
+                "Please give a client / distributor name to look up "
+                "(e.g. `who is Al Shaheer`).\n"
+            ),
+            "response_instructions": "REQUIRED: Reply with `answer_markdown` verbatim.",
+        }
 
     # Strip leading "who is" / "who's" / "find"
     cleaned = re.sub(
@@ -488,6 +559,9 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
 
     init_db()
     candidates: dict[str, dict[str, Any]] = {}
+    weak: list[tuple[float, dict[str, Any]]] = []
+    tokens = [t for t in _norm(cleaned).split() if len(t) >= 3]
+    long_token = max(tokens, key=len) if tokens else _norm(cleaned)
 
     with connect() as conn:
         client_rows = conn.execute(
@@ -502,11 +576,9 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             if not name:
                 continue
             score = _score_name(cleaned, name)
-            if score < 0.45:
-                continue
             extra = _payload_fields(row["payload_json"])
             raw_type = str(row["type"] or "").strip()
-            candidates[name.lower()] = {
+            entry = {
                 "client": name,
                 "client_type": canonical_raw_client_type(raw_type) or raw_type or None,
                 "client_type_group": map_client_type(raw_type) if raw_type else None,
@@ -518,74 +590,80 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
                 "match_score": round(score, 3),
                 **extra,
             }
+            if score >= 0.45:
+                candidates[name.lower()] = entry
+            elif score >= 0.30:
+                weak.append((score, entry))
 
-        # Also parties that appear in sales but may be missing from clients
-        party_rows = conn.execute(
-            """
-            SELECT s.party,
-                   COALESCE(NULLIF(trim(MAX(cl.type)), ''),
-                            NULLIF(trim(MAX(s.client_type)), ''),
-                            'Unmapped') AS client_type,
-                   NULLIF(trim(MAX(cl.city_filter)), '') AS city_filter,
-                   NULLIF(trim(MAX(cl.city)), '') AS city,
-                   ROUND(SUM(
-                     CASE
-                       WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
-                       ELSE 0
-                     END
-                   ), 3) AS mt_total,
-                   COUNT(*) AS sales_lines,
-                   MIN(s.date) AS first_sale,
-                   MAX(s.date) AS last_sale
-            FROM sales s
-            LEFT JOIN clients cl
-              ON lower(trim(replace(replace(cl.client, '  ', ' '), '  ', ' ')))
-               = lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' ')))
-            WHERE s.party IS NOT NULL AND trim(s.party) != ''
-            GROUP BY s.party
-            """
-        ).fetchall()
-
-        for row in party_rows:
-            name = str(row["party"] or "").strip()
-            if not name:
-                continue
-            score = _score_name(cleaned, name)
-            if score < 0.45:
-                continue
-            key = name.lower()
-            existing = candidates.get(key)
-            sales_bits = {
-                "mt_total": float(row["mt_total"] or 0),
-                "sales_lines": int(row["sales_lines"] or 0),
-                "first_sale": row["first_sale"],
-                "last_sale": row["last_sale"],
-            }
-            if existing:
-                existing.update(sales_bits)
-                existing["match_score"] = max(existing["match_score"], round(score, 3))
-                if not existing.get("client_type"):
-                    raw_ct = str(row["client_type"] or "").strip()
-                    existing["client_type"] = (
-                        canonical_raw_client_type(raw_ct) or raw_ct or None
+        # Sales parties: token LIKE only (never full-table fuzzy scan)
+        if long_token:
+            like = f"%{long_token}%"
+            party_rows = conn.execute(
+                """
+                SELECT DISTINCT s.party
+                FROM sales s
+                WHERE s.party IS NOT NULL AND trim(s.party) != ''
+                  AND lower(s.party) LIKE ?
+                LIMIT 80
+                """,
+                (like,),
+            ).fetchall()
+            for row in party_rows:
+                name = str(row["party"] or "").strip()
+                if not name:
+                    continue
+                score = _score_name(cleaned, name)
+                if score < 0.45:
+                    if score >= 0.30 and name.lower() not in candidates:
+                        weak.append(
+                            (
+                                score,
+                                {
+                                    "client": name,
+                                    "source": "sales",
+                                    "match_score": round(score, 3),
+                                },
+                            )
+                        )
+                    continue
+                key = name.lower()
+                if key not in candidates:
+                    candidates[key] = {
+                        "client": name,
+                        "source": "sales",
+                        "match_score": round(score, 3),
+                    }
+                else:
+                    candidates[key]["match_score"] = max(
+                        float(candidates[key]["match_score"]), round(score, 3)
                     )
-                    existing["client_type_group"] = map_client_type(raw_ct)
-                if not existing.get("city_filter"):
-                    existing["city_filter"] = row["city_filter"]
-                if not existing.get("city"):
-                    existing["city"] = row["city"]
-            else:
-                raw_ct = str(row["client_type"] or "").strip()
-                candidates[key] = {
-                    "client": name,
-                    "client_type": canonical_raw_client_type(raw_ct) or raw_ct or None,
-                    "client_type_group": map_client_type(raw_ct) if raw_ct else None,
-                    "city_filter": row["city_filter"],
-                    "city": row["city"],
-                    "source": "sales",
-                    "match_score": round(score, 3),
-                    **sales_bits,
-                }
+
+        # Enrich shortlist with MT stats (targeted IN list — fast)
+        enrich_names = [c["client"] for c in candidates.values()]
+        if not enrich_names and weak:
+            weak.sort(key=lambda x: -x[0])
+            enrich_names = [e["client"] for _, e in weak[:10]]
+            for _, e in weak[:5]:
+                candidates.setdefault(e["client"].lower(), e)
+        stats = _sales_stats_for_parties(conn, enrich_names)
+        for key, entry in list(candidates.items()):
+            bit = stats.get(key)
+            if not bit:
+                continue
+            entry["mt_total"] = bit["mt_total"]
+            entry["sales_lines"] = bit["sales_lines"]
+            entry["first_sale"] = bit["first_sale"]
+            entry["last_sale"] = bit["last_sale"]
+            if not entry.get("client_type") and bit.get("client_type"):
+                raw_ct = str(bit["client_type"] or "").strip()
+                entry["client_type"] = (
+                    canonical_raw_client_type(raw_ct) or raw_ct or None
+                )
+                entry["client_type_group"] = map_client_type(raw_ct)
+            if not entry.get("city_filter"):
+                entry["city_filter"] = bit.get("city_filter")
+            if not entry.get("city"):
+                entry["city"] = bit.get("city")
 
     ranked = sorted(
         candidates.values(),
@@ -593,7 +671,16 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
     )[: max(1, min(int(limit or 10), 25))]
 
     strong = [r for r in ranked if float(r["match_score"]) >= 0.72]
-    show = strong if strong else ranked[:5]
+    show = strong if strong else ranked[:8]
+
+    # Still nothing usable — surface weak "did you mean" suggestions
+    if not show and weak:
+        weak.sort(key=lambda x: -x[0])
+        show = []
+        for score, entry in weak[:5]:
+            entry = dict(entry)
+            entry["match_score"] = round(float(score), 3)
+            show.append(entry)
 
     lines = [
         f"Client search for **{cleaned}** — {len(show)} close match(es):\n",
@@ -614,13 +701,18 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
     if not show:
         lines = [
             f"Could not find **{cleaned}** in clients or sales data.\n",
-            "If this is a **client / distributor** name, check the spelling "
-            "or try a fuller name (a city suffix helps, e.g. `Rubina Shaheen (LHR)`). "
-            "Or tell me the city / client type so I can narrow the search.",
+            "Try a longer fragment of the name (e.g. `shaheer` or "
+            "`Rubina Shaheen (LHR)`), or add a city / client type.",
         ]
+    elif all(float(r.get("match_score") or 0) < 0.45 for r in show):
+        lines.insert(
+            1,
+            "_No strong match — did you mean one of these? Reply with the exact name._\n",
+        )
 
     return {
         "ok": True,
+        "mode": "party_lookup",
         "query": cleaned,
         "original_query": q,
         "matches": show,
@@ -629,7 +721,7 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim (or expand match details "
             "without inventing clients). Report client name, client type, city, etc. "
-            "If no matches, ask the user to confirm whether this is a client name "
-            "and to elaborate (spelling, city, client type)."
+            "If several matches, ask the user to pick the exact name. "
+            "Do NOT call plan_query again for the same who-is ask."
         ),
     }

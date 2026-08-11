@@ -16,6 +16,7 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "volume": ("volume_mt", "volume", "mt"),
     "vs_ams": ("pct_vs_ams", "vs_ams"),
     "yoy": ("yoy_pct", "yoy"),
+    "mom": ("mom_pct", "mom"),
     "last_price": ("last_price",),
     "avg_price": ("avg_price_incl_gst", "avg_price", "incl_gst_per_unit"),
     "price_fetch": ("price_fetch",),
@@ -25,7 +26,8 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
 _METRIC_ALIASES: list[tuple[str, str]] = [
     (r"ams\s*growth|growth\s*%|growth\s+percent|growth", "ams_growth"),
     (r"%\s*vs\s*ams|vs\.?\s*ams|versus\s+ams", "vs_ams"),
-    (r"yoy|year\s*over\s*year", "yoy"),
+    (r"yoy|year\s*over\s*year|year\s+on\s+year", "yoy"),
+    (r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month", "mom"),
     (r"ams|average\s+monthly\s+sales", "ams"),
     (r"volume|sales\s+mt|tonnage|\bmt\b", "volume"),
     (r"last\s+price|latest\s+price", "last_price"),
@@ -70,7 +72,15 @@ def _resolve_metric_name(blob: str) -> str | None:
 
 def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
     """Extract metric thresholds from spoken language."""
-    t = _norm(user_text)
+    # Preserve numeric negatives (AMS / YoY < -20) before dash→space norm
+    raw = str(user_text or "")
+    protected = re.sub(
+        r"(?<![a-z0-9])-(\d+(?:\.\d+)?)",
+        r"NEG\1",
+        raw,
+        flags=re.I,
+    )
+    t = _norm(protected).replace("neg", "-")
     if not t:
         return []
     found: list[dict[str, Any]] = []
@@ -80,7 +90,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
     )
     metric_alt = (
         r"ams\s*growth|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
-        r"average\s+monthly\s+sales|ams|volume|yoy|"
+        r"average\s+monthly\s+sales|ams|volume|"
+        r"yoy|year\s*over\s*year|year\s+on\s+year|"
+        r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month|"
         r"last\s+price|avg\s+price|price\s*fetch|invoices?"
     )
     pattern = re.compile(
@@ -88,7 +100,7 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         rf"(?:(?:only\s+show|show\s+only|keep\s+only|filter\s+to)\s+)?"
         rf"(?P<metric>{metric_alt})"
         rf"\s*(?P<op>{op_alt})"
-        rf"\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<pct>%|percent|pct)?",
+        rf"\s*(?P<value>-?\d+(?:\.\d+)?)\s*(?P<pct>%|percent|pct)?",
         flags=re.I,
     )
     for m in pattern.finditer(t):
@@ -112,7 +124,8 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if entry not in found:
             found.append(entry)
 
-    # "grew more than 30%" / "dropped more than 20%" without saying ams growth
+    # "grew more than 30%" / "dropped more than 20%" — default AMS growth,
+    # but honor explicit yoy/mom in the same sentence.
     for m in re.finditer(
         rf"\b(grew|grown|gained|dropped|declined|fell)\s+"
         rf"(?P<op>{op_alt})\s*(?P<value>\d+(?:\.\d+)?)\s*(%|percent|pct)?",
@@ -124,11 +137,15 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
             continue
         value = float(m.group("value"))
         verb = m.group(1).lower()
+        metric = "ams_growth"
+        if re.search(r"\b(yoy|year\s*over\s*year)\b", t):
+            metric = "yoy"
+        elif re.search(r"\b(mom|month\s*over\s*month|last\s+month)\b", t):
+            metric = "mom"
         if verb in {"dropped", "declined", "fell"} and op == "gt":
-            # "dropped more than 20%" → growth < -20
-            entry = {"metric": "ams_growth", "op": "lt", "value": -abs(value)}
+            entry = {"metric": metric, "op": "lt", "value": -abs(value)}
         else:
-            entry = {"metric": "ams_growth", "op": op, "value": value}
+            entry = {"metric": metric, "op": op, "value": value}
         if entry not in found:
             found.append(entry)
     return found

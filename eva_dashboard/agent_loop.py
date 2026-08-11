@@ -77,8 +77,9 @@ def should_clarify_party(
         return False
     if party_matches_look_like_branches(q, ms):
         return False
-    # Profile / lookup asks with divergent names → ask user to pick
-    if operation in {"party_profile", "party_lookup"} and len(ms) >= 2:
+    # Profile asks with divergent names → ask user to pick.
+    # party_lookup already returns a scored identity table — do not replace it.
+    if operation == "party_profile" and len(ms) >= 2:
         return True
     # Empty analytics result with many divergent matches → clarify
     if empty_result and len(ms) >= 3:
@@ -105,7 +106,16 @@ def clarify_party_markdown(query: str, matches: list[str]) -> str:
 def _result_is_empty(result: dict[str, Any]) -> bool:
     if not result or result.get("ok") is False:
         return False  # errors handled elsewhere
-    if result.get("mode") in {"party_pick", "clarify", "factor_costs"}:
+    if result.get("mode") in {
+        "party_pick",
+        "clarify",
+        "factor_costs",
+        "party_lookup",
+    }:
+        return False
+    # Identity search already answered
+    matches = result.get("matches")
+    if isinstance(matches, list) and matches:
         return False
     # Scalar / list payloads that mean we already have an answer
     if result.get("volume_mt") not in (None, 0, 0.0):
@@ -336,7 +346,14 @@ def apply_verification(
     out["verification"] = verification
 
     clarify = verification.get("clarify")
-    if clarify and clarify.get("markdown"):
+    # Never overwrite a finished who-is / identity table with a bare pick list
+    if (
+        clarify
+        and clarify.get("markdown")
+        and str(out.get("mode") or "") != "party_lookup"
+        and not (isinstance(out.get("matches"), list) and out.get("matches")
+                 and "Client search" in (out.get("answer_markdown") or ""))
+    ):
         out["ok"] = True
         out["mode"] = "clarify"
         out["answer_markdown"] = clarify["markdown"]
@@ -348,7 +365,10 @@ def apply_verification(
         return out
 
     # Empty → ask model to replan (unless we already have a useful pick UI)
-    if verification.get("retry_errors") and out.get("mode") != "party_pick":
+    if (
+        verification.get("retry_errors")
+        and out.get("mode") not in {"party_pick", "party_lookup"}
+    ):
         # Keep ok=True with empty table if answer_markdown already explains;
         # only force retry when there is essentially nothing to show.
         md = (out.get("answer_markdown") or "").strip()

@@ -163,6 +163,18 @@ def list_party_matches(query: str | None, *, limit: int = 8) -> list[str]:
                 seen.add(key)
                 matches.append(name)
 
+        # Fuzzy fallback when LIKE misses typos ("al shaher" → Al Shaheer…)
+        if not matches:
+            from eva_dashboard.client_language import lookup_party
+
+            fuzzy = lookup_party(q, limit=limit)
+            for m in fuzzy.get("matches") or []:
+                name = str(m.get("client") or "").strip()
+                key = name.lower()
+                if name and key not in seen and float(m.get("match_score") or 0) >= 0.45:
+                    seen.add(key)
+                    matches.append(name)
+
     return matches
 
 
