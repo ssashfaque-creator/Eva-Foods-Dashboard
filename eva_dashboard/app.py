@@ -567,8 +567,8 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.info(
-        f"**Engine v{__version__}** — polarity-aware (exclude/without/except "
-        f"never becomes an include filter). App file: `{Path(__file__).resolve()}`"
+        f"**Engine v{__version__}** — multi-wise last price (channel × SKU) + "
+        f"polarity-aware excludes. App file: `{Path(__file__).resolve()}`"
     )
     _ver = str(__version__)
     _path = str(Path(__file__).resolve()).lower()
