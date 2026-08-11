@@ -258,6 +258,10 @@ def system_prompt() -> str:
    metrics=["volume","ams"]. customer/party/account/buyer/store →
    row_dimensions=["party"]. price/rates → metrics=["avg_price"]
    (+ column_dimensions=["month"] when monthly).
+8. FILTER CONTRACT: Eva Consumer / Eva Bulk / Maan* are business_units
+   (category_1). client_type is ONLY channels (Eva Distributors, Imtiaz, …).
+   Wrong column → Validation failed tool error — fix and retry.
+   Unsure → extracted_entities and let Python resolve.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -642,10 +646,12 @@ def prepare_report_snapshot(report_date: str) -> dict[str, Any]:
     }
 
 
+from eva_dashboard.entity_catalog import build_plan_query_tool
 from eva_dashboard.query_spec import PLAN_QUERY_TOOL
 
-TOOLS: list[dict[str, Any]] = [
-    PLAN_QUERY_TOOL,
+# Legacy tools follow; plan_query is injected live via get_tools() so filter
+# enums always match the SQLite masters (Enterprise Semantic Layer).
+_LEGACY_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -1152,7 +1158,7 @@ TOOLS: list[dict[str, Any]] = [
 
 
 
-TOOLS.append(
+_LEGACY_TOOLS.append(
     {
         "type": "function",
         "function": {
@@ -1243,6 +1249,15 @@ TOOLS.append(
         },
     }
 )
+
+
+def get_tools() -> list[dict[str, Any]]:
+    """OpenAI tools with live categorical enums on ``plan_query``."""
+    return [build_plan_query_tool(PLAN_QUERY_TOOL), *_LEGACY_TOOLS]
+
+
+# Backward-compat alias (static snapshot without live enums — prefer get_tools()).
+TOOLS: list[dict[str, Any]] = get_tools()
 
 
 def _looks_analytical(text: str) -> bool:
@@ -5683,7 +5698,7 @@ def chat_completion(
             response = client.chat.completions.create(
                 model=model,
                 messages=api_messages,
-                tools=TOOLS,
+                tools=get_tools(),
                 tool_choice=tool_choice,
                 temperature=0.1,
             )

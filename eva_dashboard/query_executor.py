@@ -25,6 +25,11 @@ from eva_dashboard.party_analytics import (
     lookup_party,
     party_sales,
 )
+from eva_dashboard.entity_catalog import (
+    BRAND_ENTITY_MAP,
+    is_business_unit_label,
+    resolve_extracted_entities,
+)
 from eva_dashboard.query_spec import (
     merge_prior_into_spec,
     normalize_query_spec,
@@ -35,6 +40,50 @@ from eva_dashboard.sales_query import query_price, query_sales
 from eva_dashboard.universal_pivot import execute_universal_pivot
 
 
+def _norm_key(text: str) -> str:
+    return " ".join(str(text or "").strip().lower().replace("-", " ").split())
+
+
+def _expand_business_units(values: list[str] | None) -> list[str]:
+    """Expand brand phrases (Eva → Eva Consumer + Eva Bulk)."""
+    out: list[str] = []
+    for raw in values or []:
+        key = _norm_key(str(raw))
+        if key in BRAND_ENTITY_MAP:
+            for b in BRAND_ENTITY_MAP[key]:
+                if b not in out:
+                    out.append(b)
+        elif str(raw).strip() and str(raw).strip() not in out:
+            out.append(str(raw).strip())
+    return out
+
+
+def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
+    """Merge Python-resolved extracted_entities into filters / business_units."""
+    out = dict(spec)
+    resolved = resolve_extracted_entities(list(out.get("extracted_entities") or []))
+    filters = dict(out.get("filters") or {})
+    bus = list(out.get("business_units") or filters.get("business_units") or [])
+
+    for b in resolved.get("business_units") or []:
+        if b not in bus:
+            bus.append(b)
+    if resolved.get("business_unit") and not bus:
+        bus = [resolved["business_unit"]]
+    for key in ("oil_type", "packing_category", "city", "zone", "client_type"):
+        if resolved.get(key) and not filters.get(key):
+            filters[key] = resolved[key]
+
+    if bus:
+        out["business_units"] = bus
+        filters["business_units"] = bus
+        if len(bus) == 1:
+            filters.setdefault("business_unit", bus[0])
+    out["filters"] = filters
+    out["_entity_resolution"] = resolved
+    return out
+
+
 def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
     """Canonicalize provided filter values only — never invent filters."""
     out = dict(filters or {})
@@ -42,7 +91,9 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
         out["city"] = str(out["city"]).strip()
     if out.get("zone"):
         out["zone"] = normalize_zone(out.get("zone"))
-    if out.get("client_type"):
+    # Do NOT normalize client_type when it is clearly a Business Unit —
+    # validation must reject that for the LLM retry loop.
+    if out.get("client_type") and not is_business_unit_label(str(out["client_type"])):
         out["client_type"] = normalize_client_type(out.get("client_type"))
 
     oil = out.get("oil_type")
@@ -83,6 +134,15 @@ def execute_query_spec(
     del user_text
     spec = normalize_query_spec(raw_spec)
     spec = merge_prior_into_spec(spec, prior)
+    # Python entity resolution BEFORE validation (forgiving extracted_entities)
+    spec = _apply_extracted_entities(spec)
+    spec["business_units"] = _expand_business_units(
+        list(spec.get("business_units") or [])
+    )
+    if spec.get("business_units"):
+        filters = dict(spec.get("filters") or {})
+        filters["business_units"] = list(spec["business_units"])
+        spec["filters"] = filters
 
     resolved = resolve_period_from_spec(spec)
     spec["period"] = resolved["period"]
@@ -115,12 +175,15 @@ def execute_query_spec(
     if errors:
         return {
             "ok": False,
-            "error": "Incomplete QuerySpec — fix and call plan_query again.",
+            "error": "Validation failed — fix the QuerySpec and call plan_query again.",
             "plan_errors": errors,
             "query_spec": spec,
             "response_instructions": (
-                "REQUIRED: Call plan_query again with a complete QuerySpec. "
-                "Address every plan_errors item. Do not invent numbers."
+                "REQUIRED: Call plan_query again with a corrected QuerySpec. "
+                "Address every plan_errors item. "
+                "Business Units (Eva Consumer, Eva Bulk, …) go in business_units — "
+                "NEVER in client_type. Use extracted_entities when unsure. "
+                "Do not invent numbers."
             ),
         }
 
@@ -132,9 +195,11 @@ def execute_query_spec(
     row_dimensions = list(spec.get("row_dimensions") or [])
     column_dimensions = list(spec.get("column_dimensions") or [])
     metrics = list(spec.get("metrics") or [])
-    bus = list(spec.get("business_units") or filters.get("business_units") or [])
+    bus = _expand_business_units(
+        list(spec.get("business_units") or filters.get("business_units") or [])
+    )
     if filters.get("business_unit") and not bus:
-        bus = [filters["business_unit"]]
+        bus = _expand_business_units([filters["business_unit"]])
 
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")

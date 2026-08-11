@@ -25,11 +25,13 @@ def vocabulary_for_prompt() -> str:
     parts = [
         "VOCABULARY (YOU translate spoken words → Universal Pivot fields):",
         "",
-        "1. BRANDS → filters.business_units",
-        "- Eva → [\"Eva Consumer\", \"Eva Bulk\"] (BOTH). Never Shortening/Meal.",
-        "- Maan → [\"Maan Consumer\", \"Maan Bulk\"] (BOTH).",
-        "- Consumer (alone) → [\"Eva Consumer\"].",
-        "- Bulk (Eva context) → Eva Bulk; \"Maan bulk\" → Maan Bulk.",
+        "1. BRANDS → business_units (NEVER client_type) — STRICT",
+        "- Eva → business_units=[\"Eva Consumer\", \"Eva Bulk\"] (BOTH).",
+        "- Maan → business_units=[\"Maan Consumer\", \"Maan Bulk\"] (BOTH).",
+        "- Consumer (alone) → business_units=[\"Eva Consumer\"].",
+        "- \"Eva Consumer\" / \"Eva Bulk\" are BUSINESS UNITS (category_1).",
+        "- Putting Eva Consumer in client_type is INVALID and will be rejected.",
+        "- If unsure which column a brand/product belongs in → extracted_entities.",
         "",
         "2. PARTY / CUSTOMER → row_dimensions=['party'] (STRICT)",
         "- customer, customer-wise, party, party-wise, account, buyer, store,",
@@ -37,9 +39,10 @@ def vocabulary_for_prompt() -> str:
         "- Do NOT invent filters.client_type unless a channel is named.",
         "- \"distributor sales\" / \"who are distributors\" → filters.client_type="
         "\"Eva Distributors\" (channel filter) — different from distributor-wise.",
-        "- \"Eva distributor sales\" → brand BUs AND client_type=Eva Distributors.",
+        "- \"Eva distributor sales\" → business_units=[Eva Consumer, Eva Bulk] AND "
+        "client_type=Eva Distributors.",
         "",
-        "3. CHANNEL TYPES (only when named as a channel):",
+        "3. CHANNEL TYPES (client_type enum ONLY — never Business Units):",
         *_group(CLIENT_TYPE_ALIASES),
         "",
         "4. PRODUCT / SKU / COMPOSITE FILTERS",
@@ -91,12 +94,22 @@ Server executes BLINDLY. plan_errors → fix and call plan_query again.
 
 Required: row_dimensions, metrics, period_type, context_handling
 Optional: column_dimensions, filters, months_back, clear_filters, operation,
-sort_order, business_units, party_query (for lookup), price_flags.
+sort_order, business_units, extracted_entities, party_query, price_flags.
+
+FILTER CONTRACT (Enterprise):
+- business_units / client_type / oil_type / packing_category are STRICT enums.
+- Eva Consumer belongs in business_units — NEVER client_type.
+- If unsure → extracted_entities=["Eva Consumer"] and let Python place it.
+- plan_errors mean Validation failed — fix the field and call plan_query again.
 
 Examples:
 - \"customer-wise price trends last 6 months\" →
   row_dimensions=["party"], column_dimensions=["month"], metrics=["avg_price"],
   period_type=LAST_N_MONTHS, months_back=6
+- \"Eva Consumer sales in Lahore last 6 months\" →
+  business_units=["Eva Consumer"], filters={city:Lahore},
+  row_dimensions=["business_unit"], column_dimensions=["month"],
+  metrics=["volume","ams"]  # NOT client_type=Eva Consumer
 - \"how Eva distributor sales in Lahore are doing last 6 months\" →
   row_dimensions=["business_unit"], column_dimensions=["month"],
   metrics=["volume","ams"], filters={city:Lahore, client_type:Eva Distributors},

@@ -236,6 +236,19 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 "business_units": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "description": (
+                        "Business Unit filter (category_1). "
+                        "Eva Consumer / Eva Bulk / Maan … — NEVER client_type."
+                    ),
+                },
+                "extracted_entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Ambiguous brand/product/packing/city phrases. "
+                        "Python maps them to the correct columns. Use when unsure "
+                        "instead of guessing client_type vs business_unit."
+                    ),
                 },
                 "rationale": {"type": "string"},
                 # ---- legacy compat (tests / old clients; prefer universal fields) ----
@@ -359,9 +372,11 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
         "- Fresh complete ask → context_handling='none'.\n"
         "- Keep business_units from prior when the user says 'this' and does "
         "not rename the brand.\n"
-        "- distributor-wise after a brand table → group_by=party, "
-        "clear_filters include client_type if sticky; ranking_metric=vs_ams "
-        "for lowest performing. Do NOT invent Eva Distributors.\n"
+        "- distributor-wise / customer-wise after a brand table → "
+        "row_dimensions=[\"party\"], clear_filters include client_type if sticky; "
+        "metrics=[\"vs_ams\"] for lowest performing. Do NOT invent Eva Distributors.\n"
+        "- Prefer Universal Pivot fields (row_dimensions / column_dimensions / "
+        "metrics) over legacy intent labels.\n"
     )
 
 
@@ -610,6 +625,11 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     bus = list(
         filters.get("business_units") or raw.get("business_units") or []
     )
+    extracted_entities = [
+        str(e).strip()
+        for e in (raw.get("extracted_entities") or [])
+        if str(e).strip()
+    ]
 
     # ---- Universal pivot fields ----
     row_dimensions = _as_dim_list(raw.get("row_dimensions"), allowed=ROW_DIMENSIONS)
@@ -714,6 +734,7 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "price_flags": dict(raw.get("price_flags") or {}),
         "rationale": raw.get("rationale") or "",
         "business_units": bus,
+        "extracted_entities": extracted_entities,
     }
 
 
@@ -799,6 +820,14 @@ def validate_query_spec(
         spec.get("party_query") or (spec.get("filters") or {}).get("party")
     ):
         errors.append("party_lookup requires party_query (the party name).")
+
+    # Strict categorical enums (Enterprise Semantic Layer)
+    from eva_dashboard.entity_catalog import validate_categorical_filters
+
+    enum_filters = dict(spec.get("filters") or {})
+    if spec.get("business_units"):
+        enum_filters["business_units"] = list(spec.get("business_units") or [])
+    errors.extend(validate_categorical_filters(enum_filters))
     return errors
 
 
