@@ -136,6 +136,13 @@ def _check_case(case: dict[str, Any]) -> list[str]:
             f"{cid}: operation {qs.get('operation')!r} != {expect['operation']!r}"
         )
 
+    if "row_dimensions" in expect:
+        got_rows = list(qs.get("row_dimensions") or [])
+        if got_rows != list(expect["row_dimensions"]):
+            failures.append(
+                f"{cid}: row_dimensions {got_rows!r} != {expect['row_dimensions']!r}"
+            )
+
     if "metrics_include" in expect:
         metrics = set(qs.get("metrics") or [])
         for m in expect["metrics_include"]:

@@ -30,6 +30,10 @@ from eva_dashboard.party_analytics import (
     _party_meta,
     extract_city_from_text,
 )
+from eva_dashboard.party_match import (
+    family_display_label,
+    party_matches_look_like_branches,
+)
 from eva_dashboard.sales_query import (
     _attach_client_dims,
     _normalize_business_unit,
@@ -1286,8 +1290,14 @@ def party_profile(
 
     Returns identity, period volume, AMS / % vs AMS, last purchase, avg rate,
     top SKUs, and a monthly trend — plus sticky ``party_spec`` for follow-ups.
+
+    Branch families (Al Shaheer Lahore/Karachi) are aggregated silently with a
+    per-branch breakdown — same policy as analytics ILIKE — instead of a pick list.
     """
     chosen: dict[str, Any] | None = None
+    names: list[str] = []
+    branch_matches: list[dict[str, Any]] = []
+    party_ilike_frag: str | None = None
     name = (party or "").strip() or None
     if not name:
         looked = lookup_party(query or "", limit=10)
@@ -1306,8 +1316,10 @@ def party_profile(
         ]
         if len(exact) == 1:
             chosen = exact[0]
+            names = [str(chosen.get("client"))]
         elif len(matches) == 1 and float(matches[0].get("match_score") or 0) >= 0.72:
             chosen = matches[0]
+            names = [str(chosen.get("client"))]
         elif (
             len(matches) >= 1
             and float(matches[0].get("match_score") or 0) >= 0.92
@@ -1319,26 +1331,54 @@ def party_profile(
             )
         ):
             chosen = matches[0]
+            names = [str(chosen.get("client"))]
         else:
-            lines = [
-                f"Multiple parties match **{query}** — reply with the exact name:\n",
-                "| # | Party | Client Type | City | Score |",
-                "| --- | --- | --- | --- | --- |",
+            match_names = [
+                str(m.get("client") or "").strip()
+                for m in matches
+                if str(m.get("client") or "").strip()
             ]
-            for i, m in enumerate(matches[:10], 1):
-                lines.append(
-                    f"| {i} | {m.get('client')} | {m.get('client_type') or '—'} | "
-                    f"{m.get('city_filter') or m.get('city') or '—'} | "
-                    f"{m.get('match_score')} |"
-                )
-            return {
-                "ok": True,
-                "mode": "party_pick",
-                "matches": matches,
-                "answer_markdown": "\n".join(lines) + "\n",
-                "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
-            }
-        name = str(chosen.get("client"))
+            if party_matches_look_like_branches(query or "", match_names):
+                names = match_names
+                branch_matches = list(matches)
+                party_ilike_frag = (query or "").strip() or None
+                label = family_display_label(query or "", match_names)
+                ctypes = {
+                    str(m.get("client_type") or "").strip()
+                    for m in matches
+                    if str(m.get("client_type") or "").strip()
+                }
+                cities = []
+                for m in matches:
+                    c = str(m.get("city_filter") or m.get("city") or "").strip()
+                    if c and c not in cities:
+                        cities.append(c)
+                chosen = {
+                    "client": label,
+                    "client_type": next(iter(ctypes)) if len(ctypes) == 1 else "mixed",
+                    "city_filter": ", ".join(cities) if cities else "multiple",
+                    "city": ", ".join(cities) if cities else "multiple",
+                }
+            else:
+                lines = [
+                    f"Multiple parties match **{query}** — reply with the exact name:\n",
+                    "| # | Party | Client Type | City | Score |",
+                    "| --- | --- | --- | --- | --- |",
+                ]
+                for i, m in enumerate(matches[:10], 1):
+                    lines.append(
+                        f"| {i} | {m.get('client')} | {m.get('client_type') or '—'} | "
+                        f"{m.get('city_filter') or m.get('city') or '—'} | "
+                        f"{m.get('match_score')} |"
+                    )
+                return {
+                    "ok": True,
+                    "mode": "party_pick",
+                    "matches": matches,
+                    "answer_markdown": "\n".join(lines) + "\n",
+                    "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+                }
+        name = str(chosen.get("client")) if chosen else names[0]
     else:
         # Resolve metadata for an already-canonical party name
         looked = lookup_party(name, limit=5)
@@ -1353,6 +1393,7 @@ def party_profile(
             name = str(chosen.get("client") or name)
         if chosen is None:
             chosen = {"client": name}
+        names = [name]
 
     _, max_d = _sales_date_bounds()
     if not max_d:
@@ -1370,6 +1411,7 @@ def party_profile(
     pack = normalize_packing_category(packing_category)
     ctype = normalize_client_type(client_type)
     city_f = (city or "").strip() or None
+    name_set = set(names)
 
     # Focus period (volume / vs AMS / rate). Default = latest full/partial month.
     if date_from and date_to:
@@ -1401,21 +1443,27 @@ def party_profile(
     labels.reverse()
     trend_start = f"{labels[0]}-01"
 
+    def _scope_parties(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        out = frame[frame["party"].astype(str).isin(name_set)]
+        if not out.empty and len(units) > 1:
+            out = out[out["business_unit"].isin(units)]
+        return out
+
     # All history for last purchase (12 months lookback is enough for "days since")
     hist_start = (max_d.replace(day=1) - timedelta(days=365)).isoformat()
-    hist = _fetch_filtered_lines(
-        date_from=hist_start,
-        date_to=max_d.isoformat(),
-        city=city_f,
-        client_type=ctype,
-        business_unit=units[0] if len(units) == 1 else None,
-        oil_type=oil,
-        packing_category=pack,
+    hist = _scope_parties(
+        _fetch_filtered_lines(
+            date_from=hist_start,
+            date_to=max_d.isoformat(),
+            city=city_f,
+            client_type=ctype,
+            business_unit=units[0] if len(units) == 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+        )
     )
-    if not hist.empty:
-        hist = hist[hist["party"].astype(str) == name]
-    if not hist.empty and len(units) > 1:
-        hist = hist[hist["business_unit"].isin(units)]
 
     last_sale = None
     days_since = None
@@ -1427,22 +1475,20 @@ def party_profile(
             days_since = int((max_d - last_ts.date()).days)
 
     # Period volume
-    period_frame = _fetch_filtered_lines(
-        date_from=d0,
-        date_to=d1,
-        city=city_f,
-        client_type=ctype,
-        business_unit=units[0] if len(units) == 1 else None,
-        oil_type=oil,
-        packing_category=pack,
+    period_frame = _scope_parties(
+        _fetch_filtered_lines(
+            date_from=d0,
+            date_to=d1,
+            city=city_f,
+            client_type=ctype,
+            business_unit=units[0] if len(units) == 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+        )
     )
-    if not period_frame.empty:
-        period_frame = period_frame[period_frame["party"].astype(str) == name]
-    if not period_frame.empty and len(units) > 1:
-        period_frame = period_frame[period_frame["business_unit"].isin(units)]
     period_mt = float(period_frame["mt"].sum()) if not period_frame.empty else 0.0
 
-    ams = _ams_by_party(
+    ams_map = _ams_by_party(
         as_of=as_of.replace(day=1),
         city=city_f,
         client_type=ctype,
@@ -1450,7 +1496,8 @@ def party_profile(
         oil_type=oil,
         packing_category=pack,
         brand_prefix=None,
-    ).get(name, 0.0)
+    )
+    ams = float(sum(float(ams_map.get(n, 0.0) or 0.0) for n in names))
     pct_vs_ams = (
         round((period_mt - ams) / ams * 100.0, 1) if ams else None
     )
@@ -1465,19 +1512,17 @@ def party_profile(
             avg_rate = round(float((rates[mask] * mts[mask]).sum() / mts[mask].sum()), 2)
 
     # Trend + mix from longer window
-    trend = _fetch_filtered_lines(
-        date_from=trend_start,
-        date_to=max_d.isoformat(),
-        city=city_f,
-        client_type=ctype,
-        business_unit=units[0] if len(units) == 1 else None,
-        oil_type=oil,
-        packing_category=pack,
+    trend = _scope_parties(
+        _fetch_filtered_lines(
+            date_from=trend_start,
+            date_to=max_d.isoformat(),
+            city=city_f,
+            client_type=ctype,
+            business_unit=units[0] if len(units) == 1 else None,
+            oil_type=oil,
+            packing_category=pack,
+        )
     )
-    if not trend.empty:
-        trend = trend[trend["party"].astype(str) == name]
-    if not trend.empty and len(units) > 1:
-        trend = trend[trend["business_unit"].isin(units)]
 
     month_rows: list[dict[str, Any]] = []
     top_skus: list[dict[str, Any]] = []
@@ -1499,6 +1544,38 @@ def party_profile(
         top_skus = [
             {"product": str(k), "volume_mt": mt_round(v)} for k, v in sku.items()
         ]
+
+    # Per-branch breakdown for family profiles
+    branch_rows: list[dict[str, Any]] = []
+    if len(names) > 1:
+        per_mt = (
+            period_frame.groupby("party")["mt"].sum().to_dict()
+            if not period_frame.empty
+            else {}
+        )
+        last_by: dict[str, str] = {}
+        if not hist.empty:
+            tmp = hist.copy()
+            tmp["_d"] = pd.to_datetime(tmp["date"], errors="coerce")
+            for pname, grp in tmp.groupby("party"):
+                ts = grp["_d"].max()
+                if pd.notna(ts):
+                    last_by[str(pname)] = ts.date().isoformat()
+        meta_by = {
+            str(m.get("client") or "").strip(): m for m in branch_matches
+        }
+        for pname in names:
+            meta = meta_by.get(pname) or {}
+            branch_rows.append(
+                {
+                    "party": pname,
+                    "city": meta.get("city_filter") or meta.get("city") or "—",
+                    "client_type": meta.get("client_type") or "—",
+                    "volume_mt": mt_round(float(per_mt.get(pname, 0.0) or 0.0)),
+                    "ams_mt": mt_round(float(ams_map.get(pname, 0.0) or 0.0)),
+                    "last_sale": last_by.get(pname),
+                }
+            )
 
     trend_total = sum(r["volume_mt"] for r in month_rows)
     ctype_label = (
@@ -1551,6 +1628,18 @@ def party_profile(
         lines.append(f"| {r['month']} | {r['volume_mt']} |")
     lines.append(f"| **Total ({mb}m)** | **{mt_round(trend_total)}** |")
 
+    if branch_rows:
+        lines += [
+            "\n### Branches (same focus period)\n",
+            "| Party | City | Period MT | AMS | Last purchase |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for row in branch_rows:
+            lines.append(
+                f"| {row['party']} | {row['city']} | {row['volume_mt']} | "
+                f"{row['ams_mt']} | {row['last_sale'] or '—'} |"
+            )
+
     if top_skus:
         lines += ["\n### Top SKUs (same trend window)\n", "| Product | MT |", "| --- | --- |"]
         for row in top_skus:
@@ -1567,6 +1656,12 @@ def party_profile(
     tips = [
         f"AMS baseline is **{mt_round(ams)} MT**/month for this scope.",
     ]
+    if len(names) > 1:
+        tips.append(
+            f"Aggregated **{len(names)} branches** matching "
+            f"**{party_ilike_frag or query or name}** "
+            "(same silent family policy as sales analytics)."
+        )
     if pct_vs_ams is not None:
         tips.append(
             f"Focus period is **{pct_vs_ams:+.1f}%** vs AMS "
@@ -1582,18 +1677,25 @@ def party_profile(
             f"Top SKU: **{top_skus[0]['product']}** ({top_skus[0]['volume_mt']} MT)."
         )
 
+    scope_filters: dict[str, Any] = {
+        "city": city_f,
+        "client_type": ctype,
+        "business_unit": units[0] if len(units) == 1 else None,
+        "oil_type": oil,
+        "packing_category": pack,
+    }
+    if party_ilike_frag:
+        scope_filters["party_ilike"] = [party_ilike_frag]
+    elif len(names) > 1:
+        scope_filters["parties"] = list(names)
+    else:
+        scope_filters["party"] = names[0] if names else name
+
     party_spec = {
         "kind": "party_profile",
         "metric": "vs_ams",
         "group_by": "party",
-        "filters": {
-            "party": name,
-            "city": city_f,
-            "client_type": ctype,
-            "business_unit": units[0] if len(units) == 1 else None,
-            "oil_type": oil,
-            "packing_category": pack,
-        },
+        "filters": scope_filters,
         "business_units": units or None,
         "period_phrase": period or period_info.get("phrase"),
         "period": {
@@ -1620,6 +1722,7 @@ def party_profile(
         "ok": True,
         "mode": "party_profile",
         "party": name,
+        "parties": list(names),
         "match": chosen,
         "period": period_info,
         "volume_mt": mt_round(period_mt),
@@ -1630,6 +1733,7 @@ def party_profile(
         "avg_rate": avg_rate,
         "months": month_rows,
         "top_skus": top_skus,
+        "branches": branch_rows or None,
         "party_spec": party_spec,
         "table_spec": table_spec,
         "answer_markdown": _analysis(lines, tips),

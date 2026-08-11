@@ -68,6 +68,9 @@ def test_profile_ask_detector() -> None:
     assert _looks_party_profile_ask("tell me about Alpha Dist")
     assert _looks_party_profile_ask("customer profile for al shaheer")
     assert _looks_party_profile_ask("give me a rundown on Alpha Dist")
+    assert _looks_party_profile_ask("how are they doing")
+    assert _looks_party_profile_ask("last purchase date?")
+    assert _looks_party_profile_ask("give me the full picture for Al Shaheer")
     assert not _looks_party_profile_ask("Show me Alpha Dist sales in July")
 
 

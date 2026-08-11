@@ -140,6 +140,57 @@
         "ok": false,
         "has_plan_errors": true
       }
+    },
+    {
+      "id": "last-purchase-followup-promotes-profile",
+      "user_text": "last purchase date?",
+      "plan": {
+        "operation": "pivot",
+        "row_dimensions": ["party"],
+        "metrics": ["volume"],
+        "period_type": "MTD",
+        "context_handling": "none",
+        "filters": {}
+      },
+      "prior": {
+        "source": "query_state",
+        "filters": {"party": "Alpha Dist"},
+        "party_scope": {"party": "Alpha Dist"},
+        "period": {"date_from": "2026-07-01", "date_to": "2026-07-31"}
+      },
+      "expect": {
+        "ok": true,
+        "mode": "party_profile",
+        "party": "Alpha Dist",
+        "last_sale": "2026-07-20",
+        "query_state_party": "Alpha Dist"
+      }
+    },
+    {
+      "id": "sku-wise-under-party-keeps-filter-not-nest",
+      "user_text": "SKU wise",
+      "plan": {
+        "row_dimensions": ["product"],
+        "metrics": ["volume"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "prior",
+        "clear_filters": []
+      },
+      "prior": {
+        "source": "query_state",
+        "filters": {"party": "Alpha Dist"},
+        "party_scope": {"party": "Alpha Dist"},
+        "row_dimensions": ["party"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams", "vs_ams"],
+        "period": {"date_from": "2026-07-01", "date_to": "2026-07-31", "label": "July 2026"}
+      },
+      "expect": {
+        "ok": true,
+        "filters_party": "Alpha Dist",
+        "row_dimensions": ["product"]
+      }
     }
   ]
 }

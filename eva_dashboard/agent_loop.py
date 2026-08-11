@@ -15,7 +15,10 @@ from eva_dashboard.client_language import (
     extract_all_client_types_from_text,
     match_client_type_alias,
 )
-from eva_dashboard.party_match import list_party_matches
+from eva_dashboard.party_match import (
+    list_party_matches,
+    party_matches_look_like_branches,
+)
 
 
 def looks_multi_hop(user_text: str) -> bool:
@@ -58,23 +61,6 @@ def looks_mixed_party_channel_compare(user_text: str) -> bool:
     )
     leftover = [w for w in re.findall(r"[a-z][a-z0-9']{2,}", scrubbed)]
     return bool(leftover)
-
-
-def party_matches_look_like_branches(query: str, matches: list[str]) -> bool:
-    """True when matches share the query tokens (Al Shaheer branches)."""
-    tokens = [
-        t
-        for t in re.findall(r"[a-z0-9]+", (query or "").lower())
-        if len(t) >= 3 and t not in {"the", "and", "for", "ltd", "pvt"}
-    ]
-    if not tokens or not matches:
-        return False
-    hit = 0
-    for m in matches:
-        ml = m.lower()
-        if any(t in ml for t in tokens):
-            hit += 1
-    return hit >= max(1, int(0.75 * len(matches)))
 
 
 def should_clarify_party(

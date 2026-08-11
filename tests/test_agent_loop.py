@@ -63,6 +63,15 @@ def test_branch_vs_divergent_party_clarify() -> None:
         "Alpha Dist",
         ["Alpha Dist", "Alpha Dist North"],
     )
+    assert party_matches_look_like_branches(
+        "al shaheer",
+        ["Al Shaheer Lahore", "Al Shaheer Karachi"],
+    )
+    # Divergent company stems must NOT look like one branch family
+    assert not party_matches_look_like_branches(
+        "alpha",
+        ["Alpha Dist", "Alpha Foods Pvt"],
+    )
     assert not should_clarify_party(
         query="Alpha Dist",
         matches=["Alpha Dist", "Alpha Dist North"],

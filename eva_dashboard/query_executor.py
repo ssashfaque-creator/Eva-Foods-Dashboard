@@ -336,6 +336,39 @@ def _coerce_vocab_from_user_text(
 
         if leaf in nest_leaf_dims and (prior_outers or current_outers):
             outers = prior_outers or current_outers
+            # If a dim is already a sticky singleton filter (party from profile,
+            # single city/channel lock), keep it as a filter — do not also nest
+            # it as an outer row grain (SKU-wise under one customer → product only).
+            scoped = dict(filters)
+            if prior:
+                for k, v in dict(prior.get("filters") or {}).items():
+                    if v not in (None, "", []) and k not in scoped:
+                        scoped[k] = v
+                for k, v in dict(prior.get("party_scope") or {}).items():
+                    if v not in (None, "", []) and k not in scoped:
+                        scoped[k] = v
+
+            def _singleton_scoped(dim: str) -> bool:
+                if dim == "party":
+                    return bool(
+                        scoped.get("party")
+                        or scoped.get("party_ilike")
+                        or (
+                            isinstance(scoped.get("parties"), list)
+                            and len(scoped.get("parties") or []) == 1
+                        )
+                    )
+                if dim == "city":
+                    return bool(scoped.get("city")) and not scoped.get("cities")
+                if dim == "client_type":
+                    return bool(scoped.get("client_type")) and not scoped.get(
+                        "client_types"
+                    )
+                if dim == "zone":
+                    return bool(scoped.get("zone"))
+                return False
+
+            outers = [r for r in outers if not _singleton_scoped(r)]
             # Preserve order, unique
             seen: set[str] = set()
             outers_u = []
@@ -343,7 +376,7 @@ def _coerce_vocab_from_user_text(
                 if r not in seen and r != leaf:
                     seen.add(r)
                     outers_u.append(r)
-            rows = outers_u + [leaf]
+            rows = (outers_u + [leaf]) if outers_u else [leaf]
             # Keep multi-filters that scoped the prior table
             if prior:
                 pf = dict(prior.get("filters") or {})
@@ -691,9 +724,15 @@ def _looks_party_profile_ask(user_text: str) -> bool:
             r"\b("
             r"tell\s+me\s+about|customer\s+profile|party\s+profile|"
             r"profile\s+of|rundown\s+on|overview\s+of|"
-            r"give\s+me\s+(a\s+)?(full\s+)?(picture|profile|rundown)\s+(on|of|for)|"
-            r"how\s+is\s+.+\s+doing\b|"
-            r"everything\s+about"
+            r"give\s+me\s+(a\s+)?(full\s+)?(picture|profile|rundown)"
+            r"(\s+(on|of|for))?|"
+            r"full\s+picture|"
+            r"how\s+(is|are)\s+.+\s+(doing|performing)\b|"
+            r"how\s+(is|are)\s+they\s+(doing|performing)\b|"
+            r"everything\s+about|"
+            r"last\s+(purchase|invoice|order|buy)(\s+date)?|"
+            r"days\s+since(\s+last)?|"
+            r"when\s+did\s+they\s+last"
             r")\b",
             t,
         )

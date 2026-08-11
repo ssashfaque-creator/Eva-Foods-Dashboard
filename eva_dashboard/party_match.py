@@ -2,9 +2,103 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from eva_dashboard.db import connect, init_db
+
+# City / branch suffixes stripped when detecting Al Shaheer-style families.
+_BRANCH_SUFFIX_TOKENS = frozenset(
+    {
+        "lahore",
+        "karachi",
+        "islamabad",
+        "rawalpindi",
+        "faisalabad",
+        "multan",
+        "peshawar",
+        "quetta",
+        "hyderabad",
+        "sialkot",
+        "gujranwala",
+        "sahiwal",
+        "sukkur",
+        "bahawalpur",
+        "dha",
+        "gulberg",
+        "clifton",
+        "outlet",
+        "store",
+        "branch",
+        "north",
+        "south",
+        "east",
+        "west",
+        "central",
+        "city",
+        "mall",
+        "plaza",
+        "warehouse",
+        "depot",
+        "hq",
+        "head",
+        "office",
+    }
+)
+
+
+def party_stem(name: str) -> str:
+    """Normalize a party name to a branch-family stem (drop city/outlet tokens)."""
+    tokens = re.findall(r"[a-z0-9]+", (name or "").lower())
+    kept = [t for t in tokens if t not in _BRANCH_SUFFIX_TOKENS and len(t) >= 2]
+    return " ".join(kept).strip()
+
+
+def party_matches_look_like_branches(query: str, matches: list[str]) -> bool:
+    """True when matches are the same customer family (Al Shaheer Lahore/Karachi).
+
+    Prefers shared stem after stripping city/branch suffixes. Falls back to
+    requiring every match to contain every significant query token.
+    """
+    ms = [str(m).strip() for m in (matches or []) if str(m).strip()]
+    if len(ms) < 2:
+        return False
+    tokens = [
+        t
+        for t in re.findall(r"[a-z0-9]+", (query or "").lower())
+        if len(t) >= 3 and t not in {"the", "and", "for", "ltd", "pvt"}
+    ]
+    stems = {party_stem(m) for m in ms}
+    stems.discard("")
+    if len(stems) == 1:
+        stem = next(iter(stems))
+        if not tokens:
+            return True
+        # Query tokens should sit inside the shared stem (or raw names)
+        blob = f"{stem} " + " ".join(m.lower() for m in ms)
+        return all(t in blob for t in tokens)
+    if not tokens:
+        return False
+    # Divergent stems — only treat as branches when every match contains
+    # every query token (still one family spoken as a short name).
+    hit = 0
+    for m in ms:
+        ml = m.lower()
+        if all(t in ml for t in tokens):
+            hit += 1
+    return hit == len(ms) and len(tokens) >= 2
+
+
+def family_display_label(query: str, matches: list[str]) -> str:
+    """Human label for an aggregated branch family profile."""
+    q = re.sub(r"\s+", " ", (query or "").strip())
+    if q:
+        return f"{q.title()} (all branches)"
+    stems = {party_stem(m) for m in matches if party_stem(m)}
+    if len(stems) == 1:
+        stem = next(iter(stems))
+        return f"{stem.title()} (all branches)"
+    return "Customer family (all branches)"
 
 
 def list_party_matches(query: str | None, *, limit: int = 8) -> list[str]:
