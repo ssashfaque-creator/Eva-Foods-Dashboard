@@ -30,4 +30,4 @@ where = ["."]
 include = ["eva_dashboard*"]
 
 [tool.setuptools.package-data]
-eva_dashboard = ["data_catalog.md"]
+eva_dashboard = ["data_catalog.md", "metrics_catalog.json"]

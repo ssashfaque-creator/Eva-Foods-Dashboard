@@ -1,0 +1,192 @@
+{
+  "version": "1.0",
+  "description": "Governed semantic metrics/dimensions for Eva Foods plan_query. Synonyms map spoken management language onto canonical QuerySpec fields.",
+  "metrics": {
+    "volume": {
+      "label": "Volume (MT)",
+      "description": "Sales volume in metric tons (effective MT).",
+      "synonyms": [
+        "volume",
+        "sales",
+        "mt",
+        "tonnage",
+        "qty",
+        "quantity",
+        "how much sold",
+        "how much did they buy"
+      ]
+    },
+    "ams": {
+      "label": "AMS",
+      "description": "Average monthly sales — mean of the 3 full calendar months before the focus month.",
+      "synonyms": [
+        "ams",
+        "average monthly sales",
+        "monthly average",
+        "baseline ams",
+        "ams baseline"
+      ]
+    },
+    "vs_ams": {
+      "label": "% vs AMS",
+      "description": "Period volume versus AMS baseline as a percentage.",
+      "synonyms": [
+        "vs ams",
+        "versus ams",
+        "against ams",
+        "% vs ams",
+        "% of ams",
+        "% of their ams",
+        "percent of ams",
+        "percentage of ams",
+        "pct vs ams",
+        "performance vs ams",
+        "behind on ams",
+        "falling behind on ams",
+        "lowest performing",
+        "worst performing"
+      ],
+      "default_sort": "asc",
+      "implies_row": "party"
+    },
+    "ams_growth": {
+      "label": "AMS growth",
+      "description": "Growth versus prior AMS window.",
+      "synonyms": [
+        "ams growth",
+        "growth vs ams",
+        "gains",
+        "least gains",
+        "lowest gains",
+        "biggest gains",
+        "grew",
+        "growth"
+      ]
+    },
+    "avg_price": {
+      "label": "Average rate",
+      "description": "MT-weighted average selling rate from sales lines.",
+      "synonyms": [
+        "avg price",
+        "average price",
+        "avg rate",
+        "average rate",
+        "selling price",
+        "rate",
+        "what's the price",
+        "what is the price",
+        "price"
+      ]
+    },
+    "price_fetch": {
+      "label": "Price Fetch (Rs/maund)",
+      "description": "(Incl GST/kg − cost factor/kg) × 37.3246. Engine owns the math.",
+      "synonyms": [
+        "price fetch",
+        "pricefetch",
+        "oil price fetched",
+        "recovery",
+        "apply the cost factor",
+        "cost factor price",
+        "pf"
+      ]
+    }
+  },
+  "dimensions": {
+    "party": {
+      "label": "Customer / party",
+      "synonyms": [
+        "customer",
+        "customer-wise",
+        "party",
+        "party-wise",
+        "account",
+        "buyer",
+        "store-wise",
+        "distributor-wise",
+        "by distributor",
+        "by customer"
+      ]
+    },
+    "packing_category": {
+      "label": "Packing category (spoken product)",
+      "synonyms": [
+        "product-wise",
+        "by product",
+        "product breakup",
+        "product breakdown",
+        "packing-wise",
+        "by packing"
+      ]
+    },
+    "product": {
+      "label": "SKU / product name",
+      "synonyms": [
+        "sku",
+        "sku-wise",
+        "by sku",
+        "item-wise",
+        "sku breakup",
+        "sku breakdown"
+      ]
+    },
+    "city": {
+      "label": "City (City-Filter)",
+      "synonyms": ["city-wise", "citywise", "citywide", "by city", "cities"]
+    },
+    "client_type": {
+      "label": "Channel / client type",
+      "synonyms": [
+        "channel-wise",
+        "by channel",
+        "client-type-wise",
+        "by client type",
+        "channels"
+      ]
+    },
+    "business_unit": {
+      "label": "Business Unit",
+      "synonyms": ["bu-wise", "business-unit-wise", "by business unit", "by bu"]
+    },
+    "oil_type": {
+      "label": "Oil Type",
+      "synonyms": ["oil-type-wise", "by oil type", "by oil"]
+    },
+    "zone": {
+      "label": "Zone",
+      "synonyms": ["zone-wise", "by zone", "region-wise", "by region"]
+    },
+    "month": {
+      "label": "Month columns",
+      "synonyms": ["month-wise", "monthwise", "monthly", "last n months", "trend"]
+    }
+  },
+  "operations": {
+    "party_profile": {
+      "label": "Customer profile card",
+      "description": "Volume, AMS, % vs AMS, last purchase, avg rate, top SKUs.",
+      "synonyms": [
+        "tell me about",
+        "customer profile",
+        "party profile",
+        "profile of",
+        "rundown on",
+        "overview of",
+        "everything about",
+        "last purchase",
+        "last purchase date",
+        "days since last invoice",
+        "when did they last buy",
+        "last buy"
+      ]
+    },
+    "party_lookup": {
+      "label": "Who is X?",
+      "synonyms": ["who is", "who's", "identify party"]
+    },
+    "party_list": {
+      "label": "List parties",
+      "synonyms": ["who are", "list distributors", "list clients", "which parties"]
+    }
+  }
+}

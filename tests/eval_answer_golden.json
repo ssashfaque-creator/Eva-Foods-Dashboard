@@ -1,0 +1,129 @@
+{
+  "version": "1.0",
+  "description": "Answer-level goldens: execute explicit QuerySpecs against a seeded DB and assert numeric/structural fields (not just tool routing).",
+  "cases": [
+    {
+      "id": "profile-alpha-july",
+      "user_text": "tell me about Alpha Dist in July",
+      "plan": {
+        "operation": "party_profile",
+        "filters": {"party": "Alpha Dist"},
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "none",
+        "row_dimensions": ["party"],
+        "metrics": ["volume", "ams", "vs_ams"]
+      },
+      "expect": {
+        "ok": true,
+        "mode": "party_profile",
+        "party": "Alpha Dist",
+        "volume_mt": 28.0,
+        "last_sale": "2026-07-20",
+        "contains": ["Customer profile", "Alpha Dist", "% vs AMS", "Last purchase"],
+        "query_state_party": "Alpha Dist"
+      }
+    },
+    {
+      "id": "alpha-july-sales-matrix",
+      "user_text": "Alpha Dist sales in July",
+      "plan": {
+        "row_dimensions": ["business_unit"],
+        "metrics": ["volume", "ams"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "none",
+        "filters": {"party": "Alpha Dist"}
+      },
+      "expect": {
+        "ok": true,
+        "filters_party": "Alpha Dist",
+        "contains": ["Alpha Dist"],
+        "matrix_total_mt_min": 27.0
+      }
+    },
+    {
+      "id": "synonym-pct-of-ams",
+      "user_text": "what % of their AMS is this",
+      "plan": {
+        "row_dimensions": ["party"],
+        "metrics": ["volume"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "prior",
+        "clear_filters": [],
+        "filters": {}
+      },
+      "prior": {
+        "source": "query_state",
+        "filters": {"party": "Alpha Dist"},
+        "party_scope": {"party": "Alpha Dist"},
+        "period_phrase": "July",
+        "period": {"date_from": "2026-07-01", "date_to": "2026-07-31", "label": "July 2026"}
+      },
+      "expect": {
+        "ok": true,
+        "filters_party": "Alpha Dist",
+        "metrics_include": ["vs_ams"]
+      }
+    },
+    {
+      "id": "synonym-price-followup",
+      "user_text": "what's the price?",
+      "plan": {
+        "row_dimensions": ["product"],
+        "metrics": [],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "none"
+      },
+      "prior": {
+        "source": "query_state",
+        "filters": {"party": "Alpha Dist"},
+        "party_scope": {"party": "Alpha Dist"},
+        "period": {"date_from": "2026-07-01", "date_to": "2026-07-31"}
+      },
+      "expect": {
+        "ok": true,
+        "filters_party": "Alpha Dist",
+        "metrics_include": ["avg_price"]
+      }
+    },
+    {
+      "id": "soft-promote-profile",
+      "user_text": "tell me about Alpha Dist",
+      "plan": {
+        "row_dimensions": ["party"],
+        "metrics": ["volume", "ams"],
+        "period_type": "MTD",
+        "context_handling": "none",
+        "extracted_entities": ["Alpha Dist"]
+      },
+      "expect": {
+        "ok": true,
+        "mode": "party_profile",
+        "party": "Alpha Dist",
+        "operation": "party_profile"
+      }
+    },
+    {
+      "id": "lahore-eva-consumer-july",
+      "user_text": "Eva Consumer sales in Lahore for July",
+      "plan": {
+        "row_dimensions": ["packing_category"],
+        "metrics": ["volume", "ams"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "context_handling": "none",
+        "business_units": ["Eva Consumer"],
+        "filters": {"city": "Lahore"}
+      },
+      "expect": {
+        "ok": true,
+        "filters_city": "Lahore",
+        "business_units_include": ["Eva Consumer"],
+        "matrix_total_mt_min": 27.0
+      }
+    }
+  ]
+}

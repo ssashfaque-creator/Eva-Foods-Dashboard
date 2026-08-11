@@ -235,12 +235,14 @@ Never say the data "only goes to 2023" or cite an OpenAI knowledge cutoff for th
 
 def system_prompt() -> str:
     from eva_dashboard.ai_guide import tool_guide_for_prompt, vocabulary_for_prompt
+    from eva_dashboard.metrics_catalog import metrics_for_prompt
 
     catalog = load_data_catalog()
     live = live_database_briefing()
     glossary = glossary_for_prompt()
     vocab = vocabulary_for_prompt()
     tools = tool_guide_for_prompt()
+    metrics = metrics_for_prompt()
     return f"""You are the Eva Foods AI Sales Analyst. Answer ONLY from the live SQLite database by translating asks into structured ``plan_query`` tool calls.
 
 {live}
@@ -297,6 +299,9 @@ AMS / MT / Expected math is handled by the engine — you only choose the metric
 
 === VOCABULARY ===
 {vocab}
+
+=== GOVERNED METRICS ===
+{metrics}
 
 === TOOL GUIDE ===
 {tools}

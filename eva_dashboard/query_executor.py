@@ -717,6 +717,10 @@ def execute_query_spec(
     spec = _apply_extracted_entities(spec)
     # Spoken vocab safety nets (SKU / product / price_fetch)
     spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
+    # Governed metrics/operations synonyms (Phase 3 semantic layer)
+    from eva_dashboard.metrics_catalog import apply_metric_synonyms_to_spec
+
+    spec = apply_metric_synonyms_to_spec(spec, user_text)
     # Promote profile asks even when the model left operation=pivot
     if (
         spec.get("operation") in {"", "pivot", None}
