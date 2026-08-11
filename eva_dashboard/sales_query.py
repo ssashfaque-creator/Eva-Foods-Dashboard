@@ -4716,34 +4716,44 @@ def query_price_fetch_table(
             "response_instructions": "REQUIRED: Reply with `answer_markdown` verbatim.",
         }
 
+    # Channel-wise tables use the same NEW client-type groups as sales pivots
+    if "client_type" in rows and "client_type" in frame.columns:
+        frame = frame.copy()
+        frame["client_type"] = frame["client_type"].map(
+            lambda v: map_client_type(str(v) if v is not None else None)
+            or (str(v) if v is not None and str(v).strip() else "Unmapped")
+        )
+
     dim_labels = {
         "party": "Party",
         "product": "SKU",
         "packing_category": "Packing",
         "oil_type": "Oil Type",
         "business_unit": "Business Unit",
-        "client_type": "Client Type",
+        "client_type": "Channel",
     }
     out_rows: list[dict[str, Any]] = []
     group_cols = list(rows)
-    for keys, grp in frame.groupby(group_cols, sort=False, dropna=False):
-        if not isinstance(keys, tuple):
-            keys = (keys,)
-        entry: dict[str, Any] = {
-            dim: str(keys[i]) for i, dim in enumerate(group_cols)
-        }
-        if mode == "last":
-            # Most recent invoice line in the period for this group
-            work = grp.copy()
-            work["_d"] = pd.to_datetime(work["date"], errors="coerce")
-            work = work.dropna(subset=["_d"]).sort_values(
-                ["_d", "rate"], ascending=[False, False]
-            )
-            if work.empty:
-                continue
-            last = work.iloc[0]
-            g_factor = _blend_cost_factor(work.iloc[:1])
-            last_units = _blend_unit_economics(work.iloc[:1])
+
+    if mode == "last":
+        # Sort once, newest invoice per group — avoids per-bucket copy/sort.
+        work_all = frame.copy()
+        work_all["_d"] = pd.to_datetime(work_all["date"], errors="coerce")
+        work_all = work_all.dropna(subset=["_d"]).sort_values(
+            ["_d", "rate"], ascending=[False, False]
+        )
+        last_frame = (
+            work_all.groupby(group_cols, sort=False, dropna=False, as_index=False)
+            .head(1)
+            .reset_index(drop=True)
+            if not work_all.empty
+            else work_all
+        )
+        for _, last in last_frame.iterrows():
+            entry = {dim: str(last.get(dim) or "") for dim in group_cols}
+            one = pd.DataFrame([last.to_dict()])
+            g_factor = _blend_cost_factor(one)
+            last_units = _blend_unit_economics(one)
             mt = float(last.get("mt") or 0)
             incl_v = float(last.get("incl_gst_fed_amount") or 0)
             kg = mt * 1000.0
@@ -4769,7 +4779,12 @@ def query_price_fetch_table(
             entry["price_fetch"] = (
                 round(float(pf_val), 2) if pf_val is not None else None
             )
-        else:
+            out_rows.append(entry)
+    else:
+        for keys, grp in frame.groupby(group_cols, sort=False, dropna=False):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            entry = {dim: str(keys[i]) for i, dim in enumerate(group_cols)}
             g_units = _blend_unit_economics(grp)
             g_factor = _blend_cost_factor(grp)
             p_vals: list[float] = []
@@ -4805,7 +4820,7 @@ def query_price_fetch_table(
             entry["price_fetch"] = (
                 round(float(pf_val), 2) if pf_val is not None else None
             )
-        out_rows.append(entry)
+            out_rows.append(entry)
 
     out_rows.sort(key=lambda r: -float(r.get("mt") or 0))
 

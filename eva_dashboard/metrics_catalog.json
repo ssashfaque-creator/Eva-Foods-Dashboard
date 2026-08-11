@@ -139,6 +139,8 @@
       "label": "SKU / product name",
       "synonyms": [
         "sku",
+        "skus",
+        "all skus",
         "sku-wise",
         "by sku",
         "item-wise",
@@ -157,7 +159,11 @@
         "by channel",
         "client-type-wise",
         "by client type",
-        "channels"
+        "channels",
+        "all channels",
+        "for all channels",
+        "channel breakup",
+        "channel breakdown"
       ]
     },
     "business_unit": {

@@ -203,19 +203,29 @@ def apply_metric_synonyms_to_spec(
             if not out.get("metrics"):
                 out["metrics"] = ["volume", "ams", "vs_ams"]
 
-    # Dimension grain from synonyms when rows omitted
+    # Dimension grain from synonyms — merge outer dims even when rows already set
+    # (so "last price … all SKUs … all channels" keeps product AND adds client_type).
     rows = list(out.get("row_dimensions") or [])
-    if not rows:
-        dims = resolve_dimensions_from_text(text)
-        for d in dims:
-            if d == "month":
-                cols = list(out.get("column_dimensions") or [])
-                if "month" not in cols:
-                    out["column_dimensions"] = cols + ["month"]
-            elif d not in rows:
+    dims = resolve_dimensions_from_text(text)
+    outer_merge = {"city", "zone", "client_type", "party", "business_unit"}
+    for d in dims:
+        if d == "month":
+            cols = list(out.get("column_dimensions") or [])
+            if "month" not in cols:
+                out["column_dimensions"] = cols + ["month"]
+        elif d not in rows:
+            if not rows or d in outer_merge:
                 rows.append(d)
-        if rows:
-            out["row_dimensions"] = rows
+    if rows:
+        # Prefer outer → leaf order when both channel and SKU are present
+        if "client_type" in rows and "product" in rows:
+            rest = [
+                r
+                for r in rows
+                if r not in {"client_type", "product"}
+            ]
+            rows = ["client_type", "product"] + rest
+        out["row_dimensions"] = rows
 
     return out
 

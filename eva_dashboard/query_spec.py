@@ -107,6 +107,9 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
             "metrics=['avg_price']. "
             "Last/latest sold price + sale date → metrics=['last_price'] "
             "(+ ['price_fetch'] when asked); row_dimensions include 'product'. "
+            "Last price for all SKUs across all channels → "
+            "row_dimensions=['client_type','product'] (NOT party×SKU unless "
+            "the user asked party/customer-wise). "
             "Follow-ups: context_handling='prior' + clear_filters."
         ),
         "parameters": {
@@ -119,6 +122,8 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "Row groupings. customer/party/account/buyer/store-wise "
                         "→ ['party']; spoken product/product-wise → "
                         "['packing_category']; SKU/SKU-wise → ['product']; "
+                        "channel + SKU (all channels, all SKUs) → "
+                        "['client_type','product']; "
                         "channel monthly → ['client_type','business_unit']; "
                         "default sales trend → ['business_unit']."
                     ),

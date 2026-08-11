@@ -12,7 +12,11 @@ from eva_dashboard.metrics_catalog import (
     load_metrics_catalog,
     resolve_metrics_from_text,
 )
-from eva_dashboard.query_executor import execute_query_spec
+from eva_dashboard.query_executor import (
+    _coerce_vocab_from_user_text,
+    _spoken_wise_dimensions,
+    execute_query_spec,
+)
 from eva_dashboard.sales_query import query_price_fetch_table
 
 
@@ -174,6 +178,107 @@ def test_execute_last_price_ask() -> None:
                 (out.get("query_spec") or {}).get("metrics")
             )
             assert "Avg Price (Incl GST/unit)" not in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_multi_wise_sku_and_channel_dimensions() -> None:
+    text = (
+        "what's the last price we sold vtf for. show all SKUs and for all "
+        "channels also show the price fetch"
+    )
+    assert _spoken_wise_dimensions(text) == ["client_type", "product"]
+    fixed = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["party", "product"],
+            "metrics": ["avg_price", "price_fetch"],
+            "filters": {"city": "Lahore", "oil_type": "Eva VTF"},
+        },
+        text,
+    )
+    assert fixed["row_dimensions"][:2] == ["client_type", "product"]
+    assert "party" not in fixed["row_dimensions"]
+    assert "client_type" in (fixed.get("clear_filters") or [])
+
+
+def test_synonyms_merge_channel_onto_sku_rows() -> None:
+    load_metrics_catalog.cache_clear()
+    text = (
+        "last price sold for all SKUs and for all channels also show "
+        "the price fetch"
+    )
+    spec = apply_metric_synonyms_to_spec(
+        {
+            "metrics": ["avg_price"],
+            "row_dimensions": ["party", "product"],
+        },
+        text,
+    )
+    rows = spec.get("row_dimensions") or []
+    assert "client_type" in rows
+    assert "product" in rows
+    assert rows.index("client_type") < rows.index("product")
+
+
+def test_execute_last_price_channel_x_sku() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            load_metrics_catalog.cache_clear()
+            sq._CLIENTS_CACHE = None
+            _seed_prices()
+            # Second channel so channel×SKU has more than one channel row
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('2', 'Metro A', 'METRO HABIB', 'Lahore', 'Lahore', '', "
+                    "'{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party,
+                      product, qty, unit, mes_qty, mes_unit, mt_qty, rate,
+                      incl_gst_fed_amount, client_type, payload_json
+                    ) VALUES (NULL, 'lp-metro', datetime('now'), '2026-08-09',
+                      'Metro A', 'Eva Canola Oil (StandUpPouch)', 10, 'Ltrs',
+                      10, 'Ltrs', 0.01, 540, 5400, 'METRO HABIB', '{}')
+                    """
+                )
+                conn.commit()
+            text = (
+                "what's the last price we sold for. show all SKUs and for "
+                "all channels also show the price fetch"
+            )
+            out = execute_query_spec(
+                {
+                    "operation": "pivot",
+                    "row_dimensions": ["party", "product"],
+                    "metrics": ["avg_price", "price_fetch"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "none",
+                    "filters": {"city": "Lahore"},
+                },
+                user_text=text,
+            )
+            assert out.get("ok"), out.get("error")
+            md = out.get("answer_markdown") or ""
+            assert "Channel" in md
+            assert "Party × SKU" not in md
+            assert "Last Price" in md
+            qs = out.get("query_spec") or {}
+            rows = qs.get("row_dimensions") or []
+            assert "client_type" in rows
+            assert "product" in rows
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

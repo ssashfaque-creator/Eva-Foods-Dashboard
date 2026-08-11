@@ -196,63 +196,99 @@ def _is_factor_only_ask(
     return False
 
 
-def _spoken_wise_dimension(user_text: str) -> str | None:
-    """Detect explicit X-wise / by-X grain from the user sentence."""
+_WISE_PATTERNS: list[tuple[str, str]] = [
+    (
+        r"\bskus?\b|\bsku[-\s]?wise\b|\bitems?\b|\bitem[-\s]?wise\b|"
+        r"\bby\s+sku\b|\bsku\s+break|\ball\s+skus?\b",
+        "product",
+    ),
+    (
+        r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
+        r"\bproducts?\s+(break|breakup|mix|layer)\b",
+        "packing_category",
+    ),
+    (
+        r"\b("
+        r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
+        r"cities\s+wise|show\s+(me\s+)?(this\s+)?(by\s+)?city|"
+        r"add(ing)?\s+(a\s+)?cities|add(ing)?\s+(a\s+)?city|"
+        r"cities?\s+break(?:up|down)?|sales\s+by\s+city"
+        r")\b",
+        "city",
+    ),
+    (
+        r"\b(zone[- ]?wise|by\s+zone|zones?\s+wise|region[- ]?wise|by\s+region)\b",
+        "zone",
+    ),
+    (
+        r"\b("
+        r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
+        r"by\s+channels?|all\s+channels?|for\s+all\s+channels?|"
+        r"show\s+(me\s+)?(this\s+)?by\s+channels?|"
+        r"sales\s+by\s+channels?|group\s+by\s+channels?|"
+        r"channel\s+break(?:up|down)?"
+        r")\b",
+        "client_type",
+    ),
+    (
+        r"\b(bu[- ]?wise|business[- ]?unit[- ]?wise|by\s+business\s*units?)\b",
+        "business_unit",
+    ),
+    (
+        r"\b(packing[- ]?wise|by\s+packing|pack[- ]?wise)\b",
+        "packing_category",
+    ),
+    (
+        r"\b(party[- ]?wise|distributor[- ]?wise|by\s+part(y|ies)|"
+        r"by\s+distributors?)\b",
+        "party",
+    ),
+]
+
+
+def _spoken_wise_dimensions(user_text: str) -> list[str]:
+    """All spoken X-wise grains, ordered outer → leaf when both are present.
+
+    So "all SKUs … for all channels" → ``['client_type', 'product']``, not SKU alone.
+    """
     t = (user_text or "").lower()
     if not t.strip():
+        return []
+    found: list[str] = []
+    for pat, dim in _WISE_PATTERNS:
+        if re.search(pat, t) and dim not in found:
+            found.append(dim)
+    if not found:
+        return []
+    outer_order = ("city", "zone", "client_type", "party", "business_unit")
+    outers = [d for d in outer_order if d in found]
+    # SKU beats packing when both spoken
+    leaf: str | None = None
+    if "product" in found:
+        leaf = "product"
+    elif "packing_category" in found:
+        leaf = "packing_category"
+    elif "oil_type" in found:
+        leaf = "oil_type"
+    if outers and leaf:
+        return outers + [leaf]
+    if leaf and not outers:
+        return [leaf]
+    if outers:
+        return outers
+    return found
+
+
+def _spoken_wise_dimension(user_text: str) -> str | None:
+    """Primary spoken wise grain (first of multi-wise, leaf preferred when nested)."""
+    dims = _spoken_wise_dimensions(user_text)
+    if not dims:
         return None
-    # Prefer more specific product grains before geo/channel
-    patterns: list[tuple[str, str]] = [
-        (
-            r"\bskus?\b|\bsku[-\s]?wise\b|\bitems?\b|\bitem[-\s]?wise\b|"
-            r"\bby\s+sku\b|\bsku\s+break",
-            "product",
-        ),
-        (
-            r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
-            r"\bproducts?\s+(break|breakup|mix|layer)\b",
-            "packing_category",
-        ),
-        (
-            r"\b("
-            r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
-            r"cities\s+wise|show\s+(me\s+)?(this\s+)?(by\s+)?city|"
-            r"add(ing)?\s+(a\s+)?cities|add(ing)?\s+(a\s+)?city|"
-            r"cities?\s+break(?:up|down)?|sales\s+by\s+city"
-            r")\b",
-            "city",
-        ),
-        (
-            r"\b(zone[- ]?wise|by\s+zone|zones?\s+wise|region[- ]?wise|by\s+region)\b",
-            "zone",
-        ),
-        (
-            r"\b("
-            r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
-            r"by\s+channels?|all\s+channels?|"
-            r"show\s+(me\s+)?(this\s+)?by\s+channels?|"
-            r"sales\s+by\s+channels?|group\s+by\s+channels?"
-            r")\b",
-            "client_type",
-        ),
-        (
-            r"\b(bu[- ]?wise|business[- ]?unit[- ]?wise|by\s+business\s*units?)\b",
-            "business_unit",
-        ),
-        (
-            r"\b(packing[- ]?wise|by\s+packing|pack[- ]?wise)\b",
-            "packing_category",
-        ),
-        (
-            r"\b(party[- ]?wise|distributor[- ]?wise|by\s+part(y|ies)|"
-            r"by\s+distributors?)\b",
-            "party",
-        ),
-    ]
-    for pat, dim in patterns:
-        if re.search(pat, t):
-            return dim
-    return None
+    # Prefer leaf when multi-wise so existing has_sku / nest-leaf checks still fire
+    for leaf in ("product", "packing_category", "oil_type"):
+        if leaf in dims:
+            return leaf
+    return dims[0]
 
 
 def _looks_yoy_compare(user_text: str) -> bool:
@@ -319,9 +355,10 @@ def _coerce_vocab_from_user_text(
             if leaf:
                 prior_rows = list(groups) + [str(leaf)]
 
+    wise_dims = _spoken_wise_dimensions(t)
     wise_dim = _spoken_wise_dimension(t)
-    has_sku = wise_dim == "product"
-    has_product_spoken = wise_dim == "packing_category" and bool(
+    has_sku = "product" in wise_dims
+    has_product_spoken = "packing_category" in wise_dims and bool(
         re.search(
             r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
             r"\bproducts?\s+(break|breakup|mix|layer)\b|"
@@ -331,6 +368,36 @@ def _coerce_vocab_from_user_text(
     )
     nest_leaf_dims = {"packing_category", "product", "business_unit", "oil_type"}
     outer_dims = {"city", "zone", "client_type", "party", "business_unit"}
+
+    # --- Multi-wise in one ask: "all SKUs … for all channels" → Channel × SKU ---
+    # Do this before single-leaf nest logic so a mistaken party×SKU plan cannot win.
+    spoken_outers = [
+        d for d in ("city", "zone", "client_type") if d in wise_dims
+    ]
+    spoken_leaf = (
+        "product"
+        if "product" in wise_dims
+        else ("packing_category" if has_product_spoken else None)
+    )
+    if spoken_outers and spoken_leaf:
+        rows = spoken_outers + [spoken_leaf]
+        # Drop party unless the user also asked party-wise
+        if "party" not in wise_dims:
+            rows = [r for r in rows if r != "party"]
+        if "client_type" in spoken_outers and not filters.get("client_types"):
+            filters.pop("client_type", None)
+            if "client_type" not in clear:
+                clear.append("client_type")
+        if "city" in spoken_outers and not filters.get("cities"):
+            # city-wise across cities only when they asked city grain, not when
+            # city is merely a sticky filter from prior context.
+            if re.search(
+                r"\b(city[- ]?wise|by\s+city|all\s+cities|cities?\s+break)",
+                t,
+            ):
+                filters.pop("city", None)
+                if "city" not in clear:
+                    clear.append("city")
 
     # --- Multi-city named set (lahore vs/and karachi, …) ---
     named_cities = extract_cities_from_text(user_text)
@@ -447,6 +514,9 @@ def _coerce_vocab_from_user_text(
                         scoped[k] = v
 
             def _singleton_scoped(dim: str) -> bool:
+                # Explicit multi-wise ("for all channels" + SKUs) must keep the outer
+                if dim in wise_dims and dim in {"city", "zone", "client_type"}:
+                    return False
                 if dim == "party":
                     return bool(
                         scoped.get("party")
@@ -475,12 +545,27 @@ def _coerce_vocab_from_user_text(
                     seen.add(r)
                     outers_u.append(r)
             rows = (outers_u + [leaf]) if outers_u else [leaf]
-            # Keep multi-filters that scoped the prior table
+            # Keep multi-filters that scoped the prior table — but never re-lock a
+            # grain the user just asked to expand (all channels / city-wise).
             if prior:
                 pf = dict(prior.get("filters") or {})
                 for key in ("cities", "client_types", "city", "client_type", "zone"):
-                    if pf.get(key) and not filters.get(key):
-                        filters[key] = pf[key]
+                    if not pf.get(key) or filters.get(key):
+                        continue
+                    grain = (
+                        "client_type"
+                        if key.startswith("client_type")
+                        else ("city" if key.startswith("city") else key)
+                    )
+                    if grain in wise_dims and grain in clear:
+                        continue
+                    if grain in wise_dims and grain in {
+                        "client_type",
+                        "city",
+                        "zone",
+                    }:
+                        continue
+                    filters[key] = pf[key]
         elif leaf in outer_dims:
             prior_nestables = [r for r in prior_rows if r in nest_leaf_dims]
             current_nestables = [r for r in rows if r in nest_leaf_dims]
@@ -1456,6 +1541,19 @@ def execute_query_spec(
                 pf_rows = ["product"] if (has_party_scope or want_last) else []
             if want_last and "product" not in pf_rows:
                 pf_rows = list(pf_rows) + ["product"]
+            # Safety: spoken channel grain must appear even if the planner
+            # emitted party×SKU (common failure mode for "all channels").
+            spoken_pf = _spoken_wise_dimensions(user_text or "")
+            if "client_type" in spoken_pf and "client_type" not in pf_rows:
+                pf_rows = ["client_type"] + [d for d in pf_rows if d != "party"]
+            if (
+                "client_type" in spoken_pf
+                and "party" not in spoken_pf
+                and "party" in pf_rows
+            ):
+                pf_rows = [d for d in pf_rows if d != "party"]
+            if "client_type" in spoken_pf and not filters.get("client_types"):
+                filters.pop("client_type", None)
             if pf_rows:
                 result = query_price_fetch_table(
                     row_dimensions=pf_rows,
