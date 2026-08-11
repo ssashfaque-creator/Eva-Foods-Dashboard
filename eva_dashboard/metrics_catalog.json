@@ -80,7 +80,7 @@
     },
     "last_price": {
       "label": "Last sold price",
-      "description": "Rate on the most recent sales invoice for each SKU (not a period average), with that sale date.",
+      "description": "Incl GST/FED per sellable unit on the most recent sales invoice for each SKU (not a period average), with that sale date.",
       "synonyms": [
         "last price",
         "last price sold",

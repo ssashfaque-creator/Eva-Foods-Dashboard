@@ -4024,16 +4024,25 @@ def query_price(
         where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
         params.append(pack)
     if ctype:
-        where.append(
-            """
+        ctype_vals = [
+            str(v).strip()
+            for v in sql_client_type_values(ctype)
+            if str(v or "").strip()
+        ] or [ctype]
+        ctype_expr = """
             lower(trim(COALESCE(
               NULLIF(trim(cl.type), ''),
               NULLIF(trim(s.client_type), ''),
               'Unmapped'
-            ))) = lower(trim(?))
-            """
-        )
-        params.append(ctype)
+            )))
+        """
+        if len(ctype_vals) == 1:
+            where.append(f"{ctype_expr} = lower(trim(?))")
+            params.append(ctype_vals[0])
+        else:
+            placeholders = ",".join("?" for _ in ctype_vals)
+            where.append(f"{ctype_expr} IN ({placeholders})")
+            params.extend(v.lower().strip() for v in ctype_vals)
     if exact_product:
         where.append("s.product = ?")
         params.append(exact_product)
@@ -4535,6 +4544,72 @@ _PRICE_FETCH_ROW_DIMS = {
 }
 
 
+def _fill_factor_costs_by_group(frame: pd.DataFrame) -> pd.DataFrame:
+    """Fill null factor_costs via sibling raw types in the same reporting group.
+
+    Cost sheets are often keyed to one ClientType (e.g. Eva Distributors /
+    Imtiaz Store). Other raw types in the same NEW group should reuse that
+    factor for Price Fetch when an exact join miss occurs.
+    """
+    from eva_dashboard.client_type_map import map_client_type, raw_client_types_for_group
+
+    if frame.empty or "total_factor_cost" not in frame.columns:
+        return frame
+    work = frame.copy()
+    miss_idx = list(work.index[work["total_factor_cost"].isna()])
+    if not miss_idx:
+        return work
+    products = sorted(
+        {
+            str(work.at[i, "product"]).strip()
+            for i in miss_idx
+            if str(work.at[i, "product"] or "").strip()
+        }
+    )
+    if not products:
+        return work
+    init_db()
+    placeholders = ",".join("?" for _ in products)
+    with connect() as conn:
+        factors = pd.read_sql_query(
+            f"""
+            SELECT client_type, product, total_factor_cost, product_cost,
+                   packing_cost, unit AS cost_unit
+            FROM factor_costs
+            WHERE lower(trim(product)) IN ({placeholders})
+            """,
+            conn,
+            params=[p.lower() for p in products],
+        )
+    if factors.empty:
+        return work
+    by_key: dict[tuple[str, str], pd.Series] = {}
+    for _, r in factors.iterrows():
+        key = (
+            str(r.get("product") or "").strip().lower(),
+            str(r.get("client_type") or "").strip().lower(),
+        )
+        if key[0] and key[1] and key not in by_key:
+            by_key[key] = r
+    for i in miss_idx:
+        prod = str(work.at[i, "product"] or "").strip().lower()
+        raw_ct = str(work.at[i, "client_type"] or "").strip()
+        group = map_client_type(raw_ct) or raw_ct
+        for cand in raw_client_types_for_group(group) or [raw_ct]:
+            hit = by_key.get((prod, str(cand).strip().lower()))
+            if hit is None:
+                continue
+            work.at[i, "total_factor_cost"] = hit.get("total_factor_cost")
+            if "product_cost" in work.columns:
+                work.at[i, "product_cost"] = hit.get("product_cost")
+            if "packing_cost" in work.columns:
+                work.at[i, "packing_cost"] = hit.get("packing_cost")
+            if "cost_unit" in work.columns:
+                work.at[i, "cost_unit"] = hit.get("cost_unit")
+            break
+    return work
+
+
 def query_price_fetch_table(
     *,
     row_dimensions: list[str] | None = None,
@@ -4619,16 +4694,25 @@ def query_price_fetch_table(
         where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
         params.append(pack)
     if ctype:
-        where.append(
-            """
+        ctype_vals = [
+            str(v).strip()
+            for v in sql_client_type_values(ctype)
+            if str(v or "").strip()
+        ] or [ctype]
+        ctype_expr = """
             lower(trim(COALESCE(
               NULLIF(trim(cl.type), ''),
               NULLIF(trim(s.client_type), ''),
               'Unmapped'
-            ))) = lower(trim(?))
-            """
-        )
-        params.append(ctype)
+            )))
+        """
+        if len(ctype_vals) == 1:
+            where.append(f"{ctype_expr} = lower(trim(?))")
+            params.append(ctype_vals[0])
+        else:
+            placeholders = ",".join("?" for _ in ctype_vals)
+            where.append(f"{ctype_expr} IN ({placeholders})")
+            params.extend(v.lower().strip() for v in ctype_vals)
     if exact_product:
         where.append("s.product = ?")
         params.append(exact_product)
@@ -4716,13 +4800,34 @@ def query_price_fetch_table(
             "response_instructions": "REQUIRED: Reply with `answer_markdown` verbatim.",
         }
 
-    # Channel-wise tables use the same NEW client-type groups as sales pivots
+    # Fill missing cost factors: try sibling raw types in the same reporting
+    # group (e.g. IMT raws sharing an Imtiaz Store / group factor sheet).
+    if (
+        not frame.empty
+        and "total_factor_cost" in frame.columns
+        and frame["total_factor_cost"].isna().any()
+    ):
+        frame = _fill_factor_costs_by_group(frame)
+
+    # Channel display: keep specific raw filters (Eva Distributors) as-is so
+    # caption and Channel column agree; roll up to NEW groups only for
+    # all-channel / group-level asks.
     if "client_type" in rows and "client_type" in frame.columns:
-        frame = frame.copy()
-        frame["client_type"] = frame["client_type"].map(
-            lambda v: map_client_type(str(v) if v is not None else None)
-            or (str(v) if v is not None and str(v).strip() else "Unmapped")
+        from eva_dashboard.client_type_map import (
+            classify_client_type_filter,
+            is_specific_raw_client_type,
         )
+
+        classified = classify_client_type_filter(ctype) if ctype else None
+        keep_raw = bool(
+            ctype and (is_specific_raw_client_type(ctype) or (classified and classified[0] == "raw"))
+        )
+        if not keep_raw:
+            frame = frame.copy()
+            frame["client_type"] = frame["client_type"].map(
+                lambda v: map_client_type(str(v) if v is not None else None)
+                or (str(v) if v is not None and str(v).strip() else "Unmapped")
+            )
 
     dim_labels = {
         "party": "Party",
@@ -4765,12 +4870,15 @@ def query_price_fetch_table(
                 else None
             )
             rate = last.get("rate")
+            # Last Price = Incl GST per sellable unit (same economics as Price Fetch)
+            incl_unit = last_units.get("incl_gst_per_unit")
             entry["mt"] = round(mt, 3)
-            entry["last_price"] = (
+            entry["last_price"] = incl_unit
+            entry["last_rate"] = (
                 round(float(rate), 2) if rate is not None and rate == rate else None
             )
             entry["sale_date"] = str(last.get("date") or "")[:10]
-            entry["avg_price_incl_gst"] = last_units.get("incl_gst_per_unit")
+            entry["avg_price_incl_gst"] = incl_unit
             entry["pack_label"] = last_units.get("pack_label") or str(
                 last.get("unit") or ""
             )
@@ -4838,10 +4946,11 @@ def query_price_fetch_table(
             + " | --- | --- | --- | --- |"
         )
         footnote = (
-            "\n_Last Price = invoice rate on the most recent sale in the period "
-            "for that SKU. Sale Date is that invoice date. Price Fetch uses the "
-            "same last invoice's Incl GST economics + cost factor "
-            f"(× {MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund)._"
+            "\n_Last Price = Incl GST/FED per sellable unit on the most recent "
+            "sale in the period for that SKU (not the bare invoice rate). "
+            "Sale Date is that invoice date. Price Fetch = "
+            f"(Incl GST/kg − cost factor/kg) × {MAUND_FACTOR_PRICE_FETCH:.4f} "
+            f"kg/maund (Ltrs costs ÷ {LTR_TO_KG})._"
         )
     else:
         title = "Price Fetch"

@@ -201,8 +201,17 @@ def apply_spoken_constraints(
 
     Call after planner merge / entity resolve / silent party match so nothing
     can re-introduce an included entity the user asked to drop.
+    Also merges spoken metric thresholds (AMS > 10, growth > x, …).
     """
+    from eva_dashboard.metric_filters import merge_metric_filters, parse_metric_filters
+
     out = dict(spec)
+    # Metric thresholds are independent of include/exclude polarity
+    out["metric_filters"] = merge_metric_filters(
+        list(out.get("metric_filters") or []),
+        parse_metric_filters(user_text) if user_text else [],
+    )
+
     spoken_ex = resolve_exclude_map(user_text) if user_text else {}
     excludes = dict(out.get("excludes") or {})
     for dim, vals in spoken_ex.items():

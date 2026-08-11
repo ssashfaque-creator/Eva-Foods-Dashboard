@@ -1169,6 +1169,7 @@ def execute_query_spec(
         keep_ex = dict(spec.get("excludes") or {})
         keep_compare = spec.get("compare")
         keep_metrics = list(spec.get("metrics") or [])
+        keep_metric_filters = list(spec.get("metric_filters") or [])
         keep_clear = list(spec.get("clear") or [])
         spec = merge_prior_into_spec(spec, prior)
         if keep_rows:
@@ -1179,6 +1180,8 @@ def execute_query_spec(
             spec["compare"] = keep_compare
         if keep_metrics:
             spec["metrics"] = keep_metrics
+        if keep_metric_filters:
+            spec["metric_filters"] = keep_metric_filters
         if keep_clear:
             # Preserve party clear so merge cannot restore excluded includes
             merged_clear = list(spec.get("clear") or [])
@@ -1497,6 +1500,7 @@ def execute_query_spec(
             active_only=bool(filters.get("active_only")),
             title_mode=spec.get("title_mode"),
             mix_dimension=grain.get("mix_dimension"),
+            metric_filters=list(spec.get("metric_filters") or []),
         )
     elif _is_factor_only_ask(user_text, metrics=metrics, flags=spec.get("price_flags")):
         # Cost factors live in factor_costs — not sales Price Fetch.

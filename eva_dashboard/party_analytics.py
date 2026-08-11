@@ -668,6 +668,7 @@ def analyze_parties(
     declined_only: bool = False,
     active_only: bool = False,
     title_mode: str | None = None,
+    metric_filters: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Rank / summarize parties or cities.
 
@@ -682,6 +683,7 @@ def analyze_parties(
     sort: desc (default) | asc  — underperformers force asc on % vs AMS
     grown_only: when True with yoy/yoy_ams/ams_growth, keep growth % > 0
     declined_only: when True with those metrics, keep growth % < 0
+    metric_filters: post-agg cuts e.g. [{metric:ams, op:gt, value:10}]
     title_mode: biggest_gains | smallest_gains | biggest_declines | by_growth
     Default ranking metric is AMS unless the user asks for volume/growth.
     """
@@ -1660,6 +1662,12 @@ def analyze_parties(
         score_key, score_label = "volume_mt", "Volume (MT)"
         rows = [r for r in rows if (r.get("volume_mt") or 0) > 0]
 
+    # Spoken / planned numeric cuts (AMS > 10, growth > 30%, …) before limit
+    if metric_filters:
+        from eva_dashboard.metric_filters import apply_metric_filters
+
+        rows = apply_metric_filters(rows, metric_filters)
+
     rows = rows[:lim]
     for r in rows:
         r["score"] = r.get(score_key)
@@ -1706,6 +1714,12 @@ def analyze_parties(
             blurb += " · grown only"
         if declined_only:
             blurb += " · declined only"
+        if metric_filters:
+            from eva_dashboard.metric_filters import metric_filters_blurb
+
+            cut = metric_filters_blurb(metric_filters)
+            if cut:
+                blurb += f" · {cut}"
         mode = (title_mode or "").strip().lower()
         if not mode:
             if declined_only:

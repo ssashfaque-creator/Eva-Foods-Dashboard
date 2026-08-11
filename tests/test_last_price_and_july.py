@@ -132,12 +132,14 @@ def test_last_price_table_uses_latest_invoice() -> None:
             assert out.get("price_mode") == "last"
             rows = out.get("rows") or []
             assert rows
+            # Last Price must be Incl GST/unit (seed: 5550 / 10 units = 555)
             assert float(rows[0].get("last_price") or 0) == 555.0
             assert str(rows[0].get("sale_date") or "").startswith("2026-08")
             md = out.get("answer_markdown") or ""
             assert "Last Price" in md
             assert "Sale Date" in md
             assert "Avg Price" not in md
+            assert "Incl GST" in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
@@ -178,6 +180,75 @@ def test_execute_last_price_ask() -> None:
                 (out.get("query_spec") or {}).get("metrics")
             )
             assert "Avg Price (Incl GST/unit)" not in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_distributors_filter_keeps_channel_label() -> None:
+    """Eva Distributors filter must not display as Direct Customers."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            init_db()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "('Eva Canola Oil (StandUpPouch)', 'Eva Consumer', "
+                    "'Eva Canola', 'Stand up', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('d1', 'Dist A', 'Eva Distributors', 'Lahore', 'Lahore', "
+                    "'', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party,
+                      product, qty, unit, mes_qty, mes_unit, mt_qty, rate,
+                      incl_gst_fed_amount, client_type, payload_json
+                    ) VALUES (NULL, 'dist-1', datetime('now'), '2026-08-10',
+                      'Dist A', 'Eva Canola Oil (StandUpPouch)', 10, 'Ltrs',
+                      10, 'Ltrs', 0.01, 400, 4984.7, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO factor_costs "
+                    "(client_type, prod_id, product, unit, product_cost, "
+                    "packing_cost, total_factor_cost, updated_at) VALUES "
+                    "('Eva Distributors', 1, 'Eva Canola Oil (StandUpPouch)', "
+                    "'Ltrs', 100, 50, 150, datetime('now'))"
+                )
+                conn.commit()
+            out = query_price_fetch_table(
+                row_dimensions=["client_type", "product"],
+                period=None,
+                date_from="2026-03-01",
+                date_to="2026-08-11",
+                client_type="Eva Distributors",
+                packing_category="Stand up",
+                price_mode="last",
+            )
+            assert out.get("ok"), out.get("error")
+            md = out.get("answer_markdown") or ""
+            assert "Eva Distributors" in md
+            assert "Direct Customers" not in md
+            rows = out.get("rows") or []
+            assert rows
+            assert rows[0].get("client_type") == "Eva Distributors"
+            # Incl GST/unit ≈ 498.47 (4984.7 / 10)
+            assert abs(float(rows[0].get("last_price") or 0) - 498.47) < 0.02
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

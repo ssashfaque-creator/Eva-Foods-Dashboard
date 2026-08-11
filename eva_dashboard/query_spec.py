@@ -110,6 +110,8 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
             "Last price for all SKUs across all channels → "
             "row_dimensions=['client_type','product'] (NOT party×SKU unless "
             "the user asked party/customer-wise). "
+            "Numeric cuts like 'AMS more than 10' / 'growth > 30%' → "
+            "metric_filters=[{metric,op,value}]. "
             "Follow-ups: context_handling='prior' + clear_filters."
         ),
         "parameters": {
@@ -141,9 +143,9 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "items": {"type": "string", "enum": list(PIVOT_METRICS)},
                     "description": (
                         "volume=MT; avg_price=period-average PKR rate; "
-                        "last_price=rate on the most recent invoice per SKU "
-                        "with that sale date (use for 'last price sold' / "
-                        "'latest price' — NOT avg_price); "
+                        "last_price=Incl GST/unit on the most recent invoice "
+                        "per SKU with that sale date (use for 'last price "
+                        "sold' / 'latest price' — NOT avg_price); "
                         "price_fetch=Incl GST/unit + cost factor + PF/maund; "
                         "ams / vs_ams / ams_growth for performance. "
                         "Plain average rates → ['avg_price']. "
@@ -283,6 +285,30 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 "sort": {"type": "string", "enum": ["asc", "desc"]},
                 "grown_only": {"type": "boolean"},
                 "declined_only": {"type": "boolean"},
+                "metric_filters": {
+                    "type": "array",
+                    "description": (
+                        "Post-aggregation thresholds. "
+                        "'AMS more than 10' → "
+                        "[{metric:'ams', op:'gt', value:10}]; "
+                        "'growth more than 30%' → "
+                        "[{metric:'ams_growth', op:'gt', value:30}]. "
+                        "op: gt|gte|lt|lte|eq. "
+                        "metric: ams|ams_growth|volume|vs_ams|yoy|last_price|…"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "metric": {"type": "string"},
+                            "op": {
+                                "type": "string",
+                                "enum": ["gt", "gte", "lt", "lte", "eq"],
+                            },
+                            "value": {"type": "number"},
+                        },
+                        "required": ["metric", "op", "value"],
+                    },
+                },
                 "limit": {"type": "integer"},
                 "title_mode": {"type": "string"},
                 "excludes": {
@@ -820,6 +846,13 @@ def _legacy_intent_to_universal(
     return rows, cols, metrics, operation
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Coerce model JSON into a canonical universal QuerySpec."""
     raw = dict(raw or {})
@@ -1026,6 +1059,20 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "sort": sort,
         "grown_only": bool(raw.get("grown_only") or False),
         "declined_only": bool(raw.get("declined_only") or False),
+        "metric_filters": [
+            {
+                "metric": str(f.get("metric") or "").strip(),
+                "op": str(f.get("op") or "").strip().lower(),
+                "value": float(f.get("value")),
+            }
+            for f in (raw.get("metric_filters") or [])
+            if isinstance(f, dict)
+            and str(f.get("metric") or "").strip()
+            and str(f.get("op") or "").strip().lower()
+            in {"gt", "gte", "lt", "lte", "eq"}
+            and f.get("value") is not None
+            and _safe_float(f.get("value")) is not None
+        ],
         "limit": int(raw.get("limit") or 0) or None,
         "title_mode": raw.get("title_mode"),
         "advanced_mode": raw.get("advanced_mode"),
