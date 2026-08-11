@@ -20,6 +20,7 @@ _CATALOG_PATH = Path(__file__).resolve().parent / "metrics_catalog.json"
 CANONICAL_METRICS = (
     "volume",
     "avg_price",
+    "last_price",
     "price_fetch",
     "ams",
     "vs_ams",
@@ -98,13 +99,15 @@ def resolve_metrics_from_text(
             continue
         if f" {syn} " in blob and canon not in found:
             found.append(canon)
-    # Ambiguity: bare "price" → avg_price unless Price Fetch language won
+    # Ambiguity: bare "price" → avg_price unless Price Fetch / last-price won
     if "price_fetch" in found and "avg_price" in found:
-        # Prefer price_fetch when both matched from overlapping words
         if re.search(r"price\s*fetch|recovery|cost\s*factor", (text or "").lower()):
             found = [m for m in found if m != "avg_price"]
         else:
             found = [m for m in found if m != "price_fetch"]
+    # "last price sold" must not also keep period avg_price
+    if "last_price" in found and "avg_price" in found:
+        found = [m for m in found if m != "avg_price"]
     return found
 
 
@@ -154,6 +157,14 @@ def apply_metric_synonyms_to_spec(
     for m in inferred:
         if m not in metrics:
             metrics.append(m)
+    # Planner often emits avg_price for any price ask — spoken last-price wins
+    if "last_price" in inferred or "last_price" in metrics:
+        metrics = ["last_price" if m == "avg_price" else m for m in metrics]
+        if "last_price" not in metrics:
+            metrics.insert(0, "last_price")
+        rows = list(out.get("row_dimensions") or [])
+        if "product" not in rows:
+            out["row_dimensions"] = (rows + ["product"]) if rows else ["product"]
     if metrics:
         out["metrics"] = metrics
 

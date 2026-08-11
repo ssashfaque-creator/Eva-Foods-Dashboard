@@ -442,15 +442,15 @@ def resolve_period(
     )
     this_month = "this month" in text or so_far
 
-    # Named month
-    year = max_d.year
-    if re.search(r"\b(last|previous)\s+year\b", text) or re.search(
-        r"\b(year\s+ago|prior\s+year)\b", text
+    # Named month (bare "July" / "July 2026")
+    year_m = re.search(r"(20\d{2})", text)
+    explicit_year = int(year_m.group(1)) if year_m else None
+    year = explicit_year if explicit_year is not None else max_d.year
+    if explicit_year is None and (
+        re.search(r"\b(last|previous)\s+year\b", text)
+        or re.search(r"\b(year\s+ago|prior\s+year)\b", text)
     ):
         year = max_d.year - 1
-    year_m = re.search(r"(20\d{2})", text)
-    if year_m:
-        year = int(year_m.group(1))
     month_num = None
     for name, num in MONTH_NAMES.items():
         if re.search(rf"\b{name}\b", text):
@@ -462,6 +462,18 @@ def resolve_period(
         year = max_d.year
 
     if month_num is not None:
+        # Bare month name with no year → most recent that month ≤ max sales date.
+        # Prevents "July" jumping to last year while a 2026 month-grid is on screen
+        # (Jul 2026 empty ≠ Jul 2025 volume).
+        if explicit_year is None and not re.search(
+            r"\b(last|previous)\s+year\b", text
+        ):
+            if (year, month_num) > (max_d.year, max_d.month):
+                year = max_d.year - 1
+            # Prefer the occurrence in max_d's year when that month is already
+            # reachable (e.g. max_d=Aug 2026 → July means 2026-07, even if empty).
+            elif month_num <= max_d.month:
+                year = max_d.year
         start = date(year, month_num, 1)
         month_end = date(year, month_num, calendar.monthrange(year, month_num)[1])
         # Partial if "so far" OR asking about the month that contains max_d and max_d < month_end
@@ -2999,12 +3011,17 @@ def _matrix_row_css_class(row: dict[str, Any], row_key: str) -> str:
 
 
 def _format_matrix_cell(key: str, val: Any) -> str:
-    """Format a matrix numeric cell; blank out pure zeros (except Total)."""
+    """Format a matrix numeric cell.
+
+    Month volume columns keep ``0`` so a quiet month is not mistaken for a
+    missing column. AMS / growth zeros stay blank (less noise).
+    """
     if val is None or val == "":
         return ""
     if isinstance(val, (int, float)):
-        # Month / AMS / growth zeros → blank so tables don't look empty
-        if key != "Total" and float(val) == 0:
+        key_s = str(key)
+        is_month_col = bool(re.match(r"^\d{4}-\d{2}$", key_s))
+        if key_s != "Total" and float(val) == 0 and not is_month_col:
             return ""
         return mt_str(val)
     return _html_escape(val)
@@ -4534,16 +4551,23 @@ def query_price_fetch_table(
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
     product: str | None = None,
+    price_mode: str = "avg",
 ) -> dict[str, Any]:
     """Dedicated Price Fetch breakdown — rigid columns, no monthly fallback.
 
-    Columns: [row dims] | Avg Price (Incl GST/unit) | Cost Factor | Price Fetch / Maund
-    Groups by ``row_dimensions`` (default ``product``). Never routes through
-    the trend / matrix HTML renderer.
+    ``price_mode``:
+      - ``avg`` (default): MT-weighted average Incl GST/unit over the period
+      - ``last``: rate on the most recent invoice per group + that sale date
+
+    Columns (avg): [row dims] | Avg Price | Cost Factor | Price Fetch / Maund
+    Columns (last): [row dims] | Last Price | Sale Date | Cost Factor | Price Fetch
     """
     rows = [d for d in (row_dimensions or []) if d in _PRICE_FETCH_ROW_DIMS]
     if not rows:
         rows = ["product"]
+    mode = (price_mode or "avg").strip().lower()
+    if mode not in {"avg", "last"}:
+        mode = "avg"
 
     # Reuse query_price line fetch + by_product math via a wide call, then reshape.
     # For multi-dim groups we fetch lines ourselves with the same SQL path.
@@ -4705,73 +4729,145 @@ def query_price_fetch_table(
     for keys, grp in frame.groupby(group_cols, sort=False, dropna=False):
         if not isinstance(keys, tuple):
             keys = (keys,)
-        g_units = _blend_unit_economics(grp)
-        g_factor = _blend_cost_factor(grp)
-        # Line-level Price Fetch then MT-weighted
-        p_vals: list[float] = []
-        p_w: list[float] = []
-        for _, r in grp.iterrows():
-            mt = float(r.get("mt") or 0)
-            incl_v = float(r.get("incl_gst_fed_amount") or 0)
-            kg = mt * 1000.0
-            apk = (incl_v / kg) if kg else None
-            cf = cost_factor_per_kg(r.get("total_factor_cost"), r.get("cost_unit"))
-            if apk is None or cf is None:
-                continue
-            pf = price_fetch_per_maund(apk, cf)
-            if pf is None:
-                continue
-            w = mt if mt > 0 else float(r.get("mes_qty") or 0)
-            if w <= 0:
-                continue
-            p_vals.append(float(pf))
-            p_w.append(w)
-        pf_val = None
-        if p_vals:
-            pf_val = weighted_avg(
-                pd.Series(p_vals),
-                pd.Series(p_w),
-                allow_unweighted_fallback=False,
-            )
         entry: dict[str, Any] = {
             dim: str(keys[i]) for i, dim in enumerate(group_cols)
         }
-        entry["mt"] = round(float(grp["mt"].fillna(0).sum()), 3)
-        entry["avg_price_incl_gst"] = g_units.get("incl_gst_per_unit")
-        entry["pack_label"] = g_units.get("pack_label")
-        entry["cost_factor"] = g_factor.get("cost_factor")
-        entry["cost_unit"] = g_factor.get("cost_unit_label")
-        entry["price_fetch"] = (
-            round(float(pf_val), 2) if pf_val is not None else None
-        )
+        if mode == "last":
+            # Most recent invoice line in the period for this group
+            work = grp.copy()
+            work["_d"] = pd.to_datetime(work["date"], errors="coerce")
+            work = work.dropna(subset=["_d"]).sort_values(
+                ["_d", "rate"], ascending=[False, False]
+            )
+            if work.empty:
+                continue
+            last = work.iloc[0]
+            g_factor = _blend_cost_factor(work.iloc[:1])
+            last_units = _blend_unit_economics(work.iloc[:1])
+            mt = float(last.get("mt") or 0)
+            incl_v = float(last.get("incl_gst_fed_amount") or 0)
+            kg = mt * 1000.0
+            apk = (incl_v / kg) if kg else None
+            cf = cost_factor_per_kg(last.get("total_factor_cost"), last.get("cost_unit"))
+            pf_val = (
+                price_fetch_per_maund(apk, cf)
+                if apk is not None and cf is not None
+                else None
+            )
+            rate = last.get("rate")
+            entry["mt"] = round(mt, 3)
+            entry["last_price"] = (
+                round(float(rate), 2) if rate is not None and rate == rate else None
+            )
+            entry["sale_date"] = str(last.get("date") or "")[:10]
+            entry["avg_price_incl_gst"] = last_units.get("incl_gst_per_unit")
+            entry["pack_label"] = last_units.get("pack_label") or str(
+                last.get("unit") or ""
+            )
+            entry["cost_factor"] = g_factor.get("cost_factor")
+            entry["cost_unit"] = g_factor.get("cost_unit_label")
+            entry["price_fetch"] = (
+                round(float(pf_val), 2) if pf_val is not None else None
+            )
+        else:
+            g_units = _blend_unit_economics(grp)
+            g_factor = _blend_cost_factor(grp)
+            p_vals: list[float] = []
+            p_w: list[float] = []
+            for _, r in grp.iterrows():
+                mt = float(r.get("mt") or 0)
+                incl_v = float(r.get("incl_gst_fed_amount") or 0)
+                kg = mt * 1000.0
+                apk = (incl_v / kg) if kg else None
+                cf = cost_factor_per_kg(r.get("total_factor_cost"), r.get("cost_unit"))
+                if apk is None or cf is None:
+                    continue
+                pf = price_fetch_per_maund(apk, cf)
+                if pf is None:
+                    continue
+                w = mt if mt > 0 else float(r.get("mes_qty") or 0)
+                if w <= 0:
+                    continue
+                p_vals.append(float(pf))
+                p_w.append(w)
+            pf_val = None
+            if p_vals:
+                pf_val = weighted_avg(
+                    pd.Series(p_vals),
+                    pd.Series(p_w),
+                    allow_unweighted_fallback=False,
+                )
+            entry["mt"] = round(float(grp["mt"].fillna(0).sum()), 3)
+            entry["avg_price_incl_gst"] = g_units.get("incl_gst_per_unit")
+            entry["pack_label"] = g_units.get("pack_label")
+            entry["cost_factor"] = g_factor.get("cost_factor")
+            entry["cost_unit"] = g_factor.get("cost_unit_label")
+            entry["price_fetch"] = (
+                round(float(pf_val), 2) if pf_val is not None else None
+            )
         out_rows.append(entry)
 
     out_rows.sort(key=lambda r: -float(r.get("mt") or 0))
 
     hdr_dims = [dim_labels.get(d, d) for d in rows]
-    header = (
-        "| "
-        + " | ".join(hdr_dims)
-        + " | Avg Price (Incl GST/unit) | Cost Factor | Price Fetch / Maund |"
-    )
-    sep = (
-        "| "
-        + " | ".join("---" for _ in hdr_dims)
-        + " | --- | --- | --- |"
-    )
+    if mode == "last":
+        title = "Last price sold"
+        header = (
+            "| "
+            + " | ".join(hdr_dims)
+            + " | Last Price | Sale Date | Cost Factor | Price Fetch / Maund |"
+        )
+        sep = (
+            "| "
+            + " | ".join("---" for _ in hdr_dims)
+            + " | --- | --- | --- | --- |"
+        )
+        footnote = (
+            "\n_Last Price = invoice rate on the most recent sale in the period "
+            "for that SKU. Sale Date is that invoice date. Price Fetch uses the "
+            "same last invoice's Incl GST economics + cost factor "
+            f"(× {MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund)._"
+        )
+    else:
+        title = "Price Fetch"
+        header = (
+            "| "
+            + " | ".join(hdr_dims)
+            + " | Avg Price (Incl GST/unit) | Cost Factor | Price Fetch / Maund |"
+        )
+        sep = (
+            "| "
+            + " | ".join("---" for _ in hdr_dims)
+            + " | --- | --- | --- |"
+        )
+        footnote = (
+            "\n_Avg Price is Incl GST/FED per sellable unit (pack size from "
+            "Mes Qty ÷ rate-units). Price Fetch = (Incl GST/kg − cost factor/kg) × "
+            f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund (Ltrs costs ÷ {LTR_TO_KG})._"
+        )
     lines_md = [
-        f"### Price Fetch — {' × '.join(hdr_dims)}\n",
+        f"### {title} — {' × '.join(hdr_dims)}\n",
         f"_{blurb}_\n",
         header,
         sep,
     ]
     for row in out_rows[:80]:
         cells = [str(row.get(d) or "—").replace("|", "/") for d in rows]
-        ap = row.get("avg_price_incl_gst")
-        pack = row.get("pack_label")
-        ap_txt = f"{ap:,.2f}" if ap is not None else "—"
-        if pack:
-            ap_txt = f"{ap_txt} ({pack})"
+        if mode == "last":
+            lp = row.get("last_price")
+            pack = row.get("pack_label")
+            lp_txt = f"{lp:,.2f}" if lp is not None else "—"
+            if pack:
+                lp_txt = f"{lp_txt} ({pack})"
+            sale_d = str(row.get("sale_date") or "—")
+            cells.extend([lp_txt, sale_d])
+        else:
+            ap = row.get("avg_price_incl_gst")
+            pack = row.get("pack_label")
+            ap_txt = f"{ap:,.2f}" if ap is not None else "—"
+            if pack:
+                ap_txt = f"{ap_txt} ({pack})"
+            cells.append(ap_txt)
         cf = row.get("cost_factor")
         cu = row.get("cost_unit")
         if cf is not None and cu and cu != "mixed":
@@ -4782,18 +4878,15 @@ def query_price_fetch_table(
             cf_txt = "—"
         pf = row.get("price_fetch")
         pf_txt = f"{pf:,.2f}" if pf is not None else "—"
-        cells.extend([ap_txt, cf_txt, pf_txt])
+        cells.extend([cf_txt, pf_txt])
         lines_md.append("| " + " | ".join(cells) + " |")
 
-    lines_md.append(
-        "\n_Avg Price is Incl GST/FED per sellable unit (pack size from "
-        "Mes Qty ÷ rate-units). Price Fetch = (Incl GST/kg − cost factor/kg) × "
-        f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund (Ltrs costs ÷ {LTR_TO_KG})._"
-    )
+    lines_md.append(footnote)
 
     return {
         "ok": True,
-        "mode": "price_fetch_table",
+        "mode": "last_price_table" if mode == "last" else "price_fetch_table",
+        "price_mode": mode,
         "period": period_info,
         "filters": filters,
         "row_dimensions": rows,
@@ -4805,7 +4898,7 @@ def query_price_fetch_table(
         "answer_markdown": "\n".join(lines_md).strip() + "\n",
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim. "
-            "This is the Price Fetch table — do not reformat columns."
+            "Do not reformat columns or replace last price with averages."
         ),
         "price_spec": {
             "period_phrase": period,
@@ -4816,6 +4909,7 @@ def query_price_fetch_table(
             },
             "filters": filters,
             "row_dimensions": rows,
+            "price_mode": mode,
             "include_price_fetch": True,
             "include_cost_factor": True,
         },

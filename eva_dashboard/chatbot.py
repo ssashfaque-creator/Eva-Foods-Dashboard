@@ -261,7 +261,9 @@ def system_prompt() -> str:
 5. Follow-ups: context_handling='prior' + clear_filters. Fresh → 'none'.
    Keep filters.party on customer follow-ups unless user excludes that party.
 6. TREND DEFAULT: no period → LAST_N_MONTHS/6, rows=business_unit, cols=month,
-   metrics=volume+ams. Named customer → rows=party. price → avg_price.
+   metrics=volume+ams. Named customer → rows=party.
+   Average price → avg_price. Last/latest sold price + sale date → last_price
+   (+ price_fetch when asked).
 7. FILTER CONTRACT: Eva/Maan* → business_units. Channels → client_type only.
    Unsure → extracted_entities (INCLUDE names only — never excluded names).
 8. SPECIFIC_MONTH for named months. price_fetch for Price Fetch / cost factor.

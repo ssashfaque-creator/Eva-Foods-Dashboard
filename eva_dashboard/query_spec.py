@@ -79,6 +79,7 @@ COLUMN_DIMENSIONS = (
 PIVOT_METRICS = (
     "volume",
     "avg_price",
+    "last_price",
     "price_fetch",
     "ams",
     "vs_ams",
@@ -100,10 +101,12 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
         "name": "plan_query",
         "description": (
             "Universal pivot planner: translate ANY analytical ask into rows, "
-            "columns, and metrics. The server executes blindly. "
+            "columns, and metrics. "
             "Example — customer-wise price trends → "
             "row_dimensions=['party'], column_dimensions=['month'], "
             "metrics=['avg_price']. "
+            "Last/latest sold price + sale date → metrics=['last_price'] "
+            "(+ ['price_fetch'] when asked); row_dimensions include 'product'. "
             "Follow-ups: context_handling='prior' + clear_filters."
         ),
         "parameters": {
@@ -132,12 +135,14 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "string", "enum": list(PIVOT_METRICS)},
                     "description": (
-                        "volume=MT; avg_price=PKR rate; "
-                        "price_fetch=Incl GST/unit + cost factor + PF/maund "
-                        "(engine computes; also for 'oil price fetched' / "
-                        "'apply the cost factor' / 'Price Fetch' / 'recovery'); "
+                        "volume=MT; avg_price=period-average PKR rate; "
+                        "last_price=rate on the most recent invoice per SKU "
+                        "with that sale date (use for 'last price sold' / "
+                        "'latest price' — NOT avg_price); "
+                        "price_fetch=Incl GST/unit + cost factor + PF/maund; "
                         "ams / vs_ams / ams_growth for performance. "
-                        "Plain rates without cost factor → ['avg_price']."
+                        "Plain average rates → ['avg_price']. "
+                        "Last sold + Price Fetch → ['last_price','price_fetch']."
                     ),
                 },
                 "operation": {

@@ -706,6 +706,54 @@ def _coerce_vocab_from_user_text(
             except Exception:  # noqa: BLE001
                 pass
 
+    # Bare month name follow-up after a month-grid: lock YYYY-MM to the year
+    # that was on screen (so "July" after a 2026 grid ≠ July 2025).
+    if prior and re.search(
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?)\b",
+        t,
+    ) and not re.search(r"20\d{2}", t):
+        month_labels = list(
+            prior.get("month_labels")
+            or (prior.get("period") or {}).get("month_labels")
+            or []
+        )
+        # Also scan prior column_dimensions / table columns if stamped
+        for c in prior.get("columns") or prior.get("column_dimensions") or []:
+            if re.match(r"^\d{4}-\d{2}$", str(c)):
+                month_labels.append(str(c))
+        name_to_num = {
+            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7,
+            "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12,
+            "december": 12,
+        }
+        m = re.search(
+            r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+            r"nov(?:ember)?|dec(?:ember)?)\b",
+            t,
+        )
+        want = name_to_num.get((m.group(1) if m else "").lower())
+        years = sorted(
+            {
+                int(str(lab)[:4])
+                for lab in month_labels
+                if re.match(r"^\d{4}-\d{2}$", str(lab))
+                and want
+                and int(str(lab)[5:7]) == want
+            },
+            reverse=True,
+        )
+        if want and years:
+            out["period_type"] = "SPECIFIC_MONTH"
+            out["target_month"] = f"{years[0]:04d}-{want:02d}"
+            period = dict(out.get("period") or {})
+            period["phrase"] = out["target_month"]
+            out["period"] = period
+
     out["filters"] = filters
     out["row_dimensions"] = rows
     out["metrics"] = metrics
@@ -1377,16 +1425,26 @@ def execute_query_spec(
             breakdown=True,
             limit=int(spec.get("limit") or 80),
         )
-    elif "price_fetch" in metrics or "avg_price" in metrics:
+    elif "price_fetch" in metrics or "avg_price" in metrics or "last_price" in metrics:
         flags = dict(spec.get("price_flags") or {})
+        want_last = "last_price" in metrics or bool(
+            re.search(
+                r"\b(last|latest|most\s+recent)\s+price|"
+                r"last\s+(price\s+)?sold|price\s+date\s+of\s+sale|"
+                r"date\s+of\s+sale|sale\s+date\b",
+                user_text or "",
+                flags=re.I,
+            )
+        )
         want_fetch = (
             "price_fetch" in metrics
+            or want_last
             or bool(flags.get("include_price_fetch"))
             or bool(flags.get("include_cost_factor"))
             or bool(flags.get("factor_breakdown"))
         )
-        # Dedicated Price Fetch path — never monthly trend / matrix HTML
-        if want_fetch:
+        # Dedicated Price Fetch / last-price path — never monthly trend HTML
+        if want_fetch or want_last:
             pf_rows = [d for d in row_dimensions if d != "month"]
             has_party_scope = bool(
                 party_kw.get("party")
@@ -1394,8 +1452,10 @@ def execute_query_spec(
                 or party_kw.get("party_ilike")
             )
             if not pf_rows:
-                # SKU breakup default when party scoped or user asked for fetch
-                pf_rows = ["product"] if has_party_scope else []
+                # SKU breakup default for last price / party-scoped fetch
+                pf_rows = ["product"] if (has_party_scope or want_last) else []
+            if want_last and "product" not in pf_rows:
+                pf_rows = list(pf_rows) + ["product"]
             if pf_rows:
                 result = query_price_fetch_table(
                     row_dimensions=pf_rows,
@@ -1412,6 +1472,7 @@ def execute_query_spec(
                     packing_category=filters.get("packing_category"),
                     client_type=filters.get("client_type"),
                     product=filters.get("product"),
+                    price_mode="last" if want_last else "avg",
                     **party_kw,
                 )
             else:

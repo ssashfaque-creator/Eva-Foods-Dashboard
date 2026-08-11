@@ -78,6 +78,22 @@
         "price"
       ]
     },
+    "last_price": {
+      "label": "Last sold price",
+      "description": "Rate on the most recent sales invoice for each SKU (not a period average), with that sale date.",
+      "synonyms": [
+        "last price",
+        "last price sold",
+        "last sold price",
+        "latest price",
+        "most recent price",
+        "last selling price",
+        "price date of sale",
+        "sale date",
+        "date of sale"
+      ],
+      "implies_row": "product"
+    },
     "price_fetch": {
       "label": "Price Fetch (Rs/maund)",
       "description": "(Incl GST/kg − cost factor/kg) × 37.3246. Engine owns the math.",
