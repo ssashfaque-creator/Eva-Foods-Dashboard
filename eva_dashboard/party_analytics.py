@@ -63,17 +63,20 @@ def list_known_cities() -> list[str]:
 
 
 def extract_city_from_text(text: str) -> str | None:
+    cities = extract_cities_from_text(text)
+    return cities[0] if cities else None
+
+
+def extract_cities_from_text(text: str) -> list[str]:
+    """All distinct cities mentioned, in left-to-right order.
+
+    Handles "Lahore vs Karachi", "Lahore and Karachi", etc.
+    """
     t = (text or "").strip()
     if not t:
-        return None
+        return []
     lower = t.lower()
-    # Prefer longer city names first
-    cities = sorted(list_known_cities(), key=len, reverse=True)
-    for city in cities:
-        c = city.lower()
-        if re.search(r"(?<!\w)" + re.escape(c) + r"(?!\w)", lower):
-            return city
-    # Common fallbacks even if not yet in clients
+    catalog = list(list_known_cities())
     for city in (
         "Lahore",
         "Karachi",
@@ -87,9 +90,25 @@ def extract_city_from_text(text: str) -> str | None:
         "Sialkot",
         "Gujranwala",
     ):
-        if re.search(r"(?<!\w)" + re.escape(city.lower()) + r"(?!\w)", lower):
-            return city
-    return None
+        if city not in catalog:
+            catalog.append(city)
+    # Longer names first so "Nankana Sahib" wins over fragments
+    catalog = sorted(set(catalog), key=len, reverse=True)
+    hits: list[tuple[int, int, str]] = []
+    for city in catalog:
+        c = city.lower()
+        for m in re.finditer(r"(?<!\w)" + re.escape(c) + r"(?!\w)", lower):
+            start, end = m.start(), m.end()
+            # Skip overlaps with a longer already-claimed span
+            if any(not (end <= s or start >= e) for s, e, _ in hits):
+                continue
+            hits.append((start, end, city))
+    hits.sort(key=lambda h: h[0])
+    out: list[str] = []
+    for _, _, city in hits:
+        if city not in out:
+            out.append(city)
+    return out
 
 
 def _fetch_party_lines(

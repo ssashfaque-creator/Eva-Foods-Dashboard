@@ -38,8 +38,10 @@ PERIOD_TYPES = {
 
 FILTER_KEYS = (
     "city",
+    "cities",
     "zone",
     "client_type",
+    "client_types",
     "business_unit",
     "oil_type",
     "packing_category",
@@ -214,7 +216,24 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         },
                         "business_unit": {"type": "string"},
                         "client_type": {"type": "string"},
+                        "client_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Named channels for compares "
+                                "(e.g. ['Imtiaz Store','Eva Distributors']). "
+                                "Pair with row_dimensions=['client_type']."
+                            ),
+                        },
                         "city": {"type": "string"},
+                        "cities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Named cities only (e.g. ['Lahore','Karachi']). "
+                                "Pair with row_dimensions=['city']."
+                            ),
+                        },
                         "city_filter": {"type": "string"},
                         "zone": {"type": "string"},
                         "oil_type": {"type": "string"},

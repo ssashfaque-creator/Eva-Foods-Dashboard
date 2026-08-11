@@ -26,6 +26,7 @@ from eva_dashboard.db import connect, init_db
 from eva_dashboard.advanced_routing import looks_advanced
 from eva_dashboard.party_analytics import (
     analyze_parties,
+    extract_cities_from_text,
     extract_city_from_text,
     list_clients,
     party_sales,
@@ -2296,11 +2297,28 @@ def extract_regroup_dimension(text: str) -> str | None:
             "packing_category",
         ),
         (
+            r"\b("
+            r"product[- ]?wise|by\s+products?|show\s+(this\s+)?product\s+wise|"
+            r"this\s+product\s+wise|products?\s+break(?:\s*down|up)?|"
+            r"packing[- ]?wise|by\s+packing|pack(ing)?[- ]?wise|"
+            r"packing\s+categor(?:y|ies)"
+            r")\b",
+            "packing_category",
+        ),
+        (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+skus?\b",
             "product",
         ),
         (
+            r"\b(sku[- ]?wise|by\s+skus?|item[- ]?wise|show\s+skus?)\b",
+            "product",
+        ),
+        (
             r"\b(group(ed)?\s+by|break(?:\s*down)?\s+by|split\s+by)\s+oil\s*types?\b",
+            "oil_type",
+        ),
+        (
+            r"\b(oil[- ]?type[- ]?wise|by\s+oil(\s*types?)?|oil\s+break(?:\s*down)?)\b",
             "oil_type",
         ),
         (
@@ -2458,6 +2476,12 @@ def resolve_regroup_request(
     }
 
     nestable = {"packing_category", "product", "business_unit", "oil_type"}
+    outer_dims = {"city", "zone", "client_type", "party", "business_unit"}
+    prior_groups = [
+        str(g)
+        for g in (prior_spec.get("row_groups") or [])
+        if g and str(g) != dim
+    ]
     if axis == "row":
         # After a zone table, "city wise" → Zone then City
         if prior_row == "zone" and dim == "city":
@@ -2468,6 +2492,21 @@ def resolve_regroup_request(
             leaf, groups = _party_matrix_row_layout(text, prior_spec)
             out["row_dimension"] = leaf
             out["row_groups"] = groups or []
+        # "product wise" / packing / SKU / oil on a city|zone|channel|party table
+        # → nest under the prior outer grain (keep filters + hierarchy)
+        elif (
+            dim in nestable
+            and prior_row
+            and prior_row != dim
+            and (prior_row in outer_dims or any(g in outer_dims for g in prior_groups))
+        ):
+            groups = list(prior_groups)
+            if prior_row in outer_dims and prior_row not in groups:
+                groups.append(str(prior_row))
+            # Drop any prior nestable leaf from groups; new dim becomes leaf
+            groups = [g for g in groups if g not in nestable]
+            out["row_dimension"] = dim
+            out["row_groups"] = groups
         # Channel-wise / city-wise as a new cut — flat rows, don't bury under packing
         elif dim in {"client_type", "city", "zone"} and not add_layer:
             out["row_dimension"] = dim
@@ -4373,6 +4412,45 @@ def _dispatch_tool(
             columns = str(regroup.get("columns") or columns)
             lock_columns = True
             mode = "matrix"
+        elif len(extract_all_client_types_from_text(user_text)) >= 2 and (
+            re.search(r"\b(compare|versus|vs\.?|against)\b", user_text or "", re.I)
+            or re.search(r"\bsales\b.*\band\b.*\bsales\b", (user_text or "").lower())
+        ):
+            # Channel compare → client_type rows (cities become shared filters)
+            if asked_dim in {"packing_category", "product", "business_unit", "oil_type"}:
+                row_dim = asked_dim
+                row_groups = ["client_type"]
+            else:
+                row_dim = "client_type"
+                row_groups = None
+            if columns != "month":
+                columns = "month"
+                months_back = _months_back_from_text(user_text, months_back or 6)
+            mode = "matrix"
+            lock_columns = True
+        elif len(extract_cities_from_text(user_text)) >= 2 and (
+            not asked_dim
+            or asked_dim
+            in {"city", "business_unit", "packing_category", "product", "oil_type"}
+        ):
+            # Multi-city named set: city rows (optionally nest spoken leaf under city)
+            leaf = (
+                asked_dim
+                if asked_dim
+                in {"packing_category", "product", "business_unit", "oil_type"}
+                else None
+            )
+            if leaf:
+                row_dim = leaf
+                row_groups = ["city"]
+            else:
+                row_dim = "city"
+                row_groups = None
+            if columns != "month":
+                columns = "month"
+                months_back = _months_back_from_text(user_text, months_back or 6)
+            mode = "matrix"
+            lock_columns = True
         else:
             # Spoken product/SKU/drill language wins over model-supplied grain
             # ("product wise" must stay packing_category, not SKU).
@@ -4521,9 +4599,20 @@ def _dispatch_tool(
 
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
         ctype = normalize_client_type(ctype) if ctype else None
+        named_channels = extract_all_client_types_from_text(user_text)
+        ctypes_arg: list[str] | None = None
+        if len(named_channels) >= 2:
+            ctypes_arg = named_channels
+            ctype = None
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
-        city_arg = arguments.get("city") or extract_city_from_text(user_text)
+        named_cities = extract_cities_from_text(user_text)
+        cities_arg: list[str] | None = named_cities if len(named_cities) >= 2 else None
+        city_arg = (
+            None
+            if cities_arg
+            else (arguments.get("city") or extract_city_from_text(user_text))
+        )
         zone_arg = normalize_zone(
             arguments.get("zone") or extract_zone_from_text(user_text)
         )
@@ -4532,10 +4621,13 @@ def _dispatch_tool(
         # National / all-over Pakistan → drop sticky city (and zone)
         if _looks_national_scope(user_text):
             city_arg = None
+            cities_arg = None
             zone_arg = None
             clear_filters = list(clear_filters or [])
             if "city" not in clear_filters:
                 clear_filters.append("city")
+            if "cities" not in clear_filters:
+                clear_filters.append("cities")
             if "zone" not in clear_filters:
                 clear_filters.append("zone")
 
@@ -4601,10 +4693,12 @@ def _dispatch_tool(
                     clear_filters.append("business_unit")
         elif is_regroup or is_remove:
             # Keep a city the user named; only drop invented cities
-            if not extract_city_from_text(user_text):
+            if not extract_cities_from_text(user_text):
                 city_arg = None
-            if not extract_client_type_from_text(user_text):
+                cities_arg = None
+            if not extract_all_client_types_from_text(user_text):
                 ctype = None
+                ctypes_arg = None
             if is_remove:
                 # Units already set from remove keep-list / excludes above
                 pass
@@ -4656,12 +4750,14 @@ def _dispatch_tool(
             date_from=arguments.get("date_from"),
             date_to=arguments.get("date_to"),
             city=city_arg,
+            cities=cities_arg,
             zone=zone_arg,
             business_unit=bu_param,
             business_units=bus_param,
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            client_types=ctypes_arg,
             columns=columns,
             months_back=months_back,
             mode=mode,

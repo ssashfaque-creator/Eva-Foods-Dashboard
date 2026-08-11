@@ -126,33 +126,49 @@ def _clients_lookup() -> dict[str, dict[str, str]]:
 def _parties_matching(
     *,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     active_only: bool = False,
 ) -> list[str] | None:
     """Raw client names matching city/zone/type, or None if no such filter."""
-    if not city and not zone and not client_type and not active_only:
+    city_keys = {
+        str(c).strip().lower()
+        for c in (list(cities or []) + ([city] if city else []))
+        if str(c).strip()
+    }
+    type_labels: list[tuple[str, str]] = []
+    for raw in list(client_types or []) + ([client_type] if client_type else []):
+        classified = classify_client_type_filter(raw)
+        if classified:
+            type_labels.append(classified)
+    if not city_keys and not zone and not type_labels and not active_only:
         return None
     lookup = _clients_lookup()
-    city_key = (city or "").strip().lower()
     zone_key = (zone or "").strip().lower()
-    classified = classify_client_type_filter(client_type) if client_type else None
     names: list[str] = []
     for meta in lookup.values():
         if active_only and str(meta.get("inactive") or "").strip().upper() == "Y":
             continue
-        if city_key and meta["city"].strip().lower() != city_key:
+        if city_keys and meta["city"].strip().lower() not in city_keys:
             continue
         if zone_key and str(meta.get("zone") or "").strip().lower() != zone_key:
             continue
-        if classified:
-            mode, label = classified
-            needle = label.strip().lower()
-            if mode == "raw":
-                hay = str(meta.get("type_raw") or meta.get("type") or "").strip().lower()
-            else:
-                hay = str(meta.get("type") or "").strip().lower()
-            if hay != needle:
+        if type_labels:
+            ok = False
+            for mode, label in type_labels:
+                needle = label.strip().lower()
+                if mode == "raw":
+                    hay = str(
+                        meta.get("type_raw") or meta.get("type") or ""
+                    ).strip().lower()
+                else:
+                    hay = str(meta.get("type") or "").strip().lower()
+                if hay == needle:
+                    ok = True
+                    break
+            if not ok:
                 continue
         if meta["client"]:
             names.append(meta["client"])
@@ -663,12 +679,14 @@ def _fetch_lines(
     date_from: str,
     date_to: str,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
@@ -691,14 +709,35 @@ def _fetch_lines(
 
     # Resolve city / zone / client_type to party lists from the clients master.
     # Also keep s.client_type filter as a fallback when the master has gaps.
-    if city or zone_n or client_type:
+    cities_f = [
+        str(c).strip() for c in (cities or []) if str(c or "").strip()
+    ] or None
+    ctypes_f = [
+        str(c).strip() for c in (client_types or []) if str(c or "").strip()
+    ] or None
+    if city or cities_f or zone_n or client_type or ctypes_f:
         matched = _parties_matching(
-            city=city, zone=zone_n, client_type=client_type
+            city=city,
+            cities=cities_f,
+            zone=zone_n,
+            client_type=client_type,
+            client_types=ctypes_f,
         ) or []
-        if client_type and not city and not zone_n:
+        if (client_type or ctypes_f) and not city and not cities_f and not zone_n:
             # Prefer master list; also allow sales rows tagged with matching
             # raw labels (specific Chase Up, or all IMT sources for group IMT).
-            raw_types = sql_client_type_values(client_type) or [client_type]
+            raw_types: list[str] = []
+            for ct in list(ctypes_f or []) + ([client_type] if client_type else []):
+                raw_types.extend(sql_client_type_values(ct) or [ct])
+            seen_rt: set[str] = set()
+            raw_types = [
+                x
+                for x in raw_types
+                if not (
+                    x.lower().strip() in seen_rt
+                    or seen_rt.add(x.lower().strip())  # type: ignore[func-returns-value]
+                )
+            ]
             type_placeholders = ",".join("?" for _ in raw_types)
             where.append(
                 "("
@@ -854,21 +893,33 @@ def _fetch_lines(
     frame = _attach_client_dims(frame)
 
     # Apply city/zone/type filters that need resolved dims (and excludes)
-    if city:
-        ck = city.strip().lower()
-        frame = frame[frame["city"].astype(str).str.strip().str.lower() == ck]
+    city_keys = {
+        str(c).strip().lower()
+        for c in (list(cities_f or []) + ([city] if city else []))
+        if str(c).strip()
+    }
+    if city_keys:
+        frame = frame[
+            frame["city"].astype(str).str.strip().str.lower().isin(city_keys)
+        ]
     if zone_n:
         zk = zone_n.strip().lower()
         frame = frame[frame["zone"].astype(str).str.strip().str.lower() == zk]
-    if client_type:
-        classified = classify_client_type_filter(client_type)
+    type_needles: list[tuple[str, str]] = []
+    for raw in list(ctypes_f or []) + ([client_type] if client_type else []):
+        classified = classify_client_type_filter(raw)
         if classified:
-            mode, label = classified
+            type_needles.append(classified)
+    if type_needles:
+        mask = None
+        for mode, label in type_needles:
             tk = label.strip().lower()
             col = "client_type_raw" if mode == "raw" else "client_type"
             if col not in frame.columns:
                 col = "client_type"
-            frame = frame[frame[col].astype(str).str.strip().str.lower() == tk]
+            part = frame[col].astype(str).str.strip().str.lower() == tk
+            mask = part if mask is None else (mask | part)
+        frame = frame[mask]
     if post_ex_city:
         frame = frame[
             ~frame["city"].astype(str).str.strip().str.lower().isin(post_ex_city)
@@ -1370,24 +1421,28 @@ def _build_pivot(
 def _ams_fetch_filters(
     *,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "city": city,
+        "cities": cities,
         "zone": zone,
         "business_unit": business_unit,
         "business_units": business_units,
         "oil_type": oil_type,
         "packing_category": packing_category,
         "client_type": client_type,
+        "client_types": client_types,
         "party": party,
         "parties": parties,
         "party_ilike": party_ilike,
@@ -1399,12 +1454,14 @@ def _load_ams_window_frame(
     as_of: date,
     n_months: int,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
@@ -1431,12 +1488,14 @@ def _load_ams_window_frame(
         date_to=end_s,
         **_ams_fetch_filters(
             city=city,
+            cities=cities,
             zone=zone,
             business_unit=business_unit,
             business_units=business_units,
             oil_type=oil_type,
             packing_category=packing_category,
             client_type=client_type,
+            client_types=client_types,
             party=party,
             parties=parties,
             party_ilike=party_ilike,
@@ -1487,11 +1546,13 @@ def _ams_by_row(
     row_dim: str,
     as_of: date,
     city: str | None,
+    cities: list[str] | None = None,
     business_unit: str | None,
     business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     n_months: int = 3,
     frame: pd.DataFrame | None = None,
@@ -1501,11 +1562,13 @@ def _ams_by_row(
         as_of=as_of,
         n_months=n_months,
         city=city,
+        cities=cities,
         business_unit=business_unit,
         business_units=business_units,
         oil_type=oil_type,
         packing_category=packing_category,
         client_type=client_type,
+        client_types=client_types,
         party=party,
         frame=frame,
     )
@@ -1565,12 +1628,14 @@ def _enrich_month_matrix_with_ams(
     as_of: date,
     months_back: int,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
@@ -1612,12 +1677,14 @@ def _enrich_month_matrix_with_ams(
         as_of=ams_as_of,
         n_months=max_n,
         city=city,
+        cities=cities,
         zone=zone,
         business_unit=business_unit,
         business_units=business_units,
         oil_type=oil_type,
         packing_category=packing_category,
         client_type=client_type,
+        client_types=client_types,
         party=party,
         parties=parties,
         party_ilike=party_ilike,
@@ -1729,11 +1796,13 @@ def _trend_table(
     row_dim: str,
     period: dict[str, Any],
     city: str | None,
+    cities: list[str] | None = None,
     business_unit: str | None,
     business_units: list[str] | None = None,
     oil_type: str | None,
     packing_category: str | None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
 ) -> dict[str, Any]:
     as_of = date.fromisoformat(period["date_to"])
@@ -1741,11 +1810,13 @@ def _trend_table(
         row_dim=row_dim,
         as_of=as_of.replace(day=1),
         city=city,
+        cities=cities,
         business_unit=business_unit,
         business_units=business_units,
         oil_type=oil_type,
         packing_category=packing_category,
         client_type=client_type,
+        client_types=client_types,
         party=party,
     )
     volume = (
@@ -2032,12 +2103,14 @@ def query_sales(
     date_from: str | None = None,
     date_to: str | None = None,
     city: str | None = None,
+    cities: list[str] | None = None,
     zone: str | None = None,
     business_unit: str | None = None,
     business_units: list[str] | None = None,
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    client_types: list[str] | None = None,
     party: str | None = None,
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
@@ -2100,8 +2173,18 @@ def query_sales(
     oil = normalize_oil_type((oil_type or "").strip() or None)
     pack = normalize_packing_category((packing_category or "").strip() or None)
     city_f = (city or "").strip() or None
+    cities_f = [
+        str(c).strip() for c in (cities or []) if str(c or "").strip()
+    ] or None
     zone_f = normalize_zone(zone)
     ctype = normalize_client_type((client_type or "").strip() or None)
+    ctypes_f: list[str] | None
+    _ctypes: list[str] = []
+    for raw in client_types or []:
+        n = normalize_client_type(str(raw).strip()) or str(raw).strip()
+        if n and n not in _ctypes:
+            _ctypes.append(n)
+    ctypes_f = _ctypes or None
     party_f = (party or "").strip() or None
     parties_f = [
         str(p).strip() for p in (parties or []) if str(p or "").strip()
@@ -2148,6 +2231,11 @@ def query_sales(
                     units.insert(0, nu)
         if not city_f and "city" not in clear:
             city_f = prior_filters.get("city")
+        if not cities_f and "city" not in clear and "cities" not in clear:
+            prior_cities = prior_filters.get("cities") or []
+            cities_f = [
+                str(c).strip() for c in prior_cities if str(c or "").strip()
+            ] or None
         if not zone_f and "zone" not in clear:
             zone_f = normalize_zone(prior_filters.get("zone"))
         if not oil and "oil_type" not in clear:
@@ -2156,6 +2244,14 @@ def query_sales(
             pack = prior_filters.get("packing_category") or None
         if not ctype and "client_type" not in clear:
             ctype = prior_filters.get("client_type") or None
+        if not ctypes_f and "client_type" not in clear and "client_types" not in clear:
+            prior_cts = prior_filters.get("client_types") or []
+            _cts: list[str] = []
+            for raw in prior_cts:
+                n = normalize_client_type(str(raw).strip()) or str(raw).strip()
+                if n and n not in _cts:
+                    _cts.append(n)
+            ctypes_f = _cts or None
         # Explicit columns from regroup / caller win over prior default
         if (
             not lock_columns
@@ -2218,12 +2314,14 @@ def query_sales(
         ]
 
     # Apply clears after inherit (regroup promoted a filter to a dimension)
-    if "city" in clear:
+    if "city" in clear or "cities" in clear:
         city_f = None
+        cities_f = None
     if "zone" in clear:
         zone_f = None
-    if "client_type" in clear:
+    if "client_type" in clear or "client_types" in clear:
         ctype = None
+        ctypes_f = None
     if "oil_type" in clear:
         oil = None
     if "packing_category" in clear:
@@ -2241,11 +2339,17 @@ def query_sales(
     if col not in {"client_type", "city", "zone", "month"}:
         col = "client_type"
 
+    # Multi-value lists win over single filters
+    if cities_f:
+        city_f = None
+    if ctypes_f:
+        ctype = None
     # When filtering to one client type, client_type columns are useless → city
-    if ctype and col == "client_type":
+    # (multi client_types compares keep client_type as a row/column grain)
+    if ctype and not ctypes_f and col == "client_type":
         col = "city"
     # City is more specific than zone — don't AND a sticky zone against a city
-    if city_f:
+    if city_f or cities_f:
         zone_f = None
 
     # Month-wise: date range = last N months ending at max sales date
@@ -2310,12 +2414,14 @@ def query_sales(
         date_from=fetch_from,
         date_to=d1,
         city=city_f,
+        cities=cities_f,
         zone=zone_f,
         business_unit=bu,
         business_units=units if len(units) > 1 else None,
         oil_type=oil,
         packing_category=pack,
         client_type=ctype,
+        client_types=ctypes_f,
         party=party_f,
         parties=parties_f,
         party_ilike=party_ilike_f,
@@ -2333,12 +2439,14 @@ def query_sales(
             as_of=as_of_ams,
             months_back=mb,
             city=city_f,
+            cities=cities_f,
             zone=zone_f,
             business_unit=bu,
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            client_types=ctypes_f,
             party=party_f,
             parties=parties_f,
             party_ilike=party_ilike_f,
@@ -2381,11 +2489,13 @@ def query_sales(
         },
         "filters": {
             "city": city_f,
+            "cities": cities_f,
             "zone": zone_f,
             "business_unit": bu,
             "oil_type": oil,
             "packing_category": pack,
             "client_type": ctype,
+            "client_types": ctypes_f,
             "party": party_f,
             "active_only": True if active_only_f else None,
         },
@@ -2417,11 +2527,13 @@ def query_sales(
             date_from=compare_info["date_from"],
             date_to=compare_info["date_to"],
             city=city_f,
+            cities=cities_f,
             business_unit=bu,
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            client_types=ctypes_f,
             party=party_f,
             excludes=ex_map or None,
         )
@@ -2504,11 +2616,13 @@ def query_sales(
             row_dim=row_dim,
             period=period_info,
             city=city_f,
+            cities=cities_f,
             business_unit=bu,
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            client_types=ctypes_f,
             party=party_f,
         )
         result["mode"] = "trend"
@@ -2534,11 +2648,13 @@ def query_sales(
             row_dim=row_dim,
             period=period_info,
             city=city_f,
+            cities=cities_f,
             business_unit=bu,
             business_units=units if len(units) > 1 else None,
             oil_type=oil,
             packing_category=pack,
             client_type=ctype,
+            client_types=ctypes_f,
             party=party_f,
         )
         result["mode"] = "analytical"
@@ -3016,9 +3132,21 @@ def _filter_blurb(
         )
     if filters.get("zone"):
         bits.append(f"zone **{filters['zone']}**")
-    if filters.get("city"):
+    if filters.get("cities"):
+        bits.append(
+            "cities **"
+            + "**, **".join(str(c) for c in filters["cities"])
+            + "**"
+        )
+    elif filters.get("city"):
         bits.append(f"city **{filters['city']}**")
-    if filters.get("client_type"):
+    if filters.get("client_types"):
+        bits.append(
+            "Client Types **"
+            + "**, **".join(str(c) for c in filters["client_types"])
+            + "**"
+        )
+    elif filters.get("client_type"):
         bits.append(f"Client Type **{filters['client_type']}**")
     show_units = units or ([filters["business_unit"]] if filters.get("business_unit") else [])
     if len(show_units) > 1:

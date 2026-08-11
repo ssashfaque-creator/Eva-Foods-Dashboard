@@ -106,13 +106,18 @@ def vocabulary_for_prompt() -> str:
         "- Shared scope stays in filters (city / packing / oil / BU) WITHOUT",
         "  locking the compare grain itself into a single filter value.",
         "- Channel vs channel (Imtiaz vs distributors, distributors vs LMT):",
-        "  row_dimensions=[\"client_type\"], metrics=[\"volume\",\"ams\"] (or",
-        "  [\"ams_growth\"] for growth). Do NOT set filters.client_type to only",
-        "  one side — both sides must appear as rows. Optional:",
-        "  advanced_query mode=compare_client_types with entities=[...].",
-        "- City vs city (Lahore vs Karachi): row_dimensions=[\"city\"], or",
-        "  advanced_query mode=compare_cities with entities=[Lahore, Karachi].",
-        "  Shared channel/packing goes in filters.",
+        "  row_dimensions=[\"client_type\"], filters.client_types=[both sides],",
+        "  metrics=[\"volume\",\"ams\"] (or [\"ams_growth\"] for growth).",
+        "  Do NOT set filters.client_type to only one side — both must be rows.",
+        "  Optional: advanced_query mode=compare_client_types with entities=[...].",
+        "- City vs city / city and city (Lahore vs Karachi, Lahore and Karachi):",
+        "  row_dimensions=[\"city\"], filters.cities=[\"Lahore\",\"Karachi\"].",
+        "  Do NOT omit cities (that shows all Pakistan) and do NOT keep only",
+        "  filters.city=Lahore. Shared channel/packing goes in filters.",
+        "  Optional: advanced_query mode=compare_cities with entities=[...].",
+        "- Follow-up \"product wise\" / packing / SKU on a city|zone|channel table:",
+        "  keep prior filters + nest leaf under the prior outer grain",
+        "  (e.g. row_dimensions=[\"city\",\"packing_category\"]).",
         "- Packing vs packing (Stand up vs LMT packing scope is different —",
         "  LMT is a channel): standup vs tin → row_dimensions=[\"packing_category\"].",
         "- Growth compares → metrics=[\"ams_growth\"] (add volume/ams if useful).",
@@ -194,19 +199,30 @@ Examples:
   metrics=["volume","ams"], column_dimensions=["month"]
 - \"compare Imtiaz vs distributors in Lahore\" →
   row_dimensions=["client_type"], column_dimensions=["month"],
-  metrics=["volume","ams"], filters={city:Lahore}, LAST_N_MONTHS/6
-  — do NOT set filters.client_type (both channels must be rows)
+  metrics=["volume","ams"],
+  filters={city:Lahore, client_types:[Imtiaz Store, Eva Distributors]},
+  LAST_N_MONTHS/6 — both channels as rows (not a single client_type lock)
+- \"compare distributor sales and Imtiaz sales in Lahore\" → same pattern
 - \"compare VTF growth in Imtiaz vs distributors in Lahore\" →
   row_dimensions=["client_type"], metrics=["ams_growth"],
-  filters={city:Lahore, oil_type:…VTF…} (or extracted_entities=["VTF"]),
-  LAST_N_MONTHS/6 — growth on rows, shared city+oil in filters
+  filters={city:Lahore, client_types:[Imtiaz Store, Eva Distributors],
+  oil_type:…VTF…} (or extracted_entities=["VTF"]), LAST_N_MONTHS/6
 - \"compare standup sales in distributors vs LMT\" →
   row_dimensions=["client_type"], metrics=["volume","ams"],
-  filters={packing_category:Stand up}, LAST_N_MONTHS/6
+  filters={packing_category:Stand up,
+  client_types:[Eva Distributors, LMT]}, LAST_N_MONTHS/6
+- \"Imtiaz sales in Lahore vs Karachi\" / \"…Lahore and Karachi\" →
+  row_dimensions=["city"], column_dimensions=["month"],
+  metrics=["volume","ams"],
+  filters={client_type:Imtiaz Store, cities:[Lahore, Karachi]},
+  LAST_N_MONTHS/6 — only those cities as rows
 - \"compare Imtiaz sales growth in Lahore vs Karachi\" →
   row_dimensions=["city"], metrics=["ams_growth"],
-  filters={client_type:Imtiaz Store}, LAST_N_MONTHS/6
-  — or advanced_query compare_cities entities=["Lahore","Karachi"]
+  filters={client_type:Imtiaz Store, cities:[Lahore, Karachi]},
+  LAST_N_MONTHS/6
+- After a city table: \"show this product wise\" →
+  context_handling=prior, row_dimensions=["city","packing_category"],
+  keep filters.cities / client_type from prior
 - \"compare al shaheer growth with Imtiaz\" →
   plan_query #1: filters.party/extracted_entities=["al shaheer"],
   metrics=["ams_growth"]; plan_query #2: filters.client_type=Imtiaz Store,

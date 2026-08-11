@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from eva_dashboard.client_language import (
+    extract_all_client_types_from_text,
     extract_oil_and_packing,
     match_client_type_alias,
     normalize_client_type,
@@ -26,6 +27,7 @@ from eva_dashboard.client_language import (
 from eva_dashboard.geo import normalize_zone
 from eva_dashboard.party_analytics import (
     analyze_parties,
+    extract_cities_from_text,
     list_clients,
     lookup_party,
     party_sales,
@@ -217,9 +219,19 @@ def _spoken_wise_dimension(user_text: str) -> str | None:
 
 
 def _coerce_vocab_from_user_text(
-    spec: dict[str, Any], user_text: str
+    spec: dict[str, Any],
+    user_text: str,
+    *,
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Hard safety nets: SKU→product, product→packing_category, city-wise, price_fetch."""
+    """Hard safety nets for spoken grain, multi-value compares, and layer follow-ups.
+
+    General rules (any filter / grain, not just Imtiaz/Lahore):
+    - Named 2+ cities → filters.cities + row_dimensions include city
+    - Named 2+ channels in a compare → filters.client_types + row client_type
+    - "X wise" follow-up nests under prior outer grain (city/zone/channel/…)
+    - SKU / product spoken vocab unchanged
+    """
     out = dict(spec)
     t = (user_text or "").lower()
     if not t.strip():
@@ -229,47 +241,151 @@ def _coerce_vocab_from_user_text(
     metrics = list(out.get("metrics") or [])
     cols = list(out.get("column_dimensions") or [])
     filters = dict(out.get("filters") or {})
+    clear = list(out.get("clear_filters") or [])
+
+    prior_rows: list[str] = []
+    if prior:
+        prior_rows = list(prior.get("row_dimensions") or [])
+        if not prior_rows:
+            g = prior.get("grain") or {}
+            leaf = g.get("row_dimension") or prior.get("row_dimension")
+            groups = list(g.get("row_groups") or prior.get("row_groups") or [])
+            if leaf:
+                prior_rows = list(groups) + [str(leaf)]
 
     wise_dim = _spoken_wise_dimension(t)
     has_sku = wise_dim == "product"
     has_product_spoken = wise_dim == "packing_category" and bool(
         re.search(
             r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
-            r"\bproducts?\s+(break|breakup|mix|layer)\b",
+            r"\bproducts?\s+(break|breakup|mix|layer)\b|"
+            r"\bthis\s+product\s+wise\b",
             t,
         )
     )
+    nest_leaf_dims = {"packing_category", "product", "business_unit", "oil_type"}
+    outer_dims = {"city", "zone", "client_type", "party", "business_unit"}
 
-    if has_sku:
-        rows = ["product" if r == "packing_category" else r for r in rows]
-        if "product" not in rows:
-            rows.append("product")
-        # SKU breakup + price fetch → not a monthly trend
-        if "price_fetch" in metrics or re.search(r"price\s*fetch|cost\s*factor", t):
-            cols = [c for c in cols if c != "month"]
-    elif has_product_spoken:
-        rows = ["packing_category" if r == "product" else r for r in rows]
-        if "packing_category" not in rows:
-            rows.append("packing_category")
-    elif wise_dim in {"city", "zone", "client_type", "business_unit", "party"}:
-        # Fresh "Imtiaz city wise" must NOT stay as BU × Month.
-        # Flat cut on the spoken grain; keep month on columns for volume asks.
-        add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
-        if add_layer and rows and wise_dim not in rows:
-            rows = [wise_dim] + [r for r in rows if r != wise_dim]
-        else:
-            rows = [wise_dim]
-        if wise_dim == "city":
-            filters.pop("city", None)
-        if wise_dim == "zone":
-            filters.pop("zone", None)
-        # Default sales volume → month columns (unless price fetch / avg price)
+    # --- Multi-city named set (lahore vs/and karachi, …) ---
+    named_cities = extract_cities_from_text(user_text)
+    if len(named_cities) >= 2:
+        filters["cities"] = named_cities
+        filters.pop("city", None)
+        if "city" in clear:
+            clear = [c for c in clear if c != "city"]
+        # Ensure city is the (outer) row grain unless user asked a different wise cut
+        if wise_dim not in nest_leaf_dims and wise_dim not in {"zone", "client_type", "party", "business_unit"}:
+            if "city" not in rows:
+                rows = ["city"]
+            elif rows[0] != "city":
+                rows = ["city"] + [r for r in rows if r != "city"]
         vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
         price_metrics = set(metrics) & {"price_fetch", "avg_price"}
-        if (vol_metrics or not metrics) and not price_metrics:
-            if "month" not in cols:
+        if (vol_metrics or not metrics) and not price_metrics and "month" not in cols:
+            cols = ["month"]
+            metrics = metrics or ["volume", "ams"]
+
+    # --- Multi-channel compare (Imtiaz vs distributors, …) ---
+    named_channels = extract_all_client_types_from_text(user_text)
+    compareish = bool(
+        re.search(r"\b(compare|comparison|versus|vs\.?|against)\b", t)
+        or re.search(r"\bsales\b.*\band\b.*\bsales\b", t)
+        or (" and " in t and "sales" in t and len(named_channels) >= 2)
+    )
+    if len(named_channels) >= 2 and compareish:
+        filters["client_types"] = named_channels
+        filters.pop("client_type", None)
+        if "client_type" in clear:
+            clear = [c for c in clear if c != "client_type"]
+        # Channel compare grain unless user explicitly asked city/party/product wise
+        if wise_dim not in {"city", "zone", "party", "product", "packing_category"}:
+            rows = ["client_type"]
+        vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
+        price_metrics = set(metrics) & {"price_fetch", "avg_price"}
+        if (vol_metrics or not metrics) and not price_metrics and "month" not in cols:
+            cols = ["month"]
+            metrics = metrics or ["volume", "ams"]
+    # Single named city from text when planner missed it (keep multi-city path above)
+    if len(named_cities) == 1 and not filters.get("cities") and not filters.get("city"):
+        filters["city"] = named_cities[0]
+
+    # --- Spoken wise / layer follow-ups ---
+    add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
+    if has_sku or has_product_spoken or wise_dim in nest_leaf_dims | outer_dims:
+        leaf = (
+            "product"
+            if has_sku
+            else (
+                "packing_category"
+                if has_product_spoken or wise_dim == "packing_category"
+                else wise_dim
+            )
+        )
+        # Nest under prior outer grain when follow-up only changes the leaf
+        prior_outers = [r for r in prior_rows if r in outer_dims and r != leaf]
+        current_outers = [r for r in rows if r in outer_dims and r != leaf]
+        # Also keep multi-city / multi-channel outer if just set above
+        if "city" in rows and leaf != "city":
+            current_outers = ["city"] + [r for r in current_outers if r != "city"]
+        if "client_type" in rows and leaf != "client_type":
+            current_outers = ["client_type"] + [
+                r for r in current_outers if r != "client_type"
+            ]
+
+        if leaf in nest_leaf_dims and (prior_outers or current_outers):
+            outers = prior_outers or current_outers
+            # Preserve order, unique
+            seen: set[str] = set()
+            outers_u = []
+            for r in outers:
+                if r not in seen and r != leaf:
+                    seen.add(r)
+                    outers_u.append(r)
+            rows = outers_u + [leaf]
+            # Keep multi-filters that scoped the prior table
+            if prior:
+                pf = dict(prior.get("filters") or {})
+                for key in ("cities", "client_types", "city", "client_type", "zone"):
+                    if pf.get(key) and not filters.get(key):
+                        filters[key] = pf[key]
+        elif leaf in outer_dims:
+            if add_layer and rows and leaf not in rows:
+                rows = [leaf] + [r for r in rows if r != leaf]
+            else:
+                # Fresh cut on city/zone/channel — don't bury under packing
+                rows = [leaf]
+            if leaf == "city":
+                # city-wise across all cities: drop single city lock unless multi named
+                if not filters.get("cities"):
+                    filters.pop("city", None)
+            if leaf == "zone":
+                filters.pop("zone", None)
+            if leaf == "client_type" and not filters.get("client_types"):
+                # channel-wise across channels
+                filters.pop("client_type", None)
+        else:
+            # leaf packing/product/bu without prior outer
+            if leaf == "product":
+                rows = ["product" if r == "packing_category" else r for r in rows]
+                if "product" not in rows:
+                    rows.append("product")
+            elif leaf == "packing_category":
+                rows = ["packing_category" if r == "product" else r for r in rows]
+                if "packing_category" not in rows:
+                    rows.append("packing_category")
+            elif leaf and leaf not in rows:
+                rows.append(leaf)
+
+        if has_sku and (
+            "price_fetch" in metrics or re.search(r"price\s*fetch|cost\s*factor", t)
+        ):
+            cols = [c for c in cols if c != "month"]
+        elif leaf in outer_dims or leaf in nest_leaf_dims:
+            vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
+            price_metrics = set(metrics) & {"price_fetch", "avg_price"}
+            if (vol_metrics or not metrics) and not price_metrics and "month" not in cols:
                 cols = ["month"]
-            metrics = metrics or ["volume"]
+                metrics = metrics or ["volume", "ams"]
 
     # Pure cost-factor asks stay on factor_costs (do not force Price Fetch metric)
     if not _is_factor_only_ask(t, metrics=metrics, flags=out.get("price_flags")) and re.search(
@@ -279,46 +395,38 @@ def _coerce_vocab_from_user_text(
     ):
         if "price_fetch" not in metrics:
             metrics.append("price_fetch")
-        # Dedicated PF path — drop accidental month columns
         if has_sku or "product" in rows or "party" in rows:
             cols = [c for c in cols if c != "month"]
 
     # Channel words → client_type (never customer ILIKE)
-    if not filters.get("client_type"):
+    if not filters.get("client_type") and not filters.get("client_types"):
         party_raw = filters.get("party") or out.get("party_query")
         parties = list(filters.get("parties") or [])
-        redirected = False
         if party_raw:
             ct = match_client_type_alias(str(party_raw))
             if ct:
                 filters["client_type"] = ct
                 filters.pop("party", None)
                 out.pop("party_query", None)
-                redirected = True
         if parties:
             kept: list[str] = []
             for p in parties:
                 ct = match_client_type_alias(str(p))
-                if ct and not filters.get("client_type"):
+                if ct and not filters.get("client_type") and not filters.get("client_types"):
                     filters["client_type"] = ct
-                    redirected = True
                 elif not ct:
                     kept.append(str(p))
             if kept:
                 filters["parties"] = kept
             else:
                 filters.pop("parties", None)
-                redirected = True
-        # Do NOT invent client_type from free user_text — that breaks blind
-        # execute. Channel words must come from filters.party / parties /
-        # extracted_entities / filters.client_type (then we redirect/normalize).
-        if redirected:
-            pass
 
     out["filters"] = filters
     out["row_dimensions"] = rows
     out["metrics"] = metrics
     out["column_dimensions"] = cols
+    if clear:
+        out["clear_filters"] = clear
     return out
 
 
@@ -333,6 +441,26 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
     # validation must reject that for the LLM retry loop.
     if out.get("client_type") and not is_business_unit_label(str(out["client_type"])):
         out["client_type"] = normalize_client_type(out.get("client_type"))
+    if out.get("cities"):
+        cities = [str(c).strip() for c in out["cities"] if str(c).strip()]
+        if cities:
+            out["cities"] = cities
+            out.pop("city", None)
+        else:
+            out.pop("cities", None)
+    if out.get("client_types"):
+        cts: list[str] = []
+        for raw in out["client_types"]:
+            if is_business_unit_label(str(raw)):
+                continue
+            ct = normalize_client_type(str(raw))
+            if ct and ct not in cts:
+                cts.append(ct)
+        if cts:
+            out["client_types"] = cts
+            out.pop("client_type", None)
+        else:
+            out.pop("client_types", None)
 
     oil = out.get("oil_type")
     pack = out.get("packing_category")
@@ -362,6 +490,27 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
 
     if out.get("parties") and not isinstance(out["parties"], list):
         out["parties"] = [str(out["parties"])]
+    if out.get("cities"):
+        if not isinstance(out["cities"], list):
+            out["cities"] = [str(out["cities"])]
+        out["cities"] = [str(c).strip() for c in out["cities"] if str(c).strip()]
+        if out["cities"]:
+            out.pop("city", None)
+        else:
+            out.pop("cities", None)
+    if out.get("client_types"):
+        if not isinstance(out["client_types"], list):
+            out["client_types"] = [str(out["client_types"])]
+        normed: list[str] = []
+        for raw in out["client_types"]:
+            n = normalize_client_type(str(raw).strip()) or str(raw).strip()
+            if n and n not in normed:
+                normed.append(n)
+        if normed:
+            out["client_types"] = normed
+            out.pop("client_type", None)
+        else:
+            out.pop("client_types", None)
     return out
 
 
@@ -445,7 +594,7 @@ def execute_query_spec(
     # Python entity resolution BEFORE validation (forgiving extracted_entities)
     spec = _apply_extracted_entities(spec)
     # Spoken vocab safety nets (SKU / product / price_fetch)
-    spec = _coerce_vocab_from_user_text(spec, user_text)
+    spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
     spec["business_units"] = _expand_business_units(
         list(spec.get("business_units") or [])
     )
@@ -768,12 +917,14 @@ def execute_query_spec(
             date_from=date_from,
             date_to=date_to,
             city=filters.get("city"),
+            cities=list(filters.get("cities") or []) or None,
             zone=filters.get("zone"),
             business_unit=bu or filters.get("business_unit"),
             business_units=bus_param,
             oil_type=filters.get("oil_type"),
             packing_category=filters.get("packing_category"),
             client_type=filters.get("client_type"),
+            client_types=list(filters.get("client_types") or []) or None,
             columns=columns,
             months_back=mb,
             row_dimension=row_dim,
