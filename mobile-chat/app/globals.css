@@ -261,6 +261,20 @@ a {
   align-items: stretch;
 }
 
+.assistant-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  background: #fff;
+  border: 1px solid rgba(20, 35, 27, 0.08);
+  animation: rise 380ms ease both;
+}
+
 .bubble {
   max-width: min(94%, 620px);
   border-radius: 18px;
@@ -280,11 +294,11 @@ a {
 
 .bubble.assistant {
   max-width: 100%;
-  background: rgba(255, 255, 255, 0.92);
+  background: #fff;
   color: var(--ink);
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  border-bottom-left-radius: 6px;
-  box-shadow: var(--shadow);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .bubble.assistant :is(p, ul, ol) {
@@ -360,7 +374,9 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding-left: 2px;
+  padding: 10px 12px 12px;
+  background: linear-gradient(180deg, #f3f8f4 0%, #eaf3ed 100%);
+  border-top: 1px solid var(--line);
 }
 
 .action-btn,

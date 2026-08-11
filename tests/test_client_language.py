@@ -262,6 +262,8 @@ def test_cost_factor_and_packing_cost_asks() -> None:
             assert suggest_preferred_tool(
                 "packing cost for standup canola distributors"
             ) == "query_price"
+            assert _looks_factor_only_ask("tell me the current cost factors")
+            assert _looks_cost_factor_ask("tell me the current cost factors")
 
             factors = query_factor_costs(
                 client_type="Eva Distributors",
@@ -276,6 +278,11 @@ def test_cost_factor_and_packing_cost_asks() -> None:
             assert "Product Cost (Ltrs)" in factors["answer_markdown"]
             assert "Total Factor Cost (Ltrs)" in factors["answer_markdown"]
 
+            # No client type → default Eva Distributors
+            bare = query_factor_costs(breakdown=True)
+            assert bare["ok"] is True
+            assert bare["filters"]["client_type"] == "Eva Distributors"
+
             out = _dispatch_tool(
                 "query_price",
                 {},
@@ -284,6 +291,15 @@ def test_cost_factor_and_packing_cost_asks() -> None:
             assert out["ok"] is True
             assert out.get("mode") == "factor_costs"
             assert "Packing Cost" in out["answer_markdown"]
+
+            bare_dispatch = _dispatch_tool(
+                "query_price",
+                {},
+                user_text="tell me the current cost factors",
+            )
+            assert bare_dispatch["ok"] is True
+            assert bare_dispatch.get("mode") == "factor_costs"
+            assert bare_dispatch["filters"]["client_type"] == "Eva Distributors"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

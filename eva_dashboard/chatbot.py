@@ -3349,9 +3349,11 @@ def _looks_cost_factor_ask(text: str) -> bool:
         re.search(
             r"\b("
             r"cost\s*factors?|factor\s*costs?|total\s*factor|"
+            r"current\s+cost\s*factors?|current\s+factors?|"
             r"packing\s*costs?|product\s*costs?|"
             r"factor\s*break\s*down|factor\s*breakdown|"
-            r"show\s+factors?|what'?s\s+the\s+factor|"
+            r"show\s+factors?|tell\s+me\s+(the\s+)?(current\s+)?(cost\s*)?factors?|"
+            r"what'?s\s+the\s+factor|what\s+are\s+the\s+(cost\s*)?factors?|"
             r"what\s+is\s+the\s+(cost\s*)?factor|"
             r"factor\s+for\b"
             r")\b",
@@ -5025,6 +5027,8 @@ def _dispatch_tool(
             title_mode=reshape.get("title_mode"),
         )
     if name == "query_price":
+        from eva_dashboard.sales_query import DEFAULT_FACTOR_CLIENT_TYPE
+
         ctype = arguments.get("client_type") or extract_client_type_from_text(user_text)
         oil = arguments.get("oil_type") or extract_oil_type_from_text(user_text)
         pack = arguments.get("packing_category") or extract_packing_from_text(user_text)
@@ -5054,9 +5058,15 @@ def _dispatch_tool(
             else None
         )
         product_query = arguments.get("product_query")
+        # Never treat a bare "show cost factors" sentence as a product name.
         if not product_query and not arguments.get("product"):
-            product_query = user_text
+            if not factor_only:
+                product_query = user_text
+            elif oil or pack or arguments.get("business_unit"):
+                product_query = user_text
         if factor_only:
+            if not ctype:
+                ctype = DEFAULT_FACTOR_CLIENT_TYPE
             return query_factor_costs(
                 client_type=ctype,
                 business_unit=arguments.get("business_unit"),
@@ -5065,6 +5075,7 @@ def _dispatch_tool(
                 product=arguments.get("product"),
                 product_query=product_query,
                 breakdown=True,
+                limit=int(arguments.get("limit") or 80),
                 prior_spec=use_prior,
             )
         return query_price(
@@ -5703,8 +5714,15 @@ def chat_completion(
             on_status("Thinking…" if round_i == 0 else "Reading your database…")
 
         # Plan→execute: factual asks must call plan_query with a QuerySpec.
+        # Cost-factor / packing-cost lookups live in factor_costs — force
+        # query_price (factor_only path) instead of the sales pivot planner.
         tool_choice: Any = "auto"
-        if round_i == 0 and _looks_factual(last_user):
+        if round_i == 0 and _looks_factor_only_ask(last_user):
+            tool_choice = {
+                "type": "function",
+                "function": {"name": "query_price"},
+            }
+        elif round_i == 0 and _looks_factual(last_user):
             tool_choice = {
                 "type": "function",
                 "function": {"name": "plan_query"},
@@ -5920,6 +5938,55 @@ def chat_completion(
                             "data": data,
                             "dim_count": dim_count,
                             "filename_stem": "eva_sales_table",
+                        }
+                        export_snapshot_acc = last_export_snapshot
+                    elif name == "query_price" and (
+                        result.get("rows") or result.get("matrix")
+                    ):
+                        if result.get("matrix"):
+                            headers, data, dim_count = matrix_to_records(
+                                result["matrix"]
+                            )
+                        else:
+                            rows = list(result.get("rows") or [])
+                            prefer = [
+                                "client_type",
+                                "product",
+                                "packing_category",
+                                "unit",
+                                "product_cost",
+                                "packing_cost",
+                                "total_factor_cost",
+                                "avg_rate",
+                                "incl_gst",
+                                "cost_factor",
+                                "price_fetch",
+                            ]
+                            cols = [c for c in prefer if rows and c in rows[0]]
+                            if not cols and rows:
+                                cols = list(rows[0].keys())
+                            headers, data = rows_to_records(rows, cols)
+                            dim_count = 1
+                        filters = result.get("filters") or {}
+                        bits = []
+                        for key in ("client_type", "oil_type", "packing_category"):
+                            if filters.get(key):
+                                bits.append(f"{key}={filters[key]}")
+                        last_export_snapshot = {
+                            "title": (
+                                "Eva Foods cost factors"
+                                if result.get("mode") == "factor_costs"
+                                else "Eva Foods price table"
+                            ),
+                            "subtitle": " · ".join(bits) or None,
+                            "headers": headers,
+                            "data": data,
+                            "dim_count": dim_count,
+                            "filename_stem": (
+                                "eva_cost_factors"
+                                if result.get("mode") == "factor_costs"
+                                else "eva_price_table"
+                            ),
                         }
                         export_snapshot_acc = last_export_snapshot
                     elif name in {"list_clients", "analyze_parties", "advanced_query"}:

@@ -364,33 +364,44 @@ export default function HomePage() {
     setToast("CSV downloaded");
   }
 
-  async function downloadExcel(index: number) {
+  async function downloadViaBridge(
+    index: number,
+    format: "xlsx" | "pdf"
+  ) {
     const msg = messages[index];
+    const label = format === "pdf" ? "PDF" : "Excel";
     if (!msg?.followup || !canExportFollowup(msg.followup)) {
-      downloadCsv(index);
+      if (format === "xlsx") {
+        downloadCsv(index);
+        return;
+      }
+      setToast("PDF needs Mac bridge — restart bridge after update");
       return;
     }
-    setExporting(`xlsx-${index}`);
+    setExporting(`${format}-${index}`);
     try {
       const res = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ followup: msg.followup, format: "xlsx" }),
+        body: JSON.stringify({ followup: msg.followup, format }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Excel export failed");
+        throw new Error(data.error || `${label} export failed`);
       }
       const blob = await res.blob();
       const disposition = res.headers.get("Content-Disposition") || "";
       const match = /filename="?([^"]+)"?/i.exec(disposition);
-      downloadBlob(blob, match?.[1] || "eva_table.xlsx");
-      setToast("Excel downloaded");
+      downloadBlob(
+        blob,
+        match?.[1] || (format === "pdf" ? "eva_table.pdf" : "eva_table.xlsx")
+      );
+      setToast(`${label} downloaded`);
     } catch (err) {
       const msgText =
-        err instanceof Error ? err.message : "Excel export failed";
+        err instanceof Error ? err.message : `${label} export failed`;
       setToast(msgText);
-      downloadCsv(index);
+      if (format === "xlsx") downloadCsv(index);
     } finally {
       setExporting(null);
     }
@@ -401,7 +412,7 @@ export default function HomePage() {
       <header className="topbar">
         <div className="brand-block">
           <div className="brand">Eva Foods</div>
-          <div className="tagline">Live sales analyst</div>
+          <div className="tagline">Live sales analyst · UI v3</div>
         </div>
         <div className="top-actions">
           <button
@@ -459,7 +470,7 @@ export default function HomePage() {
                   {stripFollowupMarker(m.content)}
                 </div>
               ) : (
-                <>
+                <div className="assistant-card">
                   <div
                     className="bubble assistant"
                     ref={(el) => {
@@ -469,7 +480,7 @@ export default function HomePage() {
                       __html: renderAssistantHtml(m.content),
                     }}
                   />
-                  <div className="msg-actions">
+                  <div className="msg-actions" aria-label="Message actions">
                     <button
                       type="button"
                       className="action-btn primary"
@@ -478,28 +489,38 @@ export default function HomePage() {
                     >
                       ↩ Reply
                     </button>
-                    {messageHasTable(m.content) || canExportFollowup(m.followup) ? (
-                      <>
-                        <button
-                          type="button"
-                          className="action-btn"
-                          onClick={() => downloadCsv(i)}
-                          disabled={busy}
-                        >
-                          ⬇ CSV
-                        </button>
-                        <button
-                          type="button"
-                          className="action-btn"
-                          onClick={() => void downloadExcel(i)}
-                          disabled={busy || exporting === `xlsx-${i}`}
-                        >
-                          {exporting === `xlsx-${i}` ? "Exporting…" : "⬇ Excel"}
-                        </button>
-                      </>
-                    ) : null}
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={() => downloadCsv(i)}
+                      disabled={
+                        busy ||
+                        !(
+                          messageHasTable(m.content) ||
+                          canExportFollowup(m.followup)
+                        )
+                      }
+                    >
+                      ⬇ CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={() => void downloadViaBridge(i, "xlsx")}
+                      disabled={busy || exporting === `xlsx-${i}`}
+                    >
+                      {exporting === `xlsx-${i}` ? "…" : "⬇ Excel"}
+                    </button>
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={() => void downloadViaBridge(i, "pdf")}
+                      disabled={busy || exporting === `pdf-${i}`}
+                    >
+                      {exporting === `pdf-${i}` ? "…" : "⬇ PDF"}
+                    </button>
                   </div>
-                </>
+                </div>
               )}
             </div>
           ))

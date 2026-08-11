@@ -43,6 +43,8 @@ from eva_dashboard.query_spec import (
     validate_query_spec,
 )
 from eva_dashboard.sales_query import (
+    DEFAULT_FACTOR_CLIENT_TYPE,
+    query_factor_costs,
     query_price,
     query_price_fetch_table,
     query_sales,
@@ -119,6 +121,46 @@ def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _is_factor_only_ask(
+    user_text: str,
+    *,
+    metrics: list[str] | None = None,
+    flags: dict[str, Any] | None = None,
+) -> bool:
+    """True when the ask is cost-factor lookup (not sales Price Fetch / rate)."""
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    if re.search(
+        r"\b(price\s*fetch|avg\.?\s*rate|average\s+rate|average\s+price|"
+        r"selling\s+price|\brate\b)\b",
+        t,
+    ):
+        return False
+    if re.search(
+        r"\b("
+        r"cost\s*factors?|factor\s*costs?|total\s*factor|"
+        r"current\s+cost\s*factors?|current\s+factors?|"
+        r"packing\s*costs?|product\s*costs?|"
+        r"factor\s*break\s*down|factor\s*breakdown|"
+        r"show\s+factors?|tell\s+me\s+(the\s+)?(current\s+)?(cost\s*)?factors?|"
+        r"what'?s\s+the\s+factor|what\s+are\s+the\s+(cost\s*)?factors?"
+        r")\b",
+        t,
+    ):
+        return True
+    flags = flags or {}
+    mets = set(metrics or [])
+    if flags.get("factor_only") or (
+        flags.get("include_cost_factor")
+        and "price_fetch" not in mets
+        and "avg_price" not in mets
+        and not flags.get("include_price_fetch")
+    ):
+        return True
+    return False
+
+
 def _coerce_vocab_from_user_text(
     spec: dict[str, Any], user_text: str
 ) -> dict[str, Any]:
@@ -159,7 +201,8 @@ def _coerce_vocab_from_user_text(
         if "packing_category" not in rows:
             rows.append("packing_category")
 
-    if re.search(
+    # Pure cost-factor asks stay on factor_costs (do not force Price Fetch metric)
+    if not _is_factor_only_ask(t, metrics=metrics, flags=out.get("price_flags")) and re.search(
         r"price\s*fetch|oil\s*price\s*fetched|apply\s+the\s+cost\s+factor|"
         r"what.?s\s+the\s+cost\s+factor|cost\s+factor",
         t,
@@ -520,6 +563,18 @@ def execute_query_spec(
             active_only=bool(filters.get("active_only")),
             title_mode=spec.get("title_mode"),
             mix_dimension=grain.get("mix_dimension"),
+        )
+    elif _is_factor_only_ask(user_text, metrics=metrics, flags=spec.get("price_flags")):
+        # Cost factors live in factor_costs — not sales Price Fetch.
+        ctype = filters.get("client_type") or DEFAULT_FACTOR_CLIENT_TYPE
+        result = query_factor_costs(
+            client_type=ctype,
+            business_unit=filters.get("business_unit") or (bus[0] if bus else None),
+            oil_type=filters.get("oil_type"),
+            packing_category=filters.get("packing_category"),
+            product=filters.get("product"),
+            breakdown=True,
+            limit=int(spec.get("limit") or 80),
         )
     elif "price_fetch" in metrics or "avg_price" in metrics:
         flags = dict(spec.get("price_flags") or {})

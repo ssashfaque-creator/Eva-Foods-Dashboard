@@ -3457,6 +3457,9 @@ def _blend_cost_factor(
     }
 
 
+DEFAULT_FACTOR_CLIENT_TYPE = "Eva Distributors"
+
+
 def query_factor_costs(
     *,
     client_type: str | None = None,
@@ -3468,11 +3471,15 @@ def query_factor_costs(
     breakdown: bool = True,
     limit: int = 40,
     prior_spec: dict[str, Any] | None = None,
+    default_client_type: str | None = DEFAULT_FACTOR_CLIENT_TYPE,
 ) -> dict[str, Any]:
     """Look up Total Factor / Product / Packing costs from ``factor_costs``.
 
     Does not require a sales period — use for "what's the packing cost for X SKU",
     "show factor breakdown", "what's the cost factor".
+
+    When no client type is named (and none is sticky from prior), defaults to
+    ``Eva Distributors``.
     """
     oil = normalize_oil_type((oil_type or "").strip() or None)
     pack = normalize_packing_category((packing_category or "").strip() or None)
@@ -3493,6 +3500,10 @@ def query_factor_costs(
             bu = prior_filters.get("business_unit") or None
         if not exact_product:
             exact_product = prior_filters.get("product") or None
+
+    # Bare "show cost factors" → Eva Distributors (user can name Imtiaz / Metro / …)
+    if not ctype and default_client_type:
+        ctype = normalize_client_type(default_client_type) or default_client_type
 
     if not exact_product and product_query:
         from eva_dashboard.product_language import resolve_product_language
