@@ -2118,7 +2118,7 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
     if pack:
         return ("packing_category", pack)
 
-    # Exact party name from clients master (free-text exclude)
+    # Exact / fuzzy party name from clients master (free-text exclude)
     try:
         from eva_dashboard.sales_query import _clients_lookup, _norm_party_key
 
@@ -2126,6 +2126,21 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
         meta = _clients_lookup().get(needle)
         if meta and meta.get("client"):
             return ("party", str(meta["client"]))
+        # Fuzzy: substring / token overlap against master (e.g. typo'd names)
+        from eva_dashboard.party_match import list_party_matches
+
+        matches = list_party_matches(raw, limit=5)
+        if len(matches) == 1:
+            return ("party", matches[0])
+        if matches:
+            qn = needle
+            tight = [
+                m
+                for m in matches
+                if qn in _norm_party_key(m) or _norm_party_key(m) in qn
+            ]
+            if len(tight) == 1:
+                return ("party", tight[0])
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -2268,7 +2283,9 @@ def extract_regroup_dimension(text: str) -> str | None:
         (
             r"\b("
             r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
-            r"cities\s+wise|show\s+city\s+wise|cities?\s+break(?:up|down)?"
+            r"cities\s+wise|show\s+(me\s+)?(this\s+)?(by\s+)?city|"
+            r"add(ing)?\s+(a\s+)?cities|sales\s+by\s+city|"
+            r"cities?\s+break(?:up|down)?"
             r")\b",
             "city",
         ),
@@ -2292,7 +2309,9 @@ def extract_regroup_dimension(text: str) -> str | None:
             r"\b("
             r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
             r"by\s+channels?|all\s+channels?|every\s+channel|"
-            r"channels?\s+in\b|channels?\s+for\b|show\s+(me\s+)?(all\s+)?channels?"
+            r"channels?\s+in\b|channels?\s+for\b|"
+            r"show\s+(me\s+)?(this\s+)?(by\s+)?(all\s+)?channels?|"
+            r"sales\s+by\s+channels?|group\s+by\s+channels?"
             r")\b",
             "client_type",
         ),
@@ -2524,18 +2543,36 @@ def resolve_regroup_request(
             groups = [g for g in groups if g not in nestable]
             out["row_dimension"] = dim
             out["row_groups"] = groups
-        # Channel-wise / city-wise as a new cut — flat rows, don't bury under packing
-        elif dim in {"client_type", "city", "zone"} and not add_layer:
-            out["row_dimension"] = dim
-            out["row_groups"] = []
-        elif (
-            prior_row
-            and prior_row != dim
-            and prior_row in nestable
-            and dim in {"city", "zone", "client_type", "business_unit"}
-        ):
-            out["row_dimension"] = prior_row
-            out["row_groups"] = [dim]
+        # City / channel / zone on a BU|packing|SKU|oil table → nest as outer
+        # (city | BU …) so "add cities" / "show this by channel" keep the leaf.
+        # Flat cut only when prior leaf is already an outer grain (or "only/just").
+        elif dim in {"client_type", "city", "zone", "business_unit"}:
+            flat_only = bool(re.search(r"\b(only|just|flat)\b", t))
+            if (
+                prior_row
+                and prior_row != dim
+                and prior_row in nestable
+                and not flat_only
+            ):
+                groups = [dim] + [
+                    g for g in prior_groups if g != dim and g not in nestable
+                ]
+                out["row_dimension"] = prior_row
+                out["row_groups"] = groups
+            elif dim in {"client_type", "city", "zone"} and not add_layer:
+                out["row_dimension"] = dim
+                out["row_groups"] = []
+            elif (
+                prior_row
+                and prior_row != dim
+                and prior_row in nestable
+                and dim == "business_unit"
+            ):
+                out["row_dimension"] = prior_row
+                out["row_groups"] = [dim]
+            else:
+                out["row_dimension"] = dim
+                out["row_groups"] = []
         else:
             out["row_dimension"] = dim
             out["row_groups"] = []
@@ -3533,6 +3570,7 @@ def _extract_business_units_from_text(text: str) -> list[str]:
         ("maan bulk", "Maan Bulk"),
         ("cusine king", "Cusine King"),
         ("cuisine king", "Cusine King"),
+        ("cosine king", "Cusine King"),
     ]
     for needle, label in informal:
         if needle in lower and label not in found:

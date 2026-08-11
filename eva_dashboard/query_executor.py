@@ -185,7 +185,9 @@ def _spoken_wise_dimension(user_text: str) -> str | None:
         (
             r"\b("
             r"city[- ]?wise|citywide|city\s+wide|by\s+city|"
-            r"cities\s+wise|show\s+city\s+wise|cities?\s+break(?:up|down)?"
+            r"cities\s+wise|show\s+(me\s+)?(this\s+)?(by\s+)?city|"
+            r"add(ing)?\s+(a\s+)?cities|add(ing)?\s+(a\s+)?city|"
+            r"cities?\s+break(?:up|down)?|sales\s+by\s+city"
             r")\b",
             "city",
         ),
@@ -196,7 +198,9 @@ def _spoken_wise_dimension(user_text: str) -> str | None:
         (
             r"\b("
             r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
-            r"by\s+channels?|all\s+channels?"
+            r"by\s+channels?|all\s+channels?|"
+            r"show\s+(me\s+)?(this\s+)?by\s+channels?|"
+            r"sales\s+by\s+channels?|group\s+by\s+channels?"
             r")\b",
             "client_type",
         ),
@@ -218,6 +222,35 @@ def _spoken_wise_dimension(user_text: str) -> str | None:
         if re.search(pat, t):
             return dim
     return None
+
+
+def _looks_yoy_compare(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"same\s+period\s+last\s+year|year\s+over\s+year|\byoy\b|"
+            r"vs\.?\s*last\s+year|versus\s+last\s+year|"
+            r"compared?\s+(with|to)\s+last\s+year|"
+            r"last\s+year\s+same\s+period"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _looks_growth_drivers(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"(products?|skus?|packings?|items?)\s+led\s+(the\s+)?growth|"
+            r"led\s+the\s+growth|what\s+drove|growth\s+drivers?|"
+            r"which\s+(products?|skus?|packings?)\s+(drove|led|grew)"
+            r")\b",
+            t,
+        )
+    )
 
 
 def _coerce_vocab_from_user_text(
@@ -311,6 +344,40 @@ def _coerce_vocab_from_user_text(
     # set filters (blind execute). Multi-city / multi-channel compare above is
     # the only filter injection allowed from spoken text.
 
+    # --- Compare with <City> on a prior single-city table ---
+    if prior and len(named_cities) == 1:
+        pf = dict(prior.get("filters") or {})
+        prior_city = pf.get("city")
+        prior_cities = [str(c) for c in (pf.get("cities") or []) if c]
+        compare_city = bool(
+            re.search(
+                r"\b(compare|versus|vs\.?)\s+(with|to|against)?\b|"
+                r"\b(and|also|plus)\s+(with\s+)?",
+                t,
+            )
+            or re.search(r"\bcompare\s+with\b", t)
+        )
+        if compare_city and (prior_city or prior_cities):
+            base = list(prior_cities) if prior_cities else [str(prior_city)]
+            extra = named_cities[0]
+            if extra not in base:
+                filters["cities"] = base + [extra]
+                filters.pop("city", None)
+                if "city" in clear:
+                    clear = [c for c in clear if c != "city"]
+                prior_nestables = [r for r in prior_rows if r in nest_leaf_dims]
+                if prior_nestables:
+                    rows = ["city"] + prior_nestables
+                elif wise_dim not in nest_leaf_dims:
+                    rows = ["city"]
+                vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
+                price_metrics = set(metrics) & {"price_fetch", "avg_price"}
+                if (vol_metrics or not metrics) and not price_metrics and "month" not in cols:
+                    cols = ["month"]
+                    metrics = metrics or ["volume", "ams"]
+                if out.get("base") != "prior":
+                    out["base"] = "prior"
+
     # --- Spoken wise / layer follow-ups ---
     add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
     if has_sku or has_product_spoken or wise_dim in nest_leaf_dims | outer_dims:
@@ -384,8 +451,31 @@ def _coerce_vocab_from_user_text(
                     if pf.get(key) and not filters.get(key):
                         filters[key] = pf[key]
         elif leaf in outer_dims:
-            if add_layer and rows and leaf not in rows:
-                rows = [leaf] + [r for r in rows if r != leaf]
+            prior_nestables = [r for r in prior_rows if r in nest_leaf_dims]
+            current_nestables = [r for r in rows if r in nest_leaf_dims]
+            flat_only = bool(re.search(r"\b(only|just|flat)\b", t))
+            # Nest only from PRIOR leaf hierarchy (or explicit add/nest/layer).
+            # Fresh "city wise" with a mistaken BU plan must stay a flat city cut.
+            nestables = prior_nestables
+            if add_layer and not nestables:
+                nestables = current_nestables
+            # "add city" / "show by city" / "by channel" on a prior BU|packing|SKU
+            # table → outer grain + keep nestable leaf (city | business_unit …)
+            if (
+                leaf in {"city", "zone", "client_type"}
+                and nestables
+                and not flat_only
+            ):
+                seen_n: set[str] = set()
+                nest_u: list[str] = []
+                for r in nestables:
+                    if r not in seen_n and r != leaf:
+                        seen_n.add(r)
+                        nest_u.append(r)
+                rows = [leaf] + nest_u
+            elif add_layer and (rows or nestables):
+                base = [r for r in (rows or nestables) if r != leaf]
+                rows = [leaf] + base
             else:
                 # Fresh cut on city/zone/channel — don't bury under packing
                 rows = [leaf]
@@ -393,11 +483,17 @@ def _coerce_vocab_from_user_text(
                 # city-wise across all cities: drop single city lock unless multi named
                 if not filters.get("cities"):
                     filters.pop("city", None)
+                if "city" not in clear:
+                    clear.append("city")
             if leaf == "zone":
                 filters.pop("zone", None)
+                if "zone" not in clear:
+                    clear.append("zone")
             if leaf == "client_type" and not filters.get("client_types"):
                 # channel-wise across channels
                 filters.pop("client_type", None)
+                if "client_type" not in clear:
+                    clear.append("client_type")
         else:
             # leaf packing/product/bu without prior outer
             if leaf == "product":
@@ -456,12 +552,79 @@ def _coerce_vocab_from_user_text(
             else:
                 filters.pop("parties", None)
 
+    # --- YoY / same period last year ---
+    if _looks_yoy_compare(t) and not out.get("compare"):
+        out["compare"] = "yoy"
+        if prior and out.get("base") != "prior":
+            out["base"] = "prior"
+
+    # --- Which products/SKUs led the growth ---
+    if _looks_growth_drivers(t):
+        out["compare"] = out.get("compare") or "yoy"
+        if re.search(r"\bskus?\b", t):
+            rows = ["product"]
+        else:
+            # Spoken "product" = packing category in Eva vocabulary
+            rows = ["packing_category"]
+        vol_metrics = set(metrics) & {"volume", "ams", "vs_ams", "ams_growth"}
+        if not vol_metrics:
+            metrics = metrics or ["volume", "ams"]
+        if prior and out.get("base") != "prior":
+            out["base"] = "prior"
+
+    # --- Remove / exclude value follow-ups (Cosine King, party, city, …) ---
+    if prior and re.search(
+        r"\b(remove|exclude|without|drop|hide|filter\s+out)\b", t
+    ):
+        try:
+            from eva_dashboard.chatbot import resolve_remove_request
+
+            prior_spec = {
+                "row_dimension": (prior_rows[-1] if prior_rows else None),
+                "row_groups": list(prior_rows[:-1]) if len(prior_rows) > 1 else [],
+                "column_dimension": (
+                    (prior.get("column_dimensions") or [None])[0]
+                    or prior.get("column_dimension")
+                    or "month"
+                ),
+                "filters": dict(prior.get("filters") or {}),
+                "business_units": list(prior.get("business_units") or []),
+                "excludes": dict(prior.get("excludes") or {}),
+            }
+            removed = resolve_remove_request(user_text, prior_spec=prior_spec)
+            if removed and removed.get("mode") == "exclude_value":
+                excludes = dict(out.get("excludes") or prior.get("excludes") or {})
+                for dim, vals in dict(removed.get("excludes") or {}).items():
+                    bucket = list(excludes.get(dim) or [])
+                    for v in vals or []:
+                        if v not in bucket:
+                            bucket.append(v)
+                    excludes[dim] = bucket
+                out["excludes"] = excludes
+                if out.get("base") != "prior":
+                    out["base"] = "prior"
+                # Keep grain from prior when planner left rows empty/wrong
+                if not rows and prior_rows:
+                    rows = list(prior_rows)
+                if not cols and prior.get("column_dimensions"):
+                    cols = list(prior.get("column_dimensions") or [])
+            elif removed and removed.get("mode") == "remove_layer":
+                leaf = removed.get("row_dimension")
+                groups = list(removed.get("row_groups") or [])
+                rows = groups + ([str(leaf)] if leaf else [])
+                if out.get("base") != "prior":
+                    out["base"] = "prior"
+        except Exception:  # noqa: BLE001
+            pass
+
     out["filters"] = filters
     out["row_dimensions"] = rows
     out["metrics"] = metrics
     out["column_dimensions"] = cols
     if clear:
         out["clear_filters"] = clear
+        # Also mirror onto `clear` used by merge_prior_into_spec
+        out["clear"] = list(dict.fromkeys(list(out.get("clear") or []) + clear))
     return out
 
 
@@ -756,6 +919,31 @@ def execute_query_spec(
     spec = _apply_extracted_entities(spec)
     # Spoken vocab safety nets (SKU / product / price_fetch)
     spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
+    # Follow-up intents may promote base=prior after the first merge — re-apply
+    if prior and spec.get("base") == "prior":
+        keep_rows = list(spec.get("row_dimensions") or [])
+        keep_cols = list(spec.get("column_dimensions") or [])
+        keep_ex = dict(spec.get("excludes") or {})
+        keep_compare = spec.get("compare")
+        keep_metrics = list(spec.get("metrics") or [])
+        spec = merge_prior_into_spec(spec, prior)
+        if keep_rows:
+            spec["row_dimensions"] = keep_rows
+        if keep_cols:
+            spec["column_dimensions"] = keep_cols
+        if keep_compare:
+            spec["compare"] = keep_compare
+        if keep_metrics:
+            spec["metrics"] = keep_metrics
+        if keep_ex or prior.get("excludes"):
+            merged_ex = dict(prior.get("excludes") or {})
+            for k, vals in keep_ex.items():
+                bucket = list(merged_ex.get(k) or [])
+                for v in vals or []:
+                    if v not in bucket:
+                        bucket.append(v)
+                merged_ex[k] = bucket
+            spec["excludes"] = merged_ex
     # Governed metrics/operations synonyms (Phase 3 semantic layer)
     from eva_dashboard.metrics_catalog import apply_metric_synonyms_to_spec
 
@@ -803,9 +991,19 @@ def execute_query_spec(
             if cols_r[0] == "month":
                 grain["time_grain"] = "month"
         else:
-            # SPECIFIC_MONTH cleared month columns — keep grain non-month
-            if grain.get("column_dimension") == "month":
-                grain["column_dimension"] = "client_type"
+            # SPECIFIC_MONTH cleared month columns — pick a non-conflicting
+            # column grain (never equal the row leaf, e.g. channel×channel).
+            if grain.get("column_dimension") == "month" or not cols_r:
+                rows_now = list(spec.get("row_dimensions") or [])
+                row_set = set(rows_now)
+                leaf = rows_now[-1] if rows_now else None
+                fallback = "client_type"
+                for candidate in ("client_type", "city", "business_unit", "zone"):
+                    if candidate != leaf and candidate not in row_set:
+                        fallback = candidate
+                        break
+                grain["column_dimension"] = fallback
+                spec["column_dimensions"] = [fallback]
             grain["time_grain"] = "none"
         spec["grain"] = grain
     # Sync grain row dims from resolved/defaulted row_dimensions
@@ -820,6 +1018,10 @@ def execute_query_spec(
             if rows[0] in {"party", "city", "zone"}:
                 grain["group_by"] = rows[0]
         spec["grain"] = grain
+
+    # Canonicalize filters before validation so spoken aliases (metro →
+    # METRO HABIB, lmt → LMT) pass the client_type enum check.
+    spec["filters"] = _canon_filters(spec.get("filters") or {})
 
     errors = validate_query_spec(spec, prior=prior)
     if errors:
@@ -841,7 +1043,7 @@ def execute_query_spec(
             ),
         }
 
-    filters = _canon_filters(spec.get("filters") or {})
+    filters = dict(spec.get("filters") or {})
     grain = dict(spec.get("grain") or {})
     period = dict(spec.get("period") or {})
     intent = spec.get("intent") or ""

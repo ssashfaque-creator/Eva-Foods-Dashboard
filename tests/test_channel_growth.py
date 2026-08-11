@@ -113,7 +113,7 @@ def test_channel_growth_uses_client_type_trend() -> None:
                 if r.get("client_type") not in {None, "Total"}
             }
             assert "Imtiaz Store" in labels
-            assert "Eva Distributors" in labels
+            assert "Direct Customers" in labels  # Eva Distributors rolls up here
             md = out.get("answer_markdown") or ""
             assert "Stand up" not in md  # not packing view
             assert "Volume vs AMS" in md or "AMS (MT)" in md

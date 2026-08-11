@@ -118,7 +118,7 @@ def test_matrix_defaults_business_unit_and_client_type() -> None:
             assert out["row_dimension"] == "business_unit"
             assert out["column_dimension"] == "client_type"
             matrix = out["matrix"]
-            assert "Eva Distributors" in matrix["columns"]
+            assert "Direct Customers" in matrix["columns"]  # Eva Distributors group
             # Columns sorted highest first (before Total)
             data_cols = [c for c in matrix["columns"] if c != "Total"]
             totals = [matrix["column_totals"][c] for c in data_cols]

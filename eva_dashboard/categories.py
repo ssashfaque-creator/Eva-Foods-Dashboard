@@ -14,6 +14,7 @@ BUSINESS_UNIT_ALIASES = {
     # Reports / PDF historically use Excel spelling "Cusine King"
     "cusine king": "Cusine King",
     "cuisine king": "Cusine King",
+    "cosine king": "Cusine King",
 }
 
 # Legacy header aliases → canonical internal keys
