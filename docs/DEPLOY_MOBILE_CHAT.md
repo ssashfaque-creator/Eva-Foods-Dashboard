@@ -12,7 +12,7 @@ Phone  →  Vercel (mobile-chat)  →  Cloudflare Tunnel  →  Mac bridge (:8787
 ## 1. Update the Mac app
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/b01787a80233d631620c16c586036d7e1d6b3c1f/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
+curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/ce55ad5451db0afcfdf3f98ea2e7f581200d066a/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 source .venv/bin/activate
 pip install -U 'fastapi>=0.110' 'uvicorn[standard]>=0.27' openai
