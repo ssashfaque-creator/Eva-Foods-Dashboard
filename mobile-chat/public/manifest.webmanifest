@@ -4,7 +4,7 @@
   "description": "Eva Foods sales analyst chat",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0d2419",
-  "theme_color": "#0d2419",
+  "background_color": "#eaf2ec",
+  "theme_color": "#eaf2ec",
   "lang": "en"
 }

@@ -4,12 +4,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-type ChatMessage = {
-  role: string;
-  content: string;
-  followup?: Record<string, unknown> | null;
-};
-
 function bridgeConfig() {
   const url = (process.env.EVA_BRIDGE_URL || "").replace(/\/$/, "");
   const secret = process.env.EVA_BRIDGE_SECRET || "";
@@ -29,11 +23,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: {
-    messages?: ChatMessage[];
-    model?: string;
-    reply_followup?: Record<string, unknown> | null;
-  };
+  let body: { followup?: Record<string, unknown>; format?: string };
   try {
     body = await req.json();
   } catch {
@@ -43,50 +33,59 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  if (!messages.length) {
+  if (!body.followup || typeof body.followup !== "object") {
     return NextResponse.json(
-      { ok: false, error: "messages required" },
+      { ok: false, error: "followup required" },
       { status: 400 }
     );
   }
 
+  const format = body.format === "pdf" ? "pdf" : "xlsx";
+
   try {
-    const upstream = await fetch(`${url}/chat`, {
+    const upstream = await fetch(`${url}/export`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${secret}`,
       },
-      body: JSON.stringify({
-        messages,
-        model: body.model || undefined,
-        reply_followup: body.reply_followup || undefined,
-      }),
+      body: JSON.stringify({ followup: body.followup, format }),
       signal: AbortSignal.timeout(55_000),
     });
 
-    const data = await upstream.json().catch(() => ({}));
     if (!upstream.ok) {
+      const data = await upstream.json().catch(() => ({}));
       return NextResponse.json(
         {
           ok: false,
           error:
             (data && (data.detail || data.error)) ||
-            `Bridge error (${upstream.status})`,
+            `Export failed (${upstream.status})`,
         },
         { status: upstream.status }
       );
     }
-    return NextResponse.json(data);
+
+    const blob = await upstream.arrayBuffer();
+    const disposition =
+      upstream.headers.get("Content-Disposition") ||
+      `attachment; filename="eva_table.${format}"`;
+    const contentType =
+      upstream.headers.get("Content-Type") || "application/octet-stream";
+
+    return new NextResponse(blob, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Disposition": disposition,
+      },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Bridge unreachable";
     return NextResponse.json(
       {
         ok: false,
-        error:
-          "Cannot reach your Mac bridge. Is `eva-dashboard bridge` running and Cloudflare Tunnel up? " +
-          msg,
+        error: "Cannot reach Mac bridge for export. " + msg,
       },
       { status: 502 }
     );

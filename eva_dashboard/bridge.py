@@ -21,17 +21,24 @@ from eva_dashboard.paths import db_path
 class ChatMessage(BaseModel):
     role: str
     content: str = ""
+    followup: dict[str, Any] | None = None
 
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
     model: str | None = None
+    reply_followup: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
     ok: bool = True
     reply: str
     messages: list[dict[str, Any]]
+
+
+class ExportRequest(BaseModel):
+    followup: dict[str, Any] = Field(default_factory=dict)
+    format: str = "xlsx"  # xlsx | pdf
 
 
 def _bridge_secret() -> str:
@@ -57,6 +64,7 @@ def create_app():
     try:
         from fastapi import FastAPI, Header, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import Response
     except ImportError as exc:
         raise RuntimeError(
             "Phone bridge needs fastapi + uvicorn. Run:\n"
@@ -136,28 +144,35 @@ def create_app():
                 ),
             )
         init_db()
-        history: list[dict[str, Any]] = [
-            {"role": m.role, "content": m.content or ""}
-            for m in payload.messages
-            if m.role in {"user", "assistant", "system"}
-        ]
-        # Drop any client-supplied system messages — bridge owns the prompt
-        history = [m for m in history if m["role"] != "system"]
+        history: list[dict[str, Any]] = []
+        for m in payload.messages:
+            if m.role not in {"user", "assistant"}:
+                continue
+            entry: dict[str, Any] = {
+                "role": m.role,
+                "content": m.content or "",
+            }
+            if m.followup and isinstance(m.followup, dict):
+                entry["_eva_followup"] = m.followup
+            history.append(entry)
         if not history or history[-1]["role"] != "user":
             raise HTTPException(
                 status_code=400, detail="Last message must be from the user"
             )
         model = (payload.model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        reply_meta = payload.reply_followup if isinstance(payload.reply_followup, dict) else {}
         try:
             reply, updated = chat_completion(
                 history,
                 api_key=api_key,
                 model=model,
+                forced_prior_spec=reply_meta.get("table_spec"),
+                forced_prior_price_spec=reply_meta.get("price_spec"),
+                forced_prior_party_spec=reply_meta.get("party_spec"),
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        # Only return roles/content safe for the phone UI
         safe_msgs: list[dict[str, Any]] = []
         for m in updated:
             role = m.get("role")
@@ -166,9 +181,63 @@ def create_app():
             content = m.get("content") or ""
             if not str(content).strip() and role == "assistant":
                 continue
-            safe_msgs.append({"role": role, "content": str(content)})
+            item: dict[str, Any] = {"role": role, "content": str(content)}
+            follow = m.get("_eva_followup")
+            if isinstance(follow, dict) and follow:
+                item["followup"] = follow
+            safe_msgs.append(item)
 
         return ChatResponse(ok=True, reply=reply or "", messages=safe_msgs)
+
+    @app.post("/export")
+    def export_table(
+        payload: ExportRequest,
+        authorization: str | None = Header(default=None),
+        x_eva_bridge_secret: str | None = Header(default=None),
+    ) -> Response:
+        """Excel / PDF export for a phone-chat follow-up payload."""
+        _check_secret(authorization, x_eva_bridge_secret)
+        init_db()
+        follow = payload.followup if isinstance(payload.followup, dict) else {}
+        if not follow:
+            raise HTTPException(status_code=400, detail="followup required")
+        fmt = (payload.format or "xlsx").strip().lower()
+        try:
+            from eva_dashboard.table_export import (
+                export_excel_from_followup,
+                export_pdf_from_followup,
+            )
+
+            if fmt == "pdf":
+                out = export_pdf_from_followup(follow)
+                if not out:
+                    raise HTTPException(status_code=422, detail="Nothing to export")
+                data, filename = out
+                return Response(
+                    content=data,
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{filename}"'
+                    },
+                )
+            out = export_excel_from_followup(follow)
+            if not out:
+                raise HTTPException(status_code=422, detail="Nothing to export")
+            data, filename = out
+            return Response(
+                content=data,
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"
+                ),
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"'
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return app
 

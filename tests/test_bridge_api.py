@@ -80,19 +80,31 @@ def test_chat_requires_secret_and_returns_reply() -> None:
                     "Hello from Eva",
                     [
                         {"role": "user", "content": "hi"},
-                        {"role": "assistant", "content": "Hello from Eva"},
+                        {
+                            "role": "assistant",
+                            "content": "Hello from Eva",
+                            "_eva_followup": {
+                                "table_spec": {"metric": "mt"},
+                            },
+                        },
                     ],
                 )
                 res = client.post(
                     "/chat",
                     headers={"Authorization": "Bearer test-secret-token"},
-                    json={"messages": [{"role": "user", "content": "hi"}]},
+                    json={
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "reply_followup": {"table_spec": {"metric": "mt"}},
+                    },
                 )
             assert res.status_code == 200, res.text
             body = res.json()
             assert body["ok"] is True
             assert body["reply"] == "Hello from Eva"
             assert body["messages"][-1]["role"] == "assistant"
+            assert body["messages"][-1]["followup"]["table_spec"]["metric"] == "mt"
+            kwargs = mock_chat.call_args.kwargs
+            assert kwargs.get("forced_prior_spec") == {"metric": "mt"}
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)
