@@ -277,6 +277,14 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 "title_mode": {"type": "string"},
                 "excludes": {
                     "type": "object",
+                    "description": (
+                        "EXCLUDE polarity — drop these values from the result. "
+                        "Use when the user says exclude / remove / without / "
+                        "except / but not / filter out. Keys: party, party_like, "
+                        "client_type, city, zone, business_unit, oil_type, "
+                        "packing_category, product, inactive. "
+                        "NEVER put the same value into filters.* (that is INCLUDE)."
+                    ),
                     "additionalProperties": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -307,9 +315,12 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "items": {"type": "string"},
                     "description": (
                         "Ambiguous brand/product/packing/city/party phrases "
-                        "(e.g. 'al shaheer', 'Metro Habib', 'Eva Consumer'). "
+                        "the user wants INCLUDED "
+                        "(e.g. 'Metro Habib', 'Eva Consumer'). "
                         "Python maps them: brands→business_units, unresolved "
-                        "names→silent party ILIKE. Prefer this over guessing."
+                        "names→silent party ILIKE. "
+                        "Do NOT list names the user asked to exclude/remove — "
+                        "those go in excludes only."
                     ),
                 },
                 "rationale": {"type": "string"},

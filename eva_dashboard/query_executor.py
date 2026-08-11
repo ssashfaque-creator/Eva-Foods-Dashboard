@@ -54,6 +54,13 @@ from eva_dashboard.sales_query import (
     query_sales,
 )
 from eva_dashboard.universal_pivot import execute_universal_pivot
+from eva_dashboard.spoken_constraints import (
+    apply_spoken_constraints,
+    extract_exclude_phrases as _spoken_exclude_phrases,
+    party_exclude_needles as _party_exclude_needles,
+    resolve_exclude_map as _resolve_spoken_excludes,
+    strip_include_conflicts as _strip_conflicting_party_includes,
+)
 
 
 def _norm_key(text: str) -> str:
@@ -74,169 +81,13 @@ def _expand_business_units(values: list[str] | None) -> list[str]:
     return out
 
 
-def _spoken_exclude_phrases(user_text: str) -> list[str]:
-    """Values named after exclude/remove/without/except (same-sentence or follow-up)."""
-    t = (user_text or "").strip()
-    if not t:
-        return []
-    phrases: list[str] = []
-    verbs = r"(?:exclude|excluding|remove|without|drop|hide|filter\s+out|except)"
-    for m in re.finditer(
-        rf"\b{verbs}\s+"
-        r"(?:the\s+)?(.+?)(?=\s+(?:and|,|;)\s+(?:exclude|excluding|remove|without|except)\b|"
-        r"\s+but\s+(?!exclude|excluding|remove|except)|$)",
-        t,
-        flags=re.IGNORECASE,
-    ):
-        raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
-        raw = re.sub(
-            r"\s+(items?|rows?|sales?|volumes?|data|from\s+this|again)\s*$",
-            "",
-            raw,
-            flags=re.IGNORECASE,
-        ).strip()
-        if raw:
-            phrases.append(raw)
-    # "but exclude X" / "again but exclude X"
-    for m in re.finditer(
-        rf"\bbut\s+(?:please\s+)?{verbs}\s+(.+)$",
-        t,
-        flags=re.IGNORECASE,
-    ):
-        raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
-        if raw and raw not in phrases:
-            phrases.append(raw)
-    return phrases
-
-
-def _resolve_spoken_excludes(user_text: str) -> dict[str, list[str]]:
-    """Turn spoken exclude phrases into an excludes dict (party / channel / BU…)."""
-    from eva_dashboard.chatbot import (
-        _resolve_exclude_value,
-        _split_remove_value_phrases,
-    )
-
-    out: dict[str, list[str]] = {}
-    for phrase in _spoken_exclude_phrases(user_text):
-        for part in _split_remove_value_phrases(phrase) or [phrase]:
-            resolved = _resolve_exclude_value(part)
-            part_s = str(part or "").strip()
-            if not resolved:
-                # Last resort: treat as party fragment so we never INCLUDE it
-                if len(part_s) >= 3:
-                    resolved = ("party_like", part_s)
-                else:
-                    continue
-            dim, val = resolved
-            bucket = out.setdefault(dim, [])
-            if val not in bucket:
-                bucket.append(val)
-            # Exact party resolve still adds a fragment exclude so sister
-            # branches / unmapped sales spellings drop too ("al shaheer").
-            if dim == "party" and len(part_s) >= 3:
-                like_bucket = out.setdefault("party_like", [])
-                if part_s not in like_bucket:
-                    like_bucket.append(part_s)
-    return out
-
-
-def _party_exclude_needles(excludes: dict[str, Any] | None) -> list[str]:
-    """Normalized needles for parties that must not appear as INCLUDE filters."""
-    needles: list[str] = []
-    ex = excludes or {}
-    for key in ("party", "party_like", "parties"):
-        for v in ex.get(key) or []:
-            n = _norm_key(str(v))
-            if n and n not in needles:
-                needles.append(n)
-    return needles
-
-
-def _strip_conflicting_party_includes(
-    spec: dict[str, Any],
-    excludes: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Exclude must win: never keep filters.party for a name we're excluding."""
-    out = dict(spec)
-    needles = _party_exclude_needles(excludes)
-    if not needles:
-        return out
-    filters = dict(out.get("filters") or {})
-
-    def _hits(val: Any) -> bool:
-        nv = _norm_key(str(val or ""))
-        if not nv:
-            return False
-        return any(n in nv or nv in n for n in needles)
-
-    if _hits(filters.get("party")):
-        filters.pop("party", None)
-    if _hits(out.get("party_query")):
-        out["party_query"] = None
-    parties = [p for p in (filters.get("parties") or []) if not _hits(p)]
-    if parties:
-        filters["parties"] = parties
-    else:
-        filters.pop("parties", None)
-    ilike = [p for p in (filters.get("party_ilike") or []) if not _hits(p)]
-    if ilike:
-        filters["party_ilike"] = ilike
-    else:
-        filters.pop("party_ilike", None)
-    # Drop extracted entities that were only the excluded name
-    ents = [
-        e
-        for e in (out.get("extracted_entities") or [])
-        if not _hits(e)
-    ]
-    out["extracted_entities"] = ents
-    out["filters"] = filters
-    return out
-
-
 def _enforce_exclude_wins(
     spec: dict[str, Any],
     *,
     user_text: str = "",
 ) -> dict[str, Any]:
-    """Hard gate: spoken exclude/remove always wins over party INCLUDE filters.
-
-    The planner often puts the excluded name into ``filters.party`` (include).
-    Sticky prior merge can also restore a previous mistaken party include.
-    This runs late — after merge / entity resolve / silent party match — so
-    nothing downstream can flip exclude → include again.
-    """
-    out = dict(spec)
-    spoken = _resolve_spoken_excludes(user_text) if user_text else {}
-    excludes = dict(out.get("excludes") or {})
-    for dim, vals in spoken.items():
-        bucket = list(excludes.get(dim) or [])
-        for v in vals or []:
-            if v not in bucket:
-                bucket.append(v)
-        excludes[dim] = bucket
-    if not excludes and not spoken:
-        return out
-    out["excludes"] = excludes
-
-    # If we're excluding a party (exact or fragment), clear party INCLUDE scope
-    # so prior merge / stick cannot put it back.
-    if excludes.get("party") or excludes.get("party_like") or excludes.get("parties"):
-        clear = list(out.get("clear") or [])
-        for key in (*PARTY_SCOPE_KEYS, "party_query"):
-            if key not in clear:
-                clear.append(key)
-        out["clear"] = clear
-        out["clear_filters"] = list(clear)
-        out["_clear_omitted"] = False
-        filters = dict(out.get("filters") or {})
-        for key in PARTY_SCOPE_KEYS:
-            filters.pop(key, None)
-        out["filters"] = filters
-        out["party_query"] = None
-
-    out = _strip_conflicting_party_includes(out, excludes)
-    return out
+    """Authoritative polarity gate (any entity, not one-off names)."""
+    return apply_spoken_constraints(spec, user_text=user_text)
 
 
 def _apply_extracted_entities(

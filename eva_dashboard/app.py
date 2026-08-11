@@ -566,6 +566,15 @@ def page_reports() -> None:
 
 def page_chat() -> None:
     st.subheader("AI Chat")
+    st.info(
+        f"**Engine v{__version__}** — polarity-aware (exclude/without/except "
+        f"never becomes an include filter). App file: `{Path(__file__).resolve()}`"
+    )
+    if not str(__version__).startswith("1.2"):
+        st.error(
+            "Wrong install — this is not v1.2.x. Stop the app (Ctrl+C) and "
+            "reinstall from branch `cursor/phase1-single-planner-50eb`."
+        )
     st.markdown(
         '<p class="eva-subtle">Answers come from your <b>live Eva database</b> only '
         "(not ChatGPT training memory). The assistant must query SQLite before giving numbers.</p>",
