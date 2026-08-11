@@ -12,7 +12,7 @@ Phone  →  Vercel (mobile-chat)  →  Cloudflare Tunnel  →  Mac bridge (:8787
 ## 1. Update the Mac app
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/642189d7fad0db2a3c726ce4ac73eb00d6095627/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
+curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/b01787a80233d631620c16c586036d7e1d6b3c1f/scripts/update.sh" | bash -s -- "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203"
 source .venv/bin/activate
 pip install -U 'fastapi>=0.110' 'uvicorn[standard]>=0.27' openai
@@ -67,25 +67,37 @@ Copy the HTTPS URL it prints, e.g. `https://random-words.trycloudflare.com`.
 
 ---
 
-## 4. Deploy the chat UI to Vercel
+## 4. Deploy the chat UI to Vercel (exact clicks)
 
-### Option A — Vercel website (easiest)
+> Deploy from branch `cursor/ai-chatbot-data-testing-ed65` until this PR is merged to `main`.
+> Or merge PR #8 first, then deploy from `main`.
 
-1. Go to [https://vercel.com](https://vercel.com) → **Add New… → Project**.
-2. Import `ssashfaque-creator/Eva-Foods-Dashboard` (GitHub).
-3. Configure:
-   - **Root Directory:** `mobile-chat`  ← click Edit, set this
+### Option A — Vercel website (recommended)
+
+1. Open [https://vercel.com/new](https://vercel.com/new) and sign in with **GitHub**.
+2. Import **`ssashfaque-creator/Eva-Foods-Dashboard`**.
+3. Before Deploy, open **Configure Project**:
    - **Framework Preset:** Next.js
-   - **Build Command:** `next build` (default)
-   - **Output:** default
-4. **Environment Variables** (Production + Preview):
+   - **Root Directory:** click **Edit** → select **`mobile-chat`** → Continue  
+     (this is required — do not deploy the repo root)
+   - **Build Command:** leave default (`next build`)
+   - **Install Command:** leave default (`npm install`)
+   - **Output Directory:** leave default
+4. Expand **Environment Variables** and add both (scope: **Production** and **Preview**):
 
    | Name | Value |
    |------|--------|
-   | `EVA_BRIDGE_URL` | `https://YOUR-tunnel.trycloudflare.com` (no trailing slash) |
-   | `EVA_BRIDGE_SECRET` | the Bridge secret from step 2 |
+   | `EVA_BRIDGE_URL` | `https://YOUR-tunnel.trycloudflare.com` — no trailing slash |
+   | `EVA_BRIDGE_SECRET` | exact Bridge secret printed in step 2 (or from `data/bridge_secret.txt`) |
 
-5. Click **Deploy**.
+5. Click **Deploy**. Wait until the build succeeds.
+6. Open the production URL Vercel gives you (e.g. `https://….vercel.app`) on your phone.
+
+**When the Cloudflare quick tunnel URL changes** (new `cloudflared` run):
+
+1. Vercel → your project → **Settings → Environment Variables**
+2. Edit `EVA_BRIDGE_URL` to the new HTTPS URL
+3. **Deployments → … on latest → Redeploy** (env changes need a redeploy)
 
 ### Option B — Vercel CLI
 
@@ -94,14 +106,16 @@ Copy the HTTPS URL it prints, e.g. `https://random-words.trycloudflare.com`.
 npm i -g vercel
 
 cd "$HOME/Eva-Foods-Dashboard-cursor-sales-dashboard-pdf-8203/mobile-chat"
+# ensure this folder is on the branch that has mobile-chat/
+git fetch origin
+git checkout cursor/ai-chatbot-data-testing-ed65
+git pull origin cursor/ai-chatbot-data-testing-ed65
+
 vercel login
-vercel link   # create/link project; set root to mobile-chat if asked
+vercel link   # create/link project; root is already mobile-chat if you cd'd here
 
-vercel env add EVA_BRIDGE_URL production
-# paste: https://YOUR-tunnel.trycloudflare.com
-
-vercel env add EVA_BRIDGE_SECRET production
-# paste: the bridge secret
+printf '%s' 'https://YOUR-tunnel.trycloudflare.com' | vercel env add EVA_BRIDGE_URL production
+printf '%s' 'PASTE_BRIDGE_SECRET_HERE' | vercel env add EVA_BRIDGE_SECRET production
 
 vercel --prod
 ```

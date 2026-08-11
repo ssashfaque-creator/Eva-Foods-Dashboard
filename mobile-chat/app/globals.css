@@ -146,22 +146,40 @@ a {
   animation: rise 800ms ease both;
 }
 
+.hero-brand {
+  margin: 0 0 14px;
+  font-family: var(--font-display);
+  font-size: clamp(2.4rem, 10vw, 3.2rem);
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+  color: #f7f1e4;
+  font-weight: 600;
+  animation: brandIn 700ms ease both;
+}
+
 .hero-empty h1 {
   margin: 0 0 10px;
-  font-family: var(--font-display);
-  font-size: clamp(2rem, 8vw, 2.6rem);
-  line-height: 1.05;
-  letter-spacing: -0.03em;
-  color: #f7f1e4;
-  font-weight: 550;
+  font-family: var(--font-body);
+  font-size: clamp(1.15rem, 4.2vw, 1.35rem);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--amber-soft);
+  font-weight: 500;
 }
 
 .hero-empty p {
   margin: 0 0 22px;
-  max-width: 28ch;
+  max-width: 30ch;
   color: rgba(247, 241, 228, 0.78);
-  font-size: 0.98rem;
+  font-size: 0.95rem;
   line-height: 1.45;
+}
+
+.hero-offline {
+  margin: 18px 0 0 !important;
+  max-width: 36ch !important;
+  font-size: 0.82rem !important;
+  color: rgba(255, 215, 208, 0.88) !important;
 }
 
 .suggestions {

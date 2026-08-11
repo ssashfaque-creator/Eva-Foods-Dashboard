@@ -245,10 +245,11 @@ export default function HomePage() {
       <main className="chat-scroll">
         {messages.length === 0 ? (
           <section className="hero-empty">
+            <p className="hero-brand">Eva Foods</p>
             <h1>Ask your live numbers.</h1>
             <p>
-              Sales, AMS, Price Fetch, parties — answered from the database on
-              your Mac. No API key on this phone.
+              Sales, AMS, Price Fetch, parties — from the database on your Mac.
+              No API key on this phone.
             </p>
             <div className="suggestions">
               {SUGGESTIONS.map((s) => (
@@ -257,12 +258,18 @@ export default function HomePage() {
                   type="button"
                   className="suggestion"
                   onClick={() => void send(s)}
-                  disabled={busy}
+                  disabled={busy || online === false}
                 >
                   {s}
                 </button>
               ))}
             </div>
+            {online === false ? (
+              <p className="hero-offline">
+                Waiting for Mac bridge… start `eva-dashboard bridge` and your
+                Cloudflare tunnel.
+              </p>
+            ) : null}
           </section>
         ) : (
           messages.map((m, i) => (
