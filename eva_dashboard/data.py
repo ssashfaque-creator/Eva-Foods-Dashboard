@@ -401,6 +401,98 @@ def cost_factor_per_kg(total_factor_cost: Any, unit: Any) -> float | None:
     return None
 
 
+def _finite_positive(value: Any) -> float | None:
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0 or pd.isna(n):
+        return None
+    return n
+
+
+def rate_unit_count(qty: Any, rate: Any, basic_amount: Any) -> float | None:
+    """How many sellable units Rate is priced for on one sales line.
+
+    ``sales.rate`` is per unit (carton / bottle / tin), not per kg.
+    Prefer ``qty`` when ``qty × rate ≈ basic_amount``; otherwise use
+    ``basic_amount / rate`` (handles lines where Qty is cartons but Rate is
+    per inner pack, e.g. 5 Ltr bottles inside a carton).
+    """
+    q = _finite_positive(qty)
+    r = _finite_positive(rate)
+    b = _finite_positive(basic_amount)
+    if r is not None and b is not None:
+        from_basic = b / r
+        if q is not None and abs(q * r - b) / b <= 0.02:
+            return q
+        return from_basic
+    return q
+
+
+def measure_unit_label(mes_unit: Any) -> str | None:
+    """Normalize Mes Unit to Kgs or Ltrs for pack-size labels."""
+    u = str(mes_unit or "").strip().lower()
+    if u in {"ltr", "ltrs", "liter", "litre", "liters", "litres", "l"}:
+        return "Ltrs"
+    if u in {"kg", "kgs", "kilogram", "kilograms"}:
+        return "Kgs"
+    return None
+
+
+def unit_pack_size(
+    mes_qty: Any,
+    mes_unit: Any,
+    unit_count: Any,
+    *,
+    mt_qty: Any = None,
+) -> tuple[float | None, str | None]:
+    """Kgs or Ltrs in one rate-unit: ``mes_qty / unit_count``.
+
+    Example: 2992 Kgs / 187 Ctn → (16.0, "Kgs"); 600 Ltrs / 120 → (5.0, "Ltrs").
+    Falls back to kg from MT only when Mes Qty is missing.
+    """
+    units = _finite_positive(unit_count)
+    if units is None:
+        return None, None
+    mes = _finite_positive(mes_qty)
+    label = measure_unit_label(mes_unit)
+    if mes is not None:
+        size = mes / units
+        if label is None:
+            # Infer from magnitude vs MT when unit text is blank
+            mt = _finite_positive(mt_qty)
+            if mt is not None:
+                kg_total = mt * 1000.0
+                # Oil/ghee in Ltrs: mes ≈ kg / 0.915
+                if abs(mes - kg_total) / max(kg_total, 1e-9) <= 0.05:
+                    label = "Kgs"
+                elif abs(mes * LTR_TO_KG - kg_total) / max(kg_total, 1e-9) <= 0.08:
+                    label = "Ltrs"
+        return size, label
+    mt = _finite_positive(mt_qty)
+    if mt is not None:
+        return (mt * 1000.0) / units, "Kgs"
+    return None, None
+
+
+def incl_gst_per_unit(incl_gst_fed_amount: Any, unit_count: Any) -> float | None:
+    """Incl GST/FED selling price for one rate-unit."""
+    units = _finite_positive(unit_count)
+    if units is None:
+        return None
+    try:
+        if incl_gst_fed_amount is None or (
+            isinstance(incl_gst_fed_amount, float) and pd.isna(incl_gst_fed_amount)
+        ):
+            return None
+        return float(incl_gst_fed_amount) / units
+    except (TypeError, ValueError):
+        return None
+
+
 def price_fetch_per_maund(amount_per_kg: Any, cost_per_kg: Any) -> float | None:
     """(Incl GST/FED per kg − cost factor per kg) × kg per maund.
 

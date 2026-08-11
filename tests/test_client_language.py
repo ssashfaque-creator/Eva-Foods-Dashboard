@@ -223,6 +223,8 @@ def test_query_price_rate_and_price_fetch() -> None:
             assert pf["cost_unit"] == "Ltrs"
             assert "Cost Factor (Ltrs)" in pf["answer_markdown"]
             assert "150" in pf["answer_markdown"]
+            assert "Incl GST / unit" in pf["answer_markdown"]
+            assert "Amount / kg" not in pf["answer_markdown"]
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

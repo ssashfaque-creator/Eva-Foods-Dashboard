@@ -123,7 +123,7 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "items": {"type": "string", "enum": list(PIVOT_METRICS)},
                     "description": (
                         "volume=MT; avg_price=PKR rate; "
-                        "price_fetch=Incl GST/kg − cost factor → per maund "
+                        "price_fetch=Incl GST/unit + cost factor + PF/maund "
                         "(engine computes; also for 'oil price fetched' / "
                         "'apply the cost factor' / 'Price Fetch' / 'recovery'); "
                         "ams / vs_ams / ams_growth for performance. "

@@ -23,8 +23,11 @@ from eva_dashboard.data import (
     _prior_n_month_ranges,
     _prior_three_month_ranges,
     cost_factor_per_kg,
+    incl_gst_per_unit,
     pct_change,
     price_fetch_per_maund,
+    rate_unit_count,
+    unit_pack_size,
     weighted_avg,
 )
 from eva_dashboard.client_type_map import (
@@ -3220,6 +3223,99 @@ def _cost_unit_label(unit: Any) -> str:
     return str(unit).strip() if unit not in (None, "") else "—"
 
 
+def _fmt_pack_size(size: float | None, measure: str | None) -> str | None:
+    """Pretty pack size like '5 Ltrs' or '16 Kgs'."""
+    if size is None or not measure:
+        return None
+    if abs(size - round(size)) < 1e-6:
+        return f"{int(round(size))} {measure}"
+    return f"{round(size, 3):g} {measure}"
+
+
+def _incl_gst_unit_label(pack_label: str | None) -> str:
+    if pack_label:
+        return f"Incl GST / unit ({pack_label})"
+    return "Incl GST / unit"
+
+
+def _line_unit_economics(row: pd.Series) -> dict[str, Any]:
+    """Derive rate-unit count, pack size, and Incl GST per unit for one line."""
+    units = rate_unit_count(row.get("qty"), row.get("rate"), row.get("basic_amount"))
+    size, measure = unit_pack_size(
+        row.get("mes_qty"),
+        row.get("mes_unit"),
+        units,
+        mt_qty=row.get("mt"),
+    )
+    # Don't treat bulk MT lines as a pack size (1000 kg/unit is not a SKU pack)
+    sales_unit = str(row.get("unit") or "").strip().lower()
+    if (
+        measure == "Kgs"
+        and size is not None
+        and size >= 500
+        and sales_unit in {"mt", "m.t", "m.t.", "ton", "tons", "tonne", "tonnes"}
+    ):
+        size, measure = None, None
+    incl_u = incl_gst_per_unit(row.get("incl_gst_fed_amount"), units)
+    return {
+        "rate_units": units,
+        "unit_size": size,
+        "unit_measure": measure,
+        "pack_label": _fmt_pack_size(size, measure),
+        "incl_gst_per_unit": incl_u,
+    }
+
+
+def _blend_unit_economics(frame: pd.DataFrame) -> dict[str, Any]:
+    """Unit-weighted Incl GST/unit when pack size is homogeneous across lines."""
+    empty = {
+        "incl_gst_per_unit": None,
+        "unit_size": None,
+        "unit_measure": None,
+        "pack_label": None,
+        "rate_units": None,
+    }
+    if frame.empty:
+        return empty
+    eco_rows = [_line_unit_economics(r) for _, r in frame.iterrows()]
+    usable = [
+        e
+        for e in eco_rows
+        if e.get("incl_gst_per_unit") is not None and e.get("rate_units")
+    ]
+    if not usable:
+        return empty
+    labels = {e.get("pack_label") for e in usable if e.get("pack_label")}
+    pack_label = next(iter(labels)) if len(labels) == 1 else None
+    # Mixed pack sizes → still blend Incl/unit only when all share same measure+size
+    sizes = {
+        (round(float(e["unit_size"]), 6), e["unit_measure"])
+        for e in usable
+        if e.get("unit_size") is not None and e.get("unit_measure")
+    }
+    if len(sizes) > 1:
+        pack_label = None
+        unit_size = None
+        unit_measure = None
+    elif len(sizes) == 1:
+        unit_size, unit_measure = next(iter(sizes))
+        pack_label = _fmt_pack_size(unit_size, unit_measure)
+    else:
+        unit_size = None
+        unit_measure = None
+    weights = pd.Series([float(e["rate_units"]) for e in usable], dtype=float)
+    values = pd.Series([float(e["incl_gst_per_unit"]) for e in usable], dtype=float)
+    blended = weighted_avg(values, weights, allow_unweighted_fallback=False)
+    total_units = float(weights.sum())
+    return {
+        "incl_gst_per_unit": round(float(blended), 2) if blended is not None else None,
+        "unit_size": unit_size,
+        "unit_measure": unit_measure,
+        "pack_label": pack_label,
+        "rate_units": round(total_units, 3) if total_units else None,
+    }
+
+
 def _blend_cost_factor(
     frame: pd.DataFrame,
     *,
@@ -3534,9 +3630,11 @@ def query_price(
 ) -> dict[str, Any]:
     """Average Rate (and optional Price Fetch / cost factor) from sales lines.
 
-    Rate = MT-weighted average of ``sales.rate``.
-    Amount/kg = Incl GST/FED ÷ (MT × 1000).
-    Price Fetch = (amount/kg − cost factor/kg) × maund factor, when factor_costs match.
+    Rate = MT-weighted average of ``sales.rate`` (rate is per sellable unit).
+    Incl GST / unit = Incl GST/FED ÷ rate-units; unit size = Mes Qty ÷ rate-units
+    (e.g. 5 Ltrs, 16 Kgs) from ``mes_unit``.
+    Price Fetch math still uses kg internally:
+    (Incl GST/kg − cost factor/kg) × maund, when factor_costs match.
     Cost factor is shown in its stored unit (Ltrs or Kgs).
 
     ``time_grain='month'`` → calendar-month time-series (not one aggregate block).
@@ -3641,8 +3739,11 @@ def query_price(
     SELECT
       s.date,
       s.product,
+      s.qty,
+      s.unit,
       s.rate,
       s.mes_qty,
+      s.mes_unit,
       s.incl_gst_fed_amount,
       s.basic_amount,
       COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
@@ -3698,6 +3799,10 @@ def query_price(
             "mt": 0.0,
             "avg_rate": None,
             "amount_per_kg": None,
+            "incl_gst_per_unit": None,
+            "unit_size": None,
+            "unit_measure": None,
+            "pack_label": None,
             "price_fetch": None,
             "cost_factor": None,
             "cost_unit": None,
@@ -3733,6 +3838,7 @@ def query_price(
     total_mt = float(mt_w.sum())
     total_kg = total_mt * 1000.0
     amount_per_kg = (total_incl / total_kg) if total_kg else None
+    blended_units = _blend_unit_economics(frame)
 
     # Line-level price fetch then MT-weighted average
     pf_vals: list[float] = []
@@ -3772,6 +3878,7 @@ def query_price(
         g_incl = float(grp["incl_gst_fed_amount"].fillna(0).sum())
         g_kg = g_mt * 1000.0
         g_apk = (g_incl / g_kg) if g_kg else None
+        g_units = _blend_unit_economics(grp)
         entry: dict[str, Any] = {
             "product": str(product_name),
             "business_unit": str(grp["business_unit"].iloc[0]),
@@ -3781,6 +3888,10 @@ def query_price(
             "mt": round(g_mt, 3),
             "avg_rate": round(float(g_rate), 2) if g_rate is not None else None,
             "amount_per_kg": round(float(g_apk), 4) if g_apk is not None else None,
+            "incl_gst_per_unit": g_units.get("incl_gst_per_unit"),
+            "unit_size": g_units.get("unit_size"),
+            "unit_measure": g_units.get("unit_measure"),
+            "pack_label": g_units.get("pack_label"),
         }
         g_factor = _blend_cost_factor(grp)
         entry["cost_factor"] = g_factor.get("cost_factor")
@@ -3858,6 +3969,7 @@ def query_price(
             g_incl = float(grp["incl_gst_fed_amount"].fillna(0).sum())
             g_kg = g_mt * 1000.0
             g_apk = (g_incl / g_kg) if g_kg else None
+            g_units = _blend_unit_economics(grp)
             by_month.append(
                 {
                     "month": str(month_key),
@@ -3867,17 +3979,30 @@ def query_price(
                     "amount_per_kg": (
                         round(float(g_apk), 4) if g_apk is not None else None
                     ),
+                    "incl_gst_per_unit": g_units.get("incl_gst_per_unit"),
+                    "pack_label": g_units.get("pack_label"),
                 }
             )
 
     blurb = _filter_blurb(filters, period_info)
     lines_md: list[str] = [f"Prices for {blurb}.\n"]
+    incl_unit_lbl = _incl_gst_unit_label(blended_units.get("pack_label"))
+    incl_unit_val = blended_units.get("incl_gst_per_unit")
+    incl_unit_txt = (
+        f"{incl_unit_val:,.2f}" if incl_unit_val is not None else "—"
+    )
 
     if grain == "month" and by_month:
         lines_md.append("### Monthly average price\n")
-        lines_md.append("| Month | Lines | Volume (MT) | Avg Rate | Amount/kg |")
+        price_col = (
+            incl_unit_lbl if include_price_fetch else "Incl GST / unit"
+        )
+        lines_md.append(
+            f"| Month | Lines | Volume (MT) | Avg Rate | {price_col} |"
+        )
         lines_md.append("| --- | --- | --- | --- | --- |")
         for row in by_month:
+            unit_price = row.get("incl_gst_per_unit")
             lines_md.append(
                 "| "
                 + " | ".join(
@@ -3886,9 +4011,9 @@ def query_price(
                         str(row["lines"]),
                         str(row["mt"]),
                         str(row["avg_rate"] if row["avg_rate"] is not None else "—"),
-                        str(
-                            row["amount_per_kg"]
-                            if row["amount_per_kg"] is not None
+                        (
+                            f"{unit_price:,.2f}"
+                            if unit_price is not None
                             else "—"
                         ),
                     ]
@@ -3906,12 +4031,27 @@ def query_price(
                 "| --- | --- |",
                 f"| Lines | {len(frame)} |",
                 f"| Volume (MT) | {round(total_mt, 3)} |",
-                f"| **Avg Rate** | "
-                f"**{round(float(avg_rate), 2) if avg_rate is not None else '—'}** |",
-                f"| Amount / kg (Incl GST/FED) | "
-                f"{round(float(amount_per_kg), 4) if amount_per_kg is not None else '—'} |",
             ]
         )
+        if include_price_fetch:
+            # Price Fetch view: Incl GST/unit + cost factor + PF/maund
+            # (never show Incl GST per kg — rate is per SKU unit)
+            if blended_units.get("pack_label"):
+                lines_md.append(
+                    f"| Unit size | {blended_units['pack_label']} "
+                    f"(from Mes Qty ÷ units) |"
+                )
+            lines_md.append(
+                f"| **{incl_unit_lbl}** | **{incl_unit_txt}** |"
+            )
+        else:
+            lines_md.append(
+                f"| **Avg Rate** | "
+                f"**{round(float(avg_rate), 2) if avg_rate is not None else '—'}** |"
+            )
+            lines_md.append(
+                f"| {incl_unit_lbl} | {incl_unit_txt} |"
+            )
         unit_lab = blended_factor.get("cost_unit_label")
         if include_cost_factor:
             if (
@@ -3942,16 +4082,24 @@ def query_price(
                 lines_md.append("| **Cost Factor** | — (no factor cost match) |")
         if include_price_fetch:
             pf_txt = (
-                round(float(blended_pf), 2)
+                f"{round(float(blended_pf), 2):,.2f}"
                 if blended_pf is not None
                 else "— (no factor cost match)"
             )
             lines_md.append(f"| **Price Fetch** (per maund) | **{pf_txt}** |")
+            pack_note = ""
+            if blended_units.get("pack_label"):
+                pack_note = (
+                    f" Incl GST is per sellable unit "
+                    f"({blended_units['pack_label']} from Mes Qty ÷ rate-units)."
+                )
             lines_md.append(
-                "\n_Price Fetch = (Incl GST/FED per kg − cost factor per kg) × "
+                "\n_Price Fetch uses kg internally: "
+                "(Incl GST/FED per kg − cost factor per kg) × "
                 f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund "
                 f"(Ltrs costs ÷ {LTR_TO_KG}). "
-                "Cost Factor is shown in its stored unit (Ltrs or Kgs)._"
+                f"Cost Factor is shown in its stored unit (Ltrs or Kgs)."
+                f"{pack_note}_"
             )
         elif not include_cost_factor:
             lines_md.append(
@@ -3961,43 +4109,70 @@ def query_price(
 
         if len(by_product) > 1:
             lines_md.append("\n### By product\n")
-            hdr = "| Product | Packing | MT | Avg Rate | Amount/kg |"
-            if include_cost_factor:
-                hdr += " Cost Factor | Unit |"
             if include_price_fetch:
-                hdr += " Price Fetch |"
-            lines_md.append(hdr)
-            lines_md.append(
-                "| --- | --- | --- | --- | --- |"
-                + (" --- | --- |" if include_cost_factor else "")
-                + (" --- |" if include_price_fetch else "")
-            )
-            for row in by_product[:15]:
-                cells = [
-                    str(row["product"]).replace("|", "/"),
-                    str(row["packing_category"]).replace("|", "/"),
-                    str(row["mt"]),
-                    str(row["avg_rate"] if row["avg_rate"] is not None else "—"),
-                    str(
-                        row["amount_per_kg"]
-                        if row["amount_per_kg"] is not None
-                        else "—"
-                    ),
-                ]
-                if include_cost_factor:
-                    cells.append(
-                        str(row["cost_factor"] if row["cost_factor"] is not None else "—")
-                    )
-                    cells.append(str(row["cost_unit"] or "—"))
-                if include_price_fetch:
-                    cells.append(
+                hdr = (
+                    "| Product | Packing | MT | Unit size | Incl GST/unit | "
+                    "Cost Factor | Unit | Price Fetch |"
+                )
+                lines_md.append(hdr)
+                lines_md.append(
+                    "| --- | --- | --- | --- | --- | --- | --- | --- |"
+                )
+                for row in by_product[:15]:
+                    cells = [
+                        str(row["product"]).replace("|", "/"),
+                        str(row["packing_category"]).replace("|", "/"),
+                        str(row["mt"]),
+                        str(row.get("pack_label") or "—"),
+                        (
+                            f"{row['incl_gst_per_unit']:,.2f}"
+                            if row.get("incl_gst_per_unit") is not None
+                            else "—"
+                        ),
+                        str(
+                            row["cost_factor"]
+                            if row["cost_factor"] is not None
+                            else "—"
+                        ),
+                        str(row["cost_unit"] or "—"),
                         str(
                             row["price_fetch"]
                             if row["price_fetch"] is not None
                             else "—"
+                        ),
+                    ]
+                    lines_md.append("| " + " | ".join(cells) + " |")
+            else:
+                hdr = "| Product | Packing | MT | Avg Rate | Incl GST/unit |"
+                if include_cost_factor:
+                    hdr += " Cost Factor | Unit |"
+                lines_md.append(hdr)
+                lines_md.append(
+                    "| --- | --- | --- | --- | --- |"
+                    + (" --- | --- |" if include_cost_factor else "")
+                )
+                for row in by_product[:15]:
+                    cells = [
+                        str(row["product"]).replace("|", "/"),
+                        str(row["packing_category"]).replace("|", "/"),
+                        str(row["mt"]),
+                        str(row["avg_rate"] if row["avg_rate"] is not None else "—"),
+                        (
+                            f"{row['incl_gst_per_unit']:,.2f}"
+                            if row.get("incl_gst_per_unit") is not None
+                            else "—"
+                        ),
+                    ]
+                    if include_cost_factor:
+                        cells.append(
+                            str(
+                                row["cost_factor"]
+                                if row["cost_factor"] is not None
+                                else "—"
+                            )
                         )
-                    )
-                lines_md.append("| " + " | ".join(cells) + " |")
+                        cells.append(str(row["cost_unit"] or "—"))
+                    lines_md.append("| " + " | ".join(cells) + " |")
 
     return {
         "ok": True,
@@ -4007,6 +4182,10 @@ def query_price(
         "mt": round(total_mt, 3),
         "avg_rate": round(float(avg_rate), 2) if avg_rate is not None else None,
         "amount_per_kg": round(float(amount_per_kg), 4) if amount_per_kg is not None else None,
+        "incl_gst_per_unit": blended_units.get("incl_gst_per_unit"),
+        "unit_size": blended_units.get("unit_size"),
+        "unit_measure": blended_units.get("unit_measure"),
+        "pack_label": blended_units.get("pack_label"),
         "price_fetch": round(float(blended_pf), 2) if blended_pf is not None else None,
         "cost_factor": blended_factor.get("cost_factor"),
         "cost_unit": blended_factor.get("cost_unit_label"),
@@ -4024,6 +4203,7 @@ def query_price(
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim. "
             "Keep `price_spec` for follow-ups like 'what's the Price Fetch?' "
-            "or 'what's the cost factor?' / factor breakdown."
+            "or 'what's the cost factor?' / factor breakdown. "
+            "Show Incl GST per unit (SKU pack), not per kg."
         ),
     }

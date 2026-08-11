@@ -210,6 +210,8 @@ def test_price_fetch_metric_uses_engine_math() -> None:
             md = out.get("answer_markdown") or ""
             assert "Price Fetch" in md
             assert "Cost Factor" in md
+            assert "Amount / kg" not in md
+            assert "Incl GST / unit" in md
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

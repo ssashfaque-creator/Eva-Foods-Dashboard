@@ -77,7 +77,8 @@ def vocabulary_for_prompt() -> str:
         "- Price Fetch / recovery / 'oil price fetched' / 'apply the cost factor'",
         "  / 'what's the cost factor' → metrics=[\"price_fetch\"].",
         "  Do NOT calculate Price Fetch yourself; the engine joins factor_costs",
-        "  and returns Avg Price (Incl GST/kg), Cost Factor, Price Fetch/maund.",
+        "  and returns Incl GST/unit (SKU pack size from Mes Qty÷units), "
+        "Cost Factor (Ltrs/Kgs), Price Fetch/maund.",
         "- monthly price trends → column_dimensions=[\"month\"] + avg_price.",
         "- customer-wise price trends → row_dimensions=[\"party\"],",
         "  column_dimensions=[\"month\"], metrics=[\"avg_price\"].",
