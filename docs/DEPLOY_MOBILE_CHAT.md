@@ -49,11 +49,40 @@ curl -s http://127.0.0.1:8787/health
 
 ## 3. Expose the Mac with Cloudflare Tunnel (free)
 
-Install cloudflared (one-time):
+### Install cloudflared (one-time) — prefer direct download
+
+Homebrew often fails with `Git is unavailable`. Use the official binary instead.
+
+**Option A — .pkg installer (easiest, no Terminal needed for install)**
+
+1. Open [cloudflared releases](https://github.com/cloudflare/cloudflared/releases/latest).
+2. Download:
+   - Apple Silicon (M1/M2/M3/M4): **`cloudflared-arm64.pkg`**
+   - Intel Mac: **`cloudflared-amd64.pkg`**
+3. Double-click the `.pkg` → Install.
+4. Quit and reopen Terminal, then check: `cloudflared --version`
+
+**Option B — Terminal download (Apple Silicon)**
 
 ```bash
-brew install cloudflare/cloudflare/cloudflared
+cd /tmp
+curl -L -o cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
+tar -xzf cloudflared.tgz
+sudo mkdir -p /usr/local/bin
+sudo mv cloudflared /usr/local/bin/cloudflared
+sudo chmod +x /usr/local/bin/cloudflared
+cloudflared --version
 ```
+
+Intel Mac: use `cloudflared-darwin-amd64.tgz` instead of `…-arm64.tgz`.
+
+**Option C — Homebrew** (only if Git works: `xcode-select --install` first)
+
+```bash
+brew install cloudflared
+```
+
+### Start the tunnel
 
 In a **second** terminal, while the bridge is running:
 
