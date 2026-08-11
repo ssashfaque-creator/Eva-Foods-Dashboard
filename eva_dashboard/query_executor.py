@@ -603,11 +603,23 @@ def _coerce_vocab_from_user_text(
                 out["excludes"] = excludes
                 if out.get("base") != "prior":
                     out["base"] = "prior"
-                # Keep grain from prior when planner left rows empty/wrong
-                if not rows and prior_rows:
+                # Value excludes must keep the prior table shape — only data changes
+                if prior_rows:
                     rows = list(prior_rows)
-                if not cols and prior.get("column_dimensions"):
-                    cols = list(prior.get("column_dimensions") or [])
+                prior_cols = list(
+                    prior.get("column_dimensions")
+                    or (
+                        [prior.get("column_dimension")]
+                        if prior.get("column_dimension")
+                        else []
+                    )
+                )
+                if prior_cols:
+                    cols = [c for c in prior_cols if c]
+                # Keep prior metrics when planner thinned them
+                prior_mets = list(prior.get("metrics") or [])
+                if prior_mets and not (set(metrics) - {"volume"}):
+                    metrics = prior_mets
             elif removed and removed.get("mode") == "remove_layer":
                 leaf = removed.get("row_dimension")
                 groups = list(removed.get("row_groups") or [])
@@ -965,6 +977,32 @@ def execute_query_spec(
             spec["metrics"] = ["volume", "ams", "vs_ams"]
         if not spec.get("row_dimensions"):
             spec["row_dimensions"] = ["party"]
+    # "who is X" → identity lookup (never a sales matrix / tool loop)
+    if (
+        spec.get("operation") in {"", "pivot", None, "party_profile"}
+        and re.search(r"\b(who\s+is|who'?s)\b", (user_text or "").lower())
+        and not re.search(
+            r"\b(sales?|volume|ams|price|growth|doing|performance)\b",
+            (user_text or "").lower(),
+        )
+    ):
+        spec["operation"] = "party_lookup"
+        spec["intent"] = "party_lookup"
+        if not spec.get("party_query"):
+            ents = list(spec.get("extracted_entities") or [])
+            filt_party = (spec.get("filters") or {}).get("party")
+            if filt_party:
+                spec["party_query"] = filt_party
+            elif ents:
+                spec["party_query"] = ents[0]
+            else:
+                m = re.search(
+                    r"\b(?:who\s+is|who'?s)\s+(.+?)(?:\?|$)",
+                    user_text or "",
+                    flags=re.IGNORECASE,
+                )
+                if m:
+                    spec["party_query"] = m.group(1).strip(" .,!?")
     spec["business_units"] = _expand_business_units(
         list(spec.get("business_units") or [])
     )
@@ -1092,22 +1130,40 @@ def execute_query_spec(
             active_only=bool(filters.get("active_only")),
         )
     elif operation == "party_lookup" or intent == "party_lookup":
-        # "who is al shaheer" — keep match list UI via lookup_party
-        q = spec.get("party_query") or filters.get("party") or ""
-        if phrase:
-            result = party_sales(
-                query=q, period=phrase, columns="city", mode="trend"
+        # "who is al shaheer" → identity match card (not a sales matrix).
+        # Sales for a named party belongs on pivot / party_profile.
+        q = (
+            spec.get("party_query")
+            or filters.get("party")
+            or (
+                (filters.get("party_ilike") or [None])[0]
+                if filters.get("party_ilike")
+                else None
             )
-        else:
-            result = party_sales(
-                query=q,
-                period=None,
-                columns="month",
-                months_back=mb,
-                mode="matrix",
-            )
-        if result.get("ok") is False:
-            result = lookup_party(q, limit=int(spec.get("limit") or 10))
+            or ""
+        )
+        # Prefer extracted entity when planner left party_query empty
+        if not str(q).strip():
+            ents = list(spec.get("extracted_entities") or [])
+            q = ents[0] if ents else ""
+        result = lookup_party(str(q), limit=int(spec.get("limit") or 10))
+        # Single strong match → stamp sticky party for follow-ups
+        matches = list(result.get("matches") or [])
+        if len(matches) == 1 and float(matches[0].get("match_score") or 0) >= 0.72:
+            name = str(matches[0].get("client") or "").strip()
+            if name:
+                result["party"] = name
+                result["party_spec"] = {
+                    "kind": "party_lookup",
+                    "filters": {"party": name},
+                }
+                result["table_spec"] = {
+                    "filters": {"party": name},
+                    "row_dimension": "party",
+                    "row_dimensions": ["party"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                }
     elif operation == "party_profile" or intent == "party_profile":
         q = (
             spec.get("party_query")

@@ -170,6 +170,11 @@ def apply_metric_synonyms_to_spec(
 
     op = str(out.get("operation") or "pivot")
     op_hint = resolve_operation_from_text(text)
+    if op_hint == "party_lookup" and op in {"", "pivot", "None", "none", "party_profile"}:
+        # "who is X" wins over profile when both synonyms could match
+        if re.search(r"\b(who\s+is|who'?s)\b", text.lower()):
+            out["operation"] = "party_lookup"
+            out["intent"] = "party_lookup"
     if op_hint == "party_profile" and op in {"", "pivot", "None", "none"}:
         # Only promote when a party scope exists or entities were extracted
         filters = dict(out.get("filters") or {})

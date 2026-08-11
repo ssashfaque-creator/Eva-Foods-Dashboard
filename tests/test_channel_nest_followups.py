@@ -277,6 +277,142 @@ def test_execute_add_city_under_bu() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_who_is_al_shaheer_lookup_not_sales() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            init_db()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('1', 'AL SHAHEER CORPORATION LIMITED', 'Eva Distributors', "
+                    "'Lahore', 'Lahore', '', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES "
+                    "('P1', 'Eva Consumer', 'Eva Canola', 'Stand up', '{}', "
+                    "datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                      payload_json
+                    ) VALUES (NULL, 'as-1', datetime('now'), '2026-07-01',
+                      'AL SHAHEER CORPORATION LIMITED', 'P1', 10, 'MT', 10, 100,
+                      1000, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+            out = execute_query_spec(
+                {
+                    "operation": "pivot",
+                    "row_dimensions": ["party"],
+                    "metrics": ["volume"],
+                    "period_type": "MTD",
+                    "context_handling": "none",
+                    "extracted_entities": ["al shaheer"],
+                },
+                user_text="who is al shaheer",
+            )
+            assert out.get("ok") is True, out
+            assert out.get("mode") != "party_sales"
+            md = out.get("answer_markdown") or ""
+            assert "AL SHAHEER CORPORATION LIMITED" in md
+            assert "Client search" in md or out.get("matches")
+            matches = out.get("matches") or []
+            assert any(
+                "SHAHEER" in str(m.get("client") or "").upper() for m in matches
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_exclude_al_shaheer_keeps_table_grain() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('8', 'AL SHAHEER CORPORATION LIMITED', 'Eva Distributors', "
+                    "'Lahore', 'Lahore', '', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                      payload_json
+                    ) VALUES (NULL, 'as-ex', datetime('now'), '2026-07-15',
+                      'AL SHAHEER CORPORATION LIMITED', 'P1', 40, 'MT', 40, 100,
+                      4000, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+            base = execute_query_spec(
+                {
+                    "row_dimensions": ["business_unit"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "none",
+                    "filters": {"city": "Lahore"},
+                    "business_units": ["Eva Consumer", "Eva Bulk"],
+                },
+                user_text="Lahore Eva sales last 6 months",
+            )
+            assert base.get("ok"), base.get("error")
+            prior = prior_context_from_query_state(base.get("query_state"))
+            # Planner wrongly changes grain — coerce must restore prior shape
+            out = execute_query_spec(
+                {
+                    "row_dimensions": ["party"],
+                    "column_dimensions": ["city"],
+                    "metrics": ["volume"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "prior",
+                    "clear_filters": [],
+                    "filters": {},
+                },
+                prior=prior,
+                user_text="exclude al shaheer",
+            )
+            assert out.get("ok"), out.get("error")
+            spec = out.get("query_spec") or {}
+            assert spec.get("row_dimensions") == ["business_unit"]
+            assert "month" in (spec.get("column_dimensions") or [])
+            ex = spec.get("excludes") or {}
+            party_ex = ex.get("party") or []
+            like_ex = ex.get("party_like") or []
+            blob = " ".join(str(x).lower() for x in party_ex + like_ex)
+            assert "shaheer" in blob
+            md = (out.get("answer_markdown") or "").lower()
+            assert "al shaheer corporation limited" not in md or "excl" in (
+                (out.get("answer_markdown") or "").lower()
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_exclude_donation_sales_resolves() -> None:
     prior = {
         "row_dimension": "business_unit",

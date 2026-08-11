@@ -2138,10 +2138,14 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
         meta = _clients_lookup().get(needle)
         if meta and meta.get("client"):
             return ("party", str(meta["client"]))
-        # Fuzzy: substring / token overlap against master (e.g. typo'd names)
-        from eva_dashboard.party_match import list_party_matches
+        # Fuzzy: substring / token overlap against master
+        # (e.g. "al shaheer" → AL SHAHEER CORPORATION LIMITED)
+        from eva_dashboard.party_match import list_party_matches, resolve_party_filter
 
-        matches = list_party_matches(raw, limit=5)
+        resolved = resolve_party_filter(raw, limit=8)
+        if resolved.get("party"):
+            return ("party", str(resolved["party"]))
+        matches = list(resolved.get("matches") or list_party_matches(raw, limit=8))
         if len(matches) == 1:
             return ("party", matches[0])
         if matches:
@@ -2153,6 +2157,14 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
             ]
             if len(tight) == 1:
                 return ("party", tight[0])
+            # Family / multi-branch → fragment exclude (LIKE %al shaheer%)
+            return ("party_like", raw.strip())
+        # Unknown spoken name — still exclude via fragment so the table
+        # grain stays and matching parties drop out of the data.
+        if len(needle) >= 3 and not re.search(
+            r"\b(sales?|volume|data|wise|month|ams)\b", key
+        ):
+            return ("party_like", raw.strip())
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -5823,6 +5835,13 @@ def should_redirect_to_plan_query(name: str, *, user_text: str = "") -> bool:
 
 def plan_query_redirect_result(name: str) -> dict[str, Any]:
     """Tool payload that forces the model back onto the Universal Pivot."""
+    who_hint = ""
+    if name == "lookup_party":
+        who_hint = (
+            "For \"who is X\" use plan_query with operation=party_lookup "
+            "and party_query (or extracted_entities) set to the name — "
+            "do not call lookup_party."
+        )
     return {
         "ok": False,
         "error": (
@@ -5839,10 +5858,12 @@ def plan_query_redirect_result(name: str) -> dict[str, Any]:
             "% of AMS → metrics=['vs_ams']; "
             "days since last invoice → operation=advanced, "
             "advanced_mode=days_since_invoice.",
+            *( [who_hint] if who_hint else [] ),
         ],
         "response_instructions": (
             "REQUIRED: Call plan_query again with a complete QuerySpec. "
             "Do not invent numbers."
+            + (f" {who_hint}" if who_hint else "")
         ),
     }
 
