@@ -23,6 +23,7 @@ _FOLLOWUP_KEYS = (
     "table_spec",
     "price_spec",
     "party_spec",
+    "query_state",
     "export",
 )
 
@@ -254,6 +255,7 @@ def create_app():
                 forced_prior_spec=reply_meta.get("table_spec"),
                 forced_prior_price_spec=reply_meta.get("price_spec"),
                 forced_prior_party_spec=reply_meta.get("party_spec"),
+                forced_query_state=reply_meta.get("query_state"),
             )
         except Exception as exc:  # noqa: BLE001
             print("BRIDGE /chat error:", _chat_error_detail(exc), flush=True)

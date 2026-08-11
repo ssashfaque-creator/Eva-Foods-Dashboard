@@ -93,6 +93,8 @@ def vocabulary_for_prompt() -> str:
         "- Compare two customers → filters.parties=[\"al shaheer\",\"Alpha Dist\"]",
         "  + row_dimensions=[\"party\"].",
         "- \"who is X\" → operation=party_lookup (match list).",
+        "- \"tell me about X\" / customer profile / rundown → "
+        "operation=party_profile (volume, AMS, % vs AMS, last purchase, rate).",
         "",
         "11. PERFORMANCE METRICS",
         "- lowest/worst performing → metrics=[\"vs_ams\"], sort_order=asc,",
@@ -232,6 +234,11 @@ Examples:
   metrics=["ams_growth"]; plan_query #2: filters.client_type=Imtiaz Store,
   metrics=["ams_growth"]; then compare both tables in Analysis
 - \"who is al shaheer\" → operation=party_lookup, party_query="al shaheer"
+- \"tell me about Alpha Dist\" / \"customer profile for al shaheer\" /
+  \"give me a rundown on Alpha Dist\" → operation=party_profile,
+  party_query or filters.party / extracted_entities, period_type=MTD
+  (or SPECIFIC_MONTH). Returns volume, AMS, % vs AMS, last purchase,
+  avg rate, top SKUs — then follow up with price / SKU-wise via prior.
 - After brand table: \"distributor-wise, lowest performing\" →
   context_handling=prior, row_dimensions=["party"], metrics=["vs_ams"],
   sort_order=asc, clear_filters=["client_type"]

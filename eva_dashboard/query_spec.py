@@ -21,6 +21,7 @@ INTENTS = {
     "party_list",
     "party_rank",
     "party_lookup",
+    "party_profile",
     "price",
     "advanced",
     "overview",
@@ -87,6 +88,7 @@ OPERATIONS = (
     "pivot",
     "party_list",
     "party_lookup",
+    "party_profile",
     "overview",
     "advanced",
 )
@@ -142,8 +144,10 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": list(OPERATIONS),
                     "description": (
-                        "Optional. Default 'pivot'. Use party_list / "
-                        "party_lookup / overview / advanced only for non-table asks."
+                        "Optional. Default 'pivot'. Use party_profile for "
+                        "'tell me about X' / customer rundown (volume, AMS, "
+                        "% vs AMS, last purchase, avg rate, top SKUs). "
+                        "Also: party_list / party_lookup / overview / advanced."
                     ),
                 },
                 "context_handling": {
@@ -360,6 +364,153 @@ def _party_scope_from_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
             continue
         out[key] = val
     return out
+
+
+def build_query_state(
+    *,
+    query_spec: dict[str, Any] | None = None,
+    table_spec: dict[str, Any] | None = None,
+    party_spec: dict[str, Any] | None = None,
+    price_spec: dict[str, Any] | None = None,
+    result_mode: str | None = None,
+) -> dict[str, Any] | None:
+    """Unified multi-turn state stamped on assistant turns / Reply payloads."""
+    qs = dict(query_spec or {})
+    filters: dict[str, Any] = {}
+    for src in (
+        qs.get("filters"),
+        (table_spec or {}).get("filters"),
+        (party_spec or {}).get("filters"),
+        (price_spec or {}).get("filters"),
+    ):
+        for k, v in dict(src or {}).items():
+            if v not in (None, "", []) and k not in filters:
+                filters[k] = v
+    party_scope = _party_scope_from_filters(filters)
+    bus = (
+        list(qs.get("business_units") or [])
+        or list((table_spec or {}).get("business_units") or [])
+        or list((party_spec or {}).get("business_units") or [])
+    )
+    period = (
+        qs.get("period")
+        or (table_spec or {}).get("period")
+        or (party_spec or {}).get("period")
+        or (price_spec or {}).get("period")
+    )
+    period_phrase = (
+        qs.get("period_phrase")
+        or (table_spec or {}).get("period_phrase")
+        or (party_spec or {}).get("period_phrase")
+        or (price_spec or {}).get("period_phrase")
+        or (isinstance(period, dict) and period.get("label"))
+        or None
+    )
+    rows = list(
+        qs.get("row_dimensions")
+        or (table_spec or {}).get("row_dimensions")
+        or (
+            [(table_spec or {}).get("row_dimension")]
+            if (table_spec or {}).get("row_dimension")
+            else []
+        )
+    )
+    cols = list(
+        qs.get("column_dimensions")
+        or (table_spec or {}).get("column_dimensions")
+        or (
+            [(table_spec or {}).get("column_dimension")]
+            if (table_spec or {}).get("column_dimension")
+            else []
+        )
+    )
+    metrics = list(
+        qs.get("metrics")
+        or (table_spec or {}).get("metrics")
+        or []
+    )
+    operation = (
+        qs.get("operation")
+        or (
+            "party_profile"
+            if result_mode == "party_profile" or (party_spec or {}).get("kind") == "party_profile"
+            else None
+        )
+        or qs.get("intent")
+        or "pivot"
+    )
+    state = _compact(
+        {
+            "operation": operation,
+            "result_mode": result_mode or qs.get("intent"),
+            "filters": _compact(filters),
+            "party_scope": party_scope or None,
+            "business_units": bus or None,
+            "row_dimensions": [r for r in rows if r] or None,
+            "column_dimensions": [c for c in cols if c] or None,
+            "metrics": metrics or None,
+            "period_phrase": period_phrase,
+            "period": period if isinstance(period, dict) else None,
+            "months_back": (
+                qs.get("months_back")
+                or (table_spec or {}).get("months_back")
+                or (party_spec or {}).get("months_back")
+            ),
+            "excludes": qs.get("excludes") or (table_spec or {}).get("excludes"),
+        }
+    )
+    if not state:
+        return None
+    if not any(
+        state.get(k)
+        for k in (
+            "filters",
+            "party_scope",
+            "business_units",
+            "row_dimensions",
+            "metrics",
+            "period",
+            "period_phrase",
+        )
+    ):
+        return None
+    return state
+
+
+def prior_context_from_query_state(
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Convert stamped query_state into PRIOR_QUERY_CONTEXT shape."""
+    if not state:
+        return None
+    return _compact(
+        {
+            "source": "query_state",
+            "intent_hint": state.get("result_mode") or state.get("operation"),
+            "filters": _compact(dict(state.get("filters") or {})),
+            "party_scope": state.get("party_scope")
+            or _party_scope_from_filters(state.get("filters")),
+            "business_units": list(state.get("business_units") or []) or None,
+            "row_dimensions": list(state.get("row_dimensions") or []) or None,
+            "column_dimensions": list(state.get("column_dimensions") or []) or None,
+            "metrics": list(state.get("metrics") or []) or None,
+            "row_dimension": (
+                (state.get("row_dimensions") or [None])[-1]
+                if state.get("row_dimensions")
+                else None
+            ),
+            "column_dimension": (
+                (state.get("column_dimensions") or [None])[0]
+                if state.get("column_dimensions")
+                else None
+            ),
+            "months_back": state.get("months_back"),
+            "period_phrase": state.get("period_phrase"),
+            "period": state.get("period"),
+            "excludes": state.get("excludes"),
+            "operation": state.get("operation"),
+        }
+    )
 
 
 def prior_context_payload(
@@ -580,6 +731,7 @@ def _derive_intent_from_universal(
         return {
             "party_list": "party_list",
             "party_lookup": "party_lookup",
+            "party_profile": "party_profile",
             "overview": "overview",
             "advanced": "advanced",
         }.get(operation, operation)
@@ -610,6 +762,8 @@ def _legacy_intent_to_universal(
         return ["party"], [], ["volume"], "party_list"
     if intent == "party_lookup":
         return ["party"], [], ["volume"], "party_lookup"
+    if intent == "party_profile":
+        return ["party"], [], ["volume", "ams", "vs_ams"], "party_profile"
     if intent == "overview":
         return [], [], ["volume"], "overview"
     if intent == "advanced":
@@ -657,6 +811,7 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "list_clients": "party_list",
         "analyze_parties": "party_rank",
         "lookup_party": "party_lookup",
+        "party_profile": "party_profile",
         "query_price": "price",
         "query_sales": "sales_trend",
         "advanced_query": "advanced",
@@ -956,6 +1111,19 @@ def validate_query_spec(
         spec.get("party_query") or (spec.get("filters") or {}).get("party")
     ):
         errors.append("party_lookup requires party_query (the party name).")
+    if (
+        spec.get("intent") == "party_profile"
+        or spec.get("operation") == "party_profile"
+    ) and not (
+        spec.get("party_query")
+        or (spec.get("filters") or {}).get("party")
+        or (spec.get("filters") or {}).get("parties")
+        or (spec.get("filters") or {}).get("party_ilike")
+    ):
+        errors.append(
+            "party_profile requires party_query or filters.party "
+            "(the customer name)."
+        )
 
     # Strict categorical enums (Enterprise Semantic Layer)
     from eva_dashboard.entity_catalog import validate_categorical_filters

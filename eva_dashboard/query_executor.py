@@ -25,6 +25,7 @@ from eva_dashboard.client_language import (
     normalize_packing_category,
 )
 from eva_dashboard.geo import normalize_zone
+from eva_dashboard.advanced_analytics import party_profile
 from eva_dashboard.party_analytics import (
     analyze_parties,
     extract_cities_from_text,
@@ -680,6 +681,25 @@ def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any])
     return out
 
 
+def _looks_party_profile_ask(user_text: str) -> bool:
+    """True for 'tell me about X' / customer rundown language."""
+    t = (user_text or "").lower().strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"tell\s+me\s+about|customer\s+profile|party\s+profile|"
+            r"profile\s+of|rundown\s+on|overview\s+of|"
+            r"give\s+me\s+(a\s+)?(full\s+)?(picture|profile|rundown)\s+(on|of|for)|"
+            r"how\s+is\s+.+\s+doing\b|"
+            r"everything\s+about"
+            r")\b",
+            t,
+        )
+    )
+
+
 def execute_query_spec(
     raw_spec: dict[str, Any],
     *,
@@ -697,6 +717,23 @@ def execute_query_spec(
     spec = _apply_extracted_entities(spec)
     # Spoken vocab safety nets (SKU / product / price_fetch)
     spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
+    # Promote profile asks even when the model left operation=pivot
+    if (
+        spec.get("operation") in {"", "pivot", None}
+        and _looks_party_profile_ask(user_text)
+        and (
+            spec.get("party_query")
+            or (spec.get("filters") or {}).get("party")
+            or (spec.get("filters") or {}).get("party_ilike")
+            or (spec.get("extracted_entities") or [])
+        )
+    ):
+        spec["operation"] = "party_profile"
+        spec["intent"] = "party_profile"
+        if not spec.get("metrics"):
+            spec["metrics"] = ["volume", "ams", "vs_ams"]
+        if not spec.get("row_dimensions"):
+            spec["row_dimensions"] = ["party"]
     spec["business_units"] = _expand_business_units(
         list(spec.get("business_units") or [])
     )
@@ -826,6 +863,33 @@ def execute_query_spec(
             )
         if result.get("ok") is False:
             result = lookup_party(q, limit=int(spec.get("limit") or 10))
+    elif operation == "party_profile" or intent == "party_profile":
+        q = (
+            spec.get("party_query")
+            or filters.get("party")
+            or (
+                (filters.get("party_ilike") or [None])[0]
+                if filters.get("party_ilike")
+                else None
+            )
+            or ""
+        )
+        # Prefer exact resolved party when silent ILIKE already matched one name
+        exact_party = filters.get("party")
+        result = party_profile(
+            query=str(q) if q else None,
+            party=str(exact_party) if exact_party else None,
+            period=phrase,
+            date_from=date_from,
+            date_to=date_to,
+            months_back=mb,
+            city=filters.get("city"),
+            client_type=filters.get("client_type"),
+            business_unit=filters.get("business_unit") or (bus[0] if len(bus) == 1 else None),
+            business_units=bus if len(bus) > 1 else None,
+            oil_type=filters.get("oil_type"),
+            packing_category=filters.get("packing_category"),
+        )
     elif operation == "overview" or intent == "overview":
         from eva_dashboard.chatbot import sales_overview
 
@@ -1076,4 +1140,13 @@ def execute_query_spec(
                     f.setdefault(k, v)
                 stamped["filters"] = f
                 result[spec_key] = stamped
+        from eva_dashboard.query_spec import build_query_state
+
+        result["query_state"] = build_query_state(
+            query_spec=filled_spec,
+            table_spec=result.get("table_spec"),
+            party_spec=result.get("party_spec"),
+            price_spec=result.get("price_spec"),
+            result_mode=str(result.get("mode") or filled_spec.get("intent") or ""),
+        )
     return result

@@ -284,6 +284,9 @@ def system_prompt() -> str:
     advanced_query / product_sales for analytics — only plan_query.
     Escape tools: get_schema, get_sales_overview, run_sql,
     resolve_product_language, report_snapshot, list_unmapped_products.
+15. Customer rundown: \"tell me about X\" / profile / how is X doing →
+    operation=party_profile with filters.party (or extracted_entities).
+    Engine returns volume, AMS, % vs AMS, last purchase, avg rate, top SKUs.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -5380,6 +5383,7 @@ def _attach_followup_meta(
     table_spec: dict[str, Any] | None = None,
     price_spec: dict[str, Any] | None = None,
     party_spec: dict[str, Any] | None = None,
+    query_state: dict[str, Any] | None = None,
     export_snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Stamp the last assistant turn so the Reply button can pin prior filters."""
@@ -5392,11 +5396,32 @@ def _attach_followup_meta(
                 meta["price_spec"] = price_spec
             if party_spec:
                 meta["party_spec"] = party_spec
+            if query_state:
+                meta["query_state"] = query_state
             if export_snapshot:
                 meta["export"] = export_snapshot
             if meta:
                 m["_eva_followup"] = meta
             return
+
+
+def _last_query_state(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Most recent unified query_state from Reply meta or tool results."""
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            state = (m.get("_eva_followup") or {}).get("query_state")
+            if isinstance(state, dict) and state:
+                return state
+        if m.get("role") != "tool":
+            continue
+        raw = m.get("content") or ""
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("query_state"), dict):
+            return payload["query_state"]
+    return None
 
 
 def _strip_html_for_csv(text: str) -> str:
@@ -5792,11 +5817,12 @@ def chat_completion(
     forced_prior_spec: dict[str, Any] | None = None,
     forced_prior_price_spec: dict[str, Any] | None = None,
     forced_prior_party_spec: dict[str, Any] | None = None,
+    forced_query_state: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run a chat turn with tools. System prompt is refreshed with live DB state every turn.
 
-    ``forced_prior_spec`` comes from the Reply button — pin follow-ups to that
-    answer's filters even when newer tables exist in the thread.
+    ``forced_prior_spec`` / ``forced_query_state`` come from the Reply button —
+    pin follow-ups to that answer's filters even when newer tables exist.
     """
     try:
         from openai import OpenAI
@@ -5810,6 +5836,7 @@ def chat_completion(
     from eva_dashboard.query_executor import execute_query_spec
     from eva_dashboard.query_spec import (
         prior_context_for_prompt,
+        prior_context_from_query_state,
         prior_context_payload,
     )
 
@@ -5818,6 +5845,7 @@ def chat_completion(
     prior_table_guess = forced_prior_spec
     prior_party_guess = forced_prior_party_spec
     prior_price_guess = forced_prior_price_spec
+    prior_state_guess = forced_query_state
     # Resolve priors from history when Reply did not pin them
     # (done after working is built for non-forced case)
 
@@ -5831,19 +5859,25 @@ def chat_completion(
         prior_party_guess = _last_party_spec(working)
     if prior_price_guess is None:
         prior_price_guess = _last_price_spec(working)
+    if prior_state_guess is None:
+        prior_state_guess = _last_query_state(working)
 
-    prior_ctx = prior_context_payload(
-        table_spec=prior_table_guess,
-        party_spec=prior_party_guess,
-        price_spec=prior_price_guess,
-    )
-    # Prefer party context when the last answer was a ranking (Reply / follow-up)
-    if forced_prior_party_spec:
+    # Prefer unified query_state (Phase 2 multi-turn) when present
+    prior_ctx = prior_context_from_query_state(prior_state_guess)
+    if forced_query_state:
+        prior_ctx = prior_context_from_query_state(forced_query_state)
+    elif forced_prior_party_spec:
         prior_ctx = prior_context_payload(party_spec=forced_prior_party_spec)
     elif forced_prior_spec:
         prior_ctx = prior_context_payload(table_spec=forced_prior_spec)
     elif forced_prior_price_spec:
         prior_ctx = prior_context_payload(price_spec=forced_prior_price_spec)
+    elif prior_ctx is None:
+        prior_ctx = prior_context_payload(
+            table_spec=prior_table_guess,
+            party_spec=prior_party_guess,
+            price_spec=prior_price_guess,
+        )
 
     working.insert(
         1,
@@ -5953,6 +5987,7 @@ def chat_completion(
                 table_spec=forced_prior_spec or _last_table_spec(working),
                 price_spec=forced_prior_price_spec or _last_price_spec(working),
                 party_spec=forced_prior_party_spec or _last_party_spec(working),
+                query_state=forced_query_state or _last_query_state(working),
                 export_snapshot=export_snapshot_acc,
             )
             return text, _prune_session_messages(working)
@@ -5962,6 +5997,7 @@ def chat_completion(
         last_table_spec: dict[str, Any] | None = None
         last_price_spec: dict[str, Any] | None = None
         last_party_spec: dict[str, Any] | None = None
+        last_query_state: dict[str, Any] | None = None
         last_export_snapshot: dict[str, Any] | None = None
         for tc in tool_calls:
             name = tc.function.name
@@ -6009,6 +6045,7 @@ def chat_completion(
                         "party_list": "list_clients",
                         "party_rank": "analyze_parties",
                         "party_lookup": "lookup_party",
+                        "party_profile": "analyze_parties",
                         "price": "query_price",
                         "advanced": "advanced_query",
                         "overview": "get_sales_overview",
@@ -6016,6 +6053,8 @@ def chat_completion(
                         str((result.get("query_spec") or {}).get("intent") or ""),
                         "query_sales",
                     )
+                    if isinstance(result, dict) and result.get("query_state"):
+                        last_query_state = result["query_state"]
                 elif should_redirect_to_plan_query(name, user_text=last_user):
                     # Phase 1: single planner — no legacy _dispatch_tool path
                     # for analytics (regex rewrite dual-path removed from chat).
@@ -6071,6 +6110,11 @@ def chat_completion(
                 )
                 if result.get("party_spec"):
                     last_party_spec = result["party_spec"]
+                if result.get("query_state"):
+                    last_query_state = result["query_state"]
+                if result.get("table_spec") and name != "query_sales":
+                    # party_profile / price paths may also stamp table_spec
+                    last_table_spec = last_table_spec or result.get("table_spec")
                 # Snapshot table cells for Excel/PDF export (before payload shrink)
                 try:
                     from eva_dashboard.table_export import (
@@ -6252,6 +6296,9 @@ def chat_completion(
                 party_spec=last_party_spec
                 or forced_prior_party_spec
                 or _last_party_spec(working),
+                query_state=last_query_state
+                or forced_query_state
+                or _last_query_state(working),
                 export_snapshot=last_export_snapshot,
             )
             # Fast path: simple show-me → return tool markdown immediately

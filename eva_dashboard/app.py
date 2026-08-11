@@ -790,6 +790,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
     forced_prior = None
     forced_price = None
     forced_party = None
+    forced_state = None
     prompt_for_model = prompt
     reply_idx = st.session_state.get("eva_reply_to")
     if reply_idx is not None:
@@ -799,6 +800,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             forced_prior = meta.get("table_spec")
             forced_price = meta.get("price_spec")
             forced_party = meta.get("party_spec")
+            forced_state = meta.get("query_state")
         prompt_for_model = f"{FOLLOWUP_MARKER}\n\n{prompt}"
         st.session_state.pop("eva_reply_to", None)
 
@@ -816,6 +818,7 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             forced_prior_spec=forced_prior,
             forced_prior_price_spec=forced_price,
             forced_prior_party_spec=forced_party,
+            forced_query_state=forced_state,
         )
         status.empty()
         # Keep only user/assistant visible turns + latest tool transcript for continuity
