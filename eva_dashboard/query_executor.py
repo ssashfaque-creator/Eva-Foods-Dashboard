@@ -74,16 +74,137 @@ def _expand_business_units(values: list[str] | None) -> list[str]:
     return out
 
 
-def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
+def _spoken_exclude_phrases(user_text: str) -> list[str]:
+    """Values named after exclude/remove/without (same-sentence or follow-up)."""
+    t = (user_text or "").strip()
+    if not t:
+        return []
+    phrases: list[str] = []
+    for m in re.finditer(
+        r"\b(?:exclude|remove|without|drop|hide|filter\s+out)\s+"
+        r"(?:the\s+)?(.+?)(?=\s+(?:and|,|;)\s+(?:exclude|remove|without)\b|"
+        r"\s+but\s+(?!exclude|remove)|$)",
+        t,
+        flags=re.IGNORECASE,
+    ):
+        raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
+        raw = re.sub(
+            r"\s+(items?|rows?|sales?|volumes?|data|from\s+this|again)\s*$",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        ).strip()
+        if raw:
+            phrases.append(raw)
+    # "but exclude X" / "again but exclude X"
+    for m in re.finditer(
+        r"\bbut\s+(?:please\s+)?(?:exclude|remove|without)\s+(.+)$",
+        t,
+        flags=re.IGNORECASE,
+    ):
+        raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
+        if raw and raw not in phrases:
+            phrases.append(raw)
+    return phrases
+
+
+def _resolve_spoken_excludes(user_text: str) -> dict[str, list[str]]:
+    """Turn spoken exclude phrases into an excludes dict (party / channel / BU…)."""
+    from eva_dashboard.chatbot import (
+        _resolve_exclude_value,
+        _split_remove_value_phrases,
+    )
+
+    out: dict[str, list[str]] = {}
+    for phrase in _spoken_exclude_phrases(user_text):
+        for part in _split_remove_value_phrases(phrase) or [phrase]:
+            resolved = _resolve_exclude_value(part)
+            if not resolved:
+                # Last resort: treat as party fragment so we never INCLUDE it
+                part_s = str(part or "").strip()
+                if len(part_s) >= 3:
+                    resolved = ("party_like", part_s)
+                else:
+                    continue
+            dim, val = resolved
+            bucket = out.setdefault(dim, [])
+            if val not in bucket:
+                bucket.append(val)
+    return out
+
+
+def _party_exclude_needles(excludes: dict[str, Any] | None) -> list[str]:
+    """Normalized needles for parties that must not appear as INCLUDE filters."""
+    needles: list[str] = []
+    ex = excludes or {}
+    for key in ("party", "party_like", "parties"):
+        for v in ex.get(key) or []:
+            n = _norm_key(str(v))
+            if n and n not in needles:
+                needles.append(n)
+    return needles
+
+
+def _strip_conflicting_party_includes(
+    spec: dict[str, Any],
+    excludes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Exclude must win: never keep filters.party for a name we're excluding."""
+    out = dict(spec)
+    needles = _party_exclude_needles(excludes)
+    if not needles:
+        return out
+    filters = dict(out.get("filters") or {})
+
+    def _hits(val: Any) -> bool:
+        nv = _norm_key(str(val or ""))
+        if not nv:
+            return False
+        return any(n in nv or nv in n for n in needles)
+
+    if _hits(filters.get("party")):
+        filters.pop("party", None)
+    if _hits(out.get("party_query")):
+        out["party_query"] = None
+    parties = [p for p in (filters.get("parties") or []) if not _hits(p)]
+    if parties:
+        filters["parties"] = parties
+    else:
+        filters.pop("parties", None)
+    ilike = [p for p in (filters.get("party_ilike") or []) if not _hits(p)]
+    if ilike:
+        filters["party_ilike"] = ilike
+    else:
+        filters.pop("party_ilike", None)
+    # Drop extracted entities that were only the excluded name
+    ents = [
+        e
+        for e in (out.get("extracted_entities") or [])
+        if not _hits(e)
+    ]
+    out["extracted_entities"] = ents
+    out["filters"] = filters
+    return out
+
+
+def _apply_extracted_entities(
+    spec: dict[str, Any],
+    *,
+    user_text: str = "",
+) -> dict[str, Any]:
     """Merge Python-resolved extracted_entities into filters / business_units.
 
     Channel aliases (metro, LMT, chase up, …) → client_type.
-    Remaining unresolved names → silent party ILIKE (e.g. \"al shaheer\").
+    Remaining unresolved names → silent party ILIKE (e.g. \"al shaheer\"),
+    unless the user asked to *exclude* that name.
     """
     out = dict(spec)
     resolved = resolve_extracted_entities(list(out.get("extracted_entities") or []))
     filters = dict(out.get("filters") or {})
     bus = list(out.get("business_units") or filters.get("business_units") or [])
+    exclude_needles = [
+        _norm_key(p) for p in _spoken_exclude_phrases(user_text) if _norm_key(p)
+    ]
 
     for b in resolved.get("business_units") or []:
         if b not in bus:
@@ -102,6 +223,9 @@ def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
     ]
     party_bits: list[str] = []
     for u in unresolved:
+        nu = _norm_key(u)
+        if any(n in nu or nu in n for n in exclude_needles):
+            continue  # "exclude al shaheer" must not become filters.party
         ct = match_client_type_alias(u)
         if ct and not filters.get("client_type"):
             filters["client_type"] = ct
@@ -572,40 +696,29 @@ def _coerce_vocab_from_user_text(
         if prior and out.get("base") != "prior":
             out["base"] = "prior"
 
-    # --- Remove / exclude value follow-ups (Cosine King, party, city, …) ---
-    if prior and re.search(
-        r"\b(remove|exclude|without|drop|hide|filter\s+out)\b", t
-    ):
-        try:
-            from eva_dashboard.chatbot import resolve_remove_request
-
-            prior_spec = {
-                "row_dimension": (prior_rows[-1] if prior_rows else None),
-                "row_groups": list(prior_rows[:-1]) if len(prior_rows) > 1 else [],
-                "column_dimension": (
-                    (prior.get("column_dimensions") or [None])[0]
-                    or prior.get("column_dimension")
-                    or "month"
-                ),
-                "filters": dict(prior.get("filters") or {}),
-                "business_units": list(prior.get("business_units") or []),
-                "excludes": dict(prior.get("excludes") or {}),
-            }
-            removed = resolve_remove_request(user_text, prior_spec=prior_spec)
-            if removed and removed.get("mode") == "exclude_value":
-                excludes = dict(out.get("excludes") or prior.get("excludes") or {})
-                for dim, vals in dict(removed.get("excludes") or {}).items():
+    # --- Remove / exclude values (same-sentence OR follow-up) ---
+    # "show Lahore Eva sales but exclude al shaheer" must EXCLUDE, never filter TO.
+    if re.search(r"\b(remove|exclude|without|drop|hide|filter\s+out)\b", t):
+        spoken_ex = _resolve_spoken_excludes(user_text)
+        if spoken_ex:
+            excludes = dict(out.get("excludes") or {})
+            if prior:
+                for dim, vals in dict(prior.get("excludes") or {}).items():
                     bucket = list(excludes.get(dim) or [])
                     for v in vals or []:
                         if v not in bucket:
                             bucket.append(v)
                     excludes[dim] = bucket
-                out["excludes"] = excludes
-                if out.get("base") != "prior":
-                    out["base"] = "prior"
-                # Value excludes must keep the prior table shape — only data changes
-                if prior_rows:
-                    rows = list(prior_rows)
+            for dim, vals in spoken_ex.items():
+                bucket = list(excludes.get(dim) or [])
+                for v in vals or []:
+                    if v not in bucket:
+                        bucket.append(v)
+                excludes[dim] = bucket
+            out["excludes"] = excludes
+            # Keep prior table shape when this is a follow-up reshape+exclude
+            if prior and prior_rows:
+                rows = list(prior_rows)
                 prior_cols = list(
                     prior.get("column_dimensions")
                     or (
@@ -616,18 +729,45 @@ def _coerce_vocab_from_user_text(
                 )
                 if prior_cols:
                     cols = [c for c in prior_cols if c]
-                # Keep prior metrics when planner thinned them
                 prior_mets = list(prior.get("metrics") or [])
-                if prior_mets and not (set(metrics) - {"volume"}):
+                if prior_mets:
                     metrics = prior_mets
-            elif removed and removed.get("mode") == "remove_layer":
-                leaf = removed.get("row_dimension")
-                groups = list(removed.get("row_groups") or [])
-                rows = groups + ([str(leaf)] if leaf else [])
                 if out.get("base") != "prior":
                     out["base"] = "prior"
-        except Exception:  # noqa: BLE001
-            pass
+            # Strip INCLUDE party filters that collide with excludes
+            stripped = _strip_conflicting_party_includes(
+                {"filters": filters, "party_query": out.get("party_query")},
+                excludes,
+            )
+            filters = dict(stripped.get("filters") or {})
+            if "party_query" in stripped:
+                out["party_query"] = stripped.get("party_query")
+        elif prior:
+            # Structural layer remove (remove city layer) still needs prior
+            try:
+                from eva_dashboard.chatbot import resolve_remove_request
+
+                prior_spec = {
+                    "row_dimension": (prior_rows[-1] if prior_rows else None),
+                    "row_groups": list(prior_rows[:-1]) if len(prior_rows) > 1 else [],
+                    "column_dimension": (
+                        (prior.get("column_dimensions") or [None])[0]
+                        or prior.get("column_dimension")
+                        or "month"
+                    ),
+                    "filters": dict(prior.get("filters") or {}),
+                    "business_units": list(prior.get("business_units") or []),
+                    "excludes": dict(prior.get("excludes") or {}),
+                }
+                removed = resolve_remove_request(user_text, prior_spec=prior_spec)
+                if removed and removed.get("mode") == "remove_layer":
+                    leaf = removed.get("row_dimension")
+                    groups = list(removed.get("row_groups") or [])
+                    rows = groups + ([str(leaf)] if leaf else [])
+                    if out.get("base") != "prior":
+                        out["base"] = "prior"
+            except Exception:  # noqa: BLE001
+                pass
 
     out["filters"] = filters
     out["row_dimensions"] = rows
@@ -927,10 +1067,14 @@ def execute_query_spec(
     spec = merge_prior_into_spec(spec, prior)
     # Re-apply after merge in case merge cleared then model omitted party
     spec = _stick_party_scope_from_prior(spec, prior, user_text=user_text)
-    # Python entity resolution BEFORE validation (forgiving extracted_entities)
-    spec = _apply_extracted_entities(spec)
-    # Spoken vocab safety nets (SKU / product / price_fetch)
+    # Python entity resolution BEFORE validation (forgiving extracted_entities).
+    # Pass user_text so "exclude al shaheer" never becomes filters.party.
+    spec = _apply_extracted_entities(spec, user_text=user_text)
+    # Spoken vocab safety nets (SKU / product / price_fetch / excludes)
     spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
+    # Final safety: excludes always beat party includes
+    if spec.get("excludes"):
+        spec = _strip_conflicting_party_includes(spec, spec.get("excludes"))
     # Follow-up intents may promote base=prior after the first merge — re-apply
     if prior and spec.get("base") == "prior":
         keep_rows = list(spec.get("row_dimensions") or [])
@@ -956,6 +1100,9 @@ def execute_query_spec(
                         bucket.append(v)
                 merged_ex[k] = bucket
             spec["excludes"] = merged_ex
+        # Rematch can restore sticky party — strip again if excluded
+        if spec.get("excludes"):
+            spec = _strip_conflicting_party_includes(spec, spec.get("excludes"))
     # Governed metrics/operations synonyms (Phase 3 semantic layer)
     from eva_dashboard.metrics_catalog import apply_metric_synonyms_to_spec
 

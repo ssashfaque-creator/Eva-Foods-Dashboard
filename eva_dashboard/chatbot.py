@@ -6135,6 +6135,16 @@ def chat_completion(
                     )
                     if isinstance(result, dict) and result.get("query_state"):
                         last_query_state = result["query_state"]
+                elif name == "lookup_party" and _looks_party_lookup(last_user):
+                    # Escape hatch: model still emits lookup_party for "who is X".
+                    # Execute identity search immediately — do NOT redirect/loop.
+                    result = lookup_party(
+                        (args or {}).get("query")
+                        or _extract_named_party_query(last_user)
+                        or last_user,
+                        limit=int((args or {}).get("limit") or 10),
+                    )
+                    name = "lookup_party"
                 elif should_redirect_to_plan_query(name, user_text=last_user):
                     # Phase 1: single planner — no legacy _dispatch_tool path
                     # for analytics (regex rewrite dual-path removed from chat).

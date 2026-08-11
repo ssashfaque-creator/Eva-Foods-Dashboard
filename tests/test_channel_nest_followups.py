@@ -277,6 +277,122 @@ def test_execute_add_city_under_bu() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_exclude_al_shaheer_same_sentence_not_include_filter() -> None:
+    """Bugfix: 'exclude al shaheer' was becoming filters.party (include only)."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            init_db()
+            with connect() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO category "
+                    "(product, category_1, category_2, packing_category, "
+                    "payload_json, updated_at) VALUES (?, ?, ?, ?, '{}', datetime('now'))",
+                    [
+                        ("P1", "Eva Consumer", "Eva Canola", "Stand up"),
+                        ("P2", "Eva Bulk", "Eva Bulk", "Tin"),
+                    ],
+                )
+                for cid, name in (
+                    ("1", "AL SHAHEER CORPORATION LIMITED"),
+                    ("2", "Other Dist"),
+                ):
+                    conn.execute(
+                        "INSERT OR REPLACE INTO clients "
+                        "(client_id, client, type, city_filter, city, inactive, "
+                        "payload_json, updated_at) VALUES "
+                        "(?, ?, 'Eva Distributors', 'Lahore', 'Lahore', '', "
+                        "'{}', datetime('now'))",
+                        (cid, name),
+                    )
+                for i, (dt, party, mt) in enumerate(
+                    [
+                        ("2026-03-05", "AL SHAHEER CORPORATION LIMITED", 100),
+                        ("2026-03-05", "Other Dist", 200),
+                        ("2026-04-05", "Other Dist", 50),
+                    ]
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO sales (
+                          source_file_id, row_hash, imported_at, date, party, product,
+                          qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                          payload_json
+                        ) VALUES (NULL, ?, datetime('now'), ?, ?, 'P1', ?, 'MT', ?,
+                          100, ?, 'Eva Distributors', '{}')
+                        """,
+                        (f"ex-{i}", dt, party, mt, mt, mt * 100),
+                    )
+                conn.commit()
+            out = execute_query_spec(
+                {
+                    "row_dimensions": ["business_unit"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "none",
+                    "business_units": ["Eva Consumer", "Eva Bulk"],
+                    "filters": {"city": "Lahore"},
+                    # Planner mistake: puts excluded name in extracted_entities
+                    "extracted_entities": ["al shaheer"],
+                },
+                user_text="show me lahore Eva sales again but exclude al shaheer",
+            )
+            assert out.get("ok"), out.get("error")
+            filters = (out.get("query_spec") or {}).get("filters") or {}
+            excludes = (out.get("query_spec") or {}).get("excludes") or {}
+            assert not filters.get("party"), filters
+            assert "AL SHAHEER CORPORATION LIMITED" in (excludes.get("party") or [])
+            md = out.get("answer_markdown") or ""
+            assert "excl. party" in md.lower()
+            assert "AL SHAHEER CORPORATION LIMITED" in md
+            # Must not be "only al shaheer" — Other Dist volume remains
+            assert "200" in md or "250" in md or "Eva Consumer" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_who_is_al_bari_lookup() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            init_db()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('1', 'Al Bari Traders', 'Eva Distributors', 'Karachi', "
+                    "'Karachi', '', '{}', datetime('now'))"
+                )
+                conn.commit()
+            out = execute_query_spec(
+                {
+                    "operation": "pivot",
+                    "row_dimensions": ["party"],
+                    "metrics": ["volume"],
+                    "period_type": "MTD",
+                    "context_handling": "none",
+                    "extracted_entities": ["al bari"],
+                },
+                user_text="who is al bari",
+            )
+            assert out.get("ok")
+            assert (out.get("query_spec") or {}).get("operation") == "party_lookup"
+            assert "Al Bari Traders" in (out.get("answer_markdown") or "")
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_who_is_al_shaheer_lookup_not_sales() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
