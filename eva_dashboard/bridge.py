@@ -6,8 +6,10 @@ The Vercel UI proxies to this service; end users never see the key.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
+import traceback
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -16,6 +18,13 @@ from eva_dashboard import __version__
 from eva_dashboard.chatbot import DEFAULT_MODEL, chat_completion, resolve_api_key
 from eva_dashboard.db import init_db
 from eva_dashboard.paths import db_path
+
+_FOLLOWUP_KEYS = (
+    "table_spec",
+    "price_spec",
+    "party_spec",
+    "export",
+)
 
 
 class ChatMessage(BaseModel):
@@ -39,6 +48,77 @@ class ChatResponse(BaseModel):
 class ExportRequest(BaseModel):
     followup: dict[str, Any] = Field(default_factory=dict)
     format: str = "xlsx"  # xlsx | pdf
+
+
+def _json_safe(value: Any, *, depth: int = 0) -> Any:
+    """Coerce tool/export payloads into JSON-safe Python types."""
+    if depth > 8:
+        return None
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):  # NaN/Inf
+            return None
+        return value
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            safe = _json_safe(v, depth=depth + 1)
+            if safe is not None or v is None:
+                out[str(k)] = safe
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v, depth=depth + 1) for v in value]
+    # numpy / pandas scalars
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_safe(item(), depth=depth + 1)
+        except Exception:  # noqa: BLE001
+            return str(value)
+    return str(value)
+
+
+def _sanitize_followup(
+    meta: dict[str, Any] | None,
+    *,
+    keep_export: bool = True,
+) -> dict[str, Any] | None:
+    """Keep only known follow-up keys; drop huge/unsafe blobs inbound."""
+    if not isinstance(meta, dict) or not meta:
+        return None
+    out: dict[str, Any] = {}
+    for key in _FOLLOWUP_KEYS:
+        if key not in meta:
+            continue
+        if key == "export" and not keep_export:
+            continue
+        safe = _json_safe(meta.get(key))
+        if isinstance(safe, dict) and safe:
+            out[key] = safe
+        elif key != "export" and safe is not None:
+            out[key] = safe
+    return out or None
+
+
+def _chat_error_detail(exc: BaseException) -> str:
+    text = str(exc) or exc.__class__.__name__
+    low = text.lower()
+    if "incorrect api key" in low or "invalid_api_key" in low or "401" in low:
+        return (
+            "OpenAI rejected the API key on your Mac. "
+            "export a valid OPENAI_API_KEY=sk-… then restart `eva-dashboard bridge`."
+        )
+    if "rate limit" in low or "429" in low:
+        return "OpenAI rate limit hit. Wait a moment and try again."
+    if "timeout" in low or "timed out" in low:
+        return (
+            "OpenAI request timed out. Try a shorter question, or check Mac network."
+        )
+    if "insufficient_quota" in low or "billing" in low:
+        return "OpenAI quota/billing issue on this API key. Check platform.openai.com."
+    # Keep detail short for the phone UI
+    return text[:500]
 
 
 def _bridge_secret() -> str:
@@ -152,15 +232,20 @@ def create_app():
                 "role": m.role,
                 "content": m.content or "",
             }
-            if m.followup and isinstance(m.followup, dict):
-                entry["_eva_followup"] = m.followup
+            # Inbound: keep specs for Reply continuity; drop export blob
+            # (rebuilt on Mac) so phone payloads stay small/safe.
+            follow = _sanitize_followup(m.followup, keep_export=False)
+            if follow:
+                entry["_eva_followup"] = follow
             history.append(entry)
         if not history or history[-1]["role"] != "user":
             raise HTTPException(
                 status_code=400, detail="Last message must be from the user"
             )
         model = (payload.model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        reply_meta = payload.reply_followup if isinstance(payload.reply_followup, dict) else {}
+        reply_meta = (
+            _sanitize_followup(payload.reply_followup, keep_export=False) or {}
+        )
         try:
             reply, updated = chat_completion(
                 history,
@@ -171,7 +256,11 @@ def create_app():
                 forced_prior_party_spec=reply_meta.get("party_spec"),
             )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            print("BRIDGE /chat error:", _chat_error_detail(exc), flush=True)
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=502, detail=_chat_error_detail(exc)
+            ) from exc
 
         safe_msgs: list[dict[str, Any]] = []
         for m in updated:
@@ -182,12 +271,29 @@ def create_app():
             if not str(content).strip() and role == "assistant":
                 continue
             item: dict[str, Any] = {"role": role, "content": str(content)}
-            follow = m.get("_eva_followup")
-            if isinstance(follow, dict) and follow:
-                item["followup"] = follow
+            follow = _sanitize_followup(
+                m.get("_eva_followup"), keep_export=True
+            )
+            if follow:
+                # Ensure wire-safe JSON (no numpy leftovers)
+                try:
+                    item["followup"] = json.loads(json.dumps(follow))
+                except (TypeError, ValueError):
+                    item["followup"] = _sanitize_followup(
+                        follow, keep_export=False
+                    )
             safe_msgs.append(item)
 
-        return ChatResponse(ok=True, reply=reply or "", messages=safe_msgs)
+        try:
+            return ChatResponse(ok=True, reply=reply or "", messages=safe_msgs)
+        except Exception as exc:  # noqa: BLE001
+            print("BRIDGE /chat response build error:", exc, flush=True)
+            traceback.print_exc()
+            # Still return the text reply without followup metadata
+            bare = [
+                {"role": m["role"], "content": m["content"]} for m in safe_msgs
+            ]
+            return ChatResponse(ok=True, reply=reply or "", messages=bare)
 
     @app.post("/export")
     def export_table(

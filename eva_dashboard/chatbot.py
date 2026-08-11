@@ -273,6 +273,11 @@ def system_prompt() -> str:
 12. Channels (metro/LMT/chase/IMT/Imtiaz) → filters.client_type — NEVER party.
     Real customers → filters.party / parties (silent ILIKE). \"who is X\" →
     operation=party_lookup.
+13. COMPARE: the things being compared become row_dimensions (or
+    advanced_query entities). Shared scope stays in filters — never lock one
+    compare side into filters so the other side disappears. Growth →
+    metrics=[\"ams_growth\"]. Mixed party-vs-channel → two plans + Analysis.
+    See VOCABULARY §12 and TOOL GUIDE compare examples.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -1175,13 +1180,17 @@ _LEGACY_TOOLS.append(
         "function": {
             "name": "advanced_query",
             "description": (
-                "Advanced analytics: city/client compare (+growth), WoW, packing/oil "
-                "growth, expected month close, silent this week, not ordered packing, "
+                "Advanced analytics. Prefer for multi-way city/channel compares "
+                "(compare_cities / compare_client_types with entities=[...]), "
+                "volume+YoY growth side-by-side. Also: WoW, packing/oil growth, "
+                "expected month close, silent this week, not ordered packing, "
                 "reactivated, days since invoice, concentration/shares, oil mix, "
                 "packing contribution, top SKUs, party profile, dumping/excessive volume, "
                 "same-date price differences across distributors, "
                 "filter entities by volume/YoY/MoM (sales > 10 MT, declined >10%, "
-                "more this month than last)."
+                "more this month than last). "
+                "For same-grain compares you may also use plan_query with the "
+                "compare grain on row_dimensions (see system compare guidance)."
             ),
             "parameters": {
                 "type": "object",
@@ -1222,9 +1231,10 @@ _LEGACY_TOOLS.append(
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "For multi-way compares: all cities or client types "
-                            "(e.g. Lahore, Karachi, Islamabad or Imtiaz, Metro, Chase Up). "
-                            "Prefer this over only left/right when 3+ sides."
+                            "All sides of a compare (2+). Cities for compare_cities "
+                            "(Lahore, Karachi, Islamabad) or channels for "
+                            "compare_client_types (Imtiaz Store, Eva Distributors, LMT, "
+                            "METRO HABIB). Prefer entities over left/right for 2+ sides."
                         ),
                     },
                     "party_query": {"type": "string"},

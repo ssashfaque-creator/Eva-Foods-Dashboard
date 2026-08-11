@@ -99,6 +99,33 @@ def vocabulary_for_prompt() -> str:
         "  row_dimensions=[\"party\"].",
         "- least/lowest gains → metrics=[\"ams_growth\"], sort_order=asc.",
         "- biggest gains → metrics=[\"ams_growth\"], sort_order=desc.",
+        "",
+        "12. COMPARE ASKS (teach — choose the grain of comparison)",
+        "- Read what is being compared: channels, cities, packings, parties,",
+        "  oils, BUs — that becomes row_dimensions (or advanced_query entities).",
+        "- Shared scope stays in filters (city / packing / oil / BU) WITHOUT",
+        "  locking the compare grain itself into a single filter value.",
+        "- Channel vs channel (Imtiaz vs distributors, distributors vs LMT):",
+        "  row_dimensions=[\"client_type\"], metrics=[\"volume\",\"ams\"] (or",
+        "  [\"ams_growth\"] for growth). Do NOT set filters.client_type to only",
+        "  one side — both sides must appear as rows. Optional:",
+        "  advanced_query mode=compare_client_types with entities=[...].",
+        "- City vs city (Lahore vs Karachi): row_dimensions=[\"city\"], or",
+        "  advanced_query mode=compare_cities with entities=[Lahore, Karachi].",
+        "  Shared channel/packing goes in filters.",
+        "- Packing vs packing (Stand up vs LMT packing scope is different —",
+        "  LMT is a channel): standup vs tin → row_dimensions=[\"packing_category\"].",
+        "- Growth compares → metrics=[\"ams_growth\"] (add volume/ams if useful).",
+        "- 3–4 way compares: same pattern; list all sides as rows / entities.",
+        "- Party vs channel (al shaheer vs Imtiaz): mixed grain — either",
+        "  (a) two plan_query calls (party filter for al shaheer; client_type",
+        "  for Imtiaz) then compare in Analysis, or (b) row_dimensions=[\"party\"]",
+        "  for the named party plus a second plan for the channel total.",
+        "- Party vs party → filters.parties=[...] + row_dimensions=[\"party\"].",
+        "- VTF / oil / packing scoped compares: put oil_type / packing_category",
+        "  / business_units in filters, compare grain on rows.",
+        "- Prefer one clear table that shows every side side-by-side; explain",
+        "  gaps in ### Analysis. Never invent volumes.",
     ]
     return "\n".join(parts)
 
@@ -165,6 +192,25 @@ Examples:
 - \"compare al shaheer with Alpha Dist\" →
   filters.parties=["al shaheer","Alpha Dist"], row_dimensions=["party"],
   metrics=["volume","ams"], column_dimensions=["month"]
+- \"compare Imtiaz vs distributors in Lahore\" →
+  row_dimensions=["client_type"], column_dimensions=["month"],
+  metrics=["volume","ams"], filters={city:Lahore}, LAST_N_MONTHS/6
+  — do NOT set filters.client_type (both channels must be rows)
+- \"compare VTF growth in Imtiaz vs distributors in Lahore\" →
+  row_dimensions=["client_type"], metrics=["ams_growth"],
+  filters={city:Lahore, oil_type:…VTF…} (or extracted_entities=["VTF"]),
+  LAST_N_MONTHS/6 — growth on rows, shared city+oil in filters
+- \"compare standup sales in distributors vs LMT\" →
+  row_dimensions=["client_type"], metrics=["volume","ams"],
+  filters={packing_category:Stand up}, LAST_N_MONTHS/6
+- \"compare Imtiaz sales growth in Lahore vs Karachi\" →
+  row_dimensions=["city"], metrics=["ams_growth"],
+  filters={client_type:Imtiaz Store}, LAST_N_MONTHS/6
+  — or advanced_query compare_cities entities=["Lahore","Karachi"]
+- \"compare al shaheer growth with Imtiaz\" →
+  plan_query #1: filters.party/extracted_entities=["al shaheer"],
+  metrics=["ams_growth"]; plan_query #2: filters.client_type=Imtiaz Store,
+  metrics=["ams_growth"]; then compare both tables in Analysis
 - \"who is al shaheer\" → operation=party_lookup, party_query="al shaheer"
 - After brand table: \"distributor-wise, lowest performing\" →
   context_handling=prior, row_dimensions=["party"], metrics=["vs_ams"],

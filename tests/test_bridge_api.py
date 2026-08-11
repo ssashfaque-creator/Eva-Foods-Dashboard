@@ -12,8 +12,37 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from eva_dashboard.bridge import _bridge_secret, create_app
+from eva_dashboard.bridge import (
+    _bridge_secret,
+    _chat_error_detail,
+    _sanitize_followup,
+    create_app,
+)
 from eva_dashboard.db import connect, init_db
+
+
+def test_sanitize_followup_drops_inbound_export() -> None:
+    meta = {
+        "table_spec": {"filters": {"client_type": "Imtiaz Store"}},
+        "export": {"headers": ["a"], "data": [["1"]]},
+        "noise": {"x": 1},
+    }
+    inbound = _sanitize_followup(meta, keep_export=False)
+    assert inbound is not None
+    assert "table_spec" in inbound
+    assert "export" not in inbound
+    outbound = _sanitize_followup(meta, keep_export=True)
+    assert outbound is not None
+    assert "export" in outbound
+
+
+def test_chat_error_detail_maps_bad_api_key() -> None:
+    msg = _chat_error_detail(
+        RuntimeError(
+            "Error code: 401 - {'error': {'code': 'invalid_api_key'}}"
+        )
+    )
+    assert "OPENAI_API_KEY" in msg
 
 
 def _env(tmp: str) -> None:
