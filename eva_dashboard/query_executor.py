@@ -75,15 +75,16 @@ def _expand_business_units(values: list[str] | None) -> list[str]:
 
 
 def _spoken_exclude_phrases(user_text: str) -> list[str]:
-    """Values named after exclude/remove/without (same-sentence or follow-up)."""
+    """Values named after exclude/remove/without/except (same-sentence or follow-up)."""
     t = (user_text or "").strip()
     if not t:
         return []
     phrases: list[str] = []
+    verbs = r"(?:exclude|excluding|remove|without|drop|hide|filter\s+out|except)"
     for m in re.finditer(
-        r"\b(?:exclude|remove|without|drop|hide|filter\s+out)\s+"
-        r"(?:the\s+)?(.+?)(?=\s+(?:and|,|;)\s+(?:exclude|remove|without)\b|"
-        r"\s+but\s+(?!exclude|remove)|$)",
+        rf"\b{verbs}\s+"
+        r"(?:the\s+)?(.+?)(?=\s+(?:and|,|;)\s+(?:exclude|excluding|remove|without|except)\b|"
+        r"\s+but\s+(?!exclude|excluding|remove|except)|$)",
         t,
         flags=re.IGNORECASE,
     ):
@@ -98,7 +99,7 @@ def _spoken_exclude_phrases(user_text: str) -> list[str]:
             phrases.append(raw)
     # "but exclude X" / "again but exclude X"
     for m in re.finditer(
-        r"\bbut\s+(?:please\s+)?(?:exclude|remove|without)\s+(.+)$",
+        rf"\bbut\s+(?:please\s+)?{verbs}\s+(.+)$",
         t,
         flags=re.IGNORECASE,
     ):
@@ -193,6 +194,51 @@ def _strip_conflicting_party_includes(
     return out
 
 
+def _enforce_exclude_wins(
+    spec: dict[str, Any],
+    *,
+    user_text: str = "",
+) -> dict[str, Any]:
+    """Hard gate: spoken exclude/remove always wins over party INCLUDE filters.
+
+    The planner often puts the excluded name into ``filters.party`` (include).
+    Sticky prior merge can also restore a previous mistaken party include.
+    This runs late — after merge / entity resolve / silent party match — so
+    nothing downstream can flip exclude → include again.
+    """
+    out = dict(spec)
+    spoken = _resolve_spoken_excludes(user_text) if user_text else {}
+    excludes = dict(out.get("excludes") or {})
+    for dim, vals in spoken.items():
+        bucket = list(excludes.get(dim) or [])
+        for v in vals or []:
+            if v not in bucket:
+                bucket.append(v)
+        excludes[dim] = bucket
+    if not excludes and not spoken:
+        return out
+    out["excludes"] = excludes
+
+    # If we're excluding a party (exact or fragment), clear party INCLUDE scope
+    # so prior merge / stick cannot put it back.
+    if excludes.get("party") or excludes.get("party_like") or excludes.get("parties"):
+        clear = list(out.get("clear") or [])
+        for key in (*PARTY_SCOPE_KEYS, "party_query"):
+            if key not in clear:
+                clear.append(key)
+        out["clear"] = clear
+        out["clear_filters"] = list(clear)
+        out["_clear_omitted"] = False
+        filters = dict(out.get("filters") or {})
+        for key in PARTY_SCOPE_KEYS:
+            filters.pop(key, None)
+        out["filters"] = filters
+        out["party_query"] = None
+
+    out = _strip_conflicting_party_includes(out, excludes)
+    return out
+
+
 def _apply_extracted_entities(
     spec: dict[str, Any],
     *,
@@ -252,6 +298,10 @@ def _apply_extracted_entities(
             filters.setdefault("business_unit", bus[0])
     out["filters"] = filters
     out["_entity_resolution"] = resolved
+    # Planner may already have put the excluded name in filters.party — strip now
+    if exclude_needles:
+        spoken_ex = _resolve_spoken_excludes(user_text)
+        out = _strip_conflicting_party_includes(out, spoken_ex or {"party_like": exclude_needles})
     return out
 
 
@@ -722,8 +772,17 @@ def _coerce_vocab_from_user_text(
                         bucket.append(v)
                 excludes[dim] = bucket
             out["excludes"] = excludes
-            # Keep prior table shape when this is a follow-up reshape+exclude
-            if prior and prior_rows:
+            # Keep prior table shape ONLY for short exclude follow-ups
+            # ("exclude al shaheer"), not full restated asks
+            # ("show me Eva sales in lahore but exclude al shaheer").
+            exclude_followup = not re.search(
+                r"\b("
+                r"show|give\s+me|sales|volume|month\s*-?\s*wise|"
+                r"last\s+\d+|ytd|mtd|this\s+month"
+                r")\b",
+                t,
+            )
+            if prior and prior_rows and exclude_followup:
                 rows = list(prior_rows)
                 prior_cols = list(
                     prior.get("column_dimensions")
@@ -740,14 +799,35 @@ def _coerce_vocab_from_user_text(
                     metrics = prior_mets
                 if out.get("base") != "prior":
                     out["base"] = "prior"
+                out["_clear_omitted"] = False
             # Strip INCLUDE party filters that collide with excludes
             stripped = _strip_conflicting_party_includes(
-                {"filters": filters, "party_query": out.get("party_query")},
+                {
+                    "filters": filters,
+                    "party_query": out.get("party_query"),
+                    "extracted_entities": list(out.get("extracted_entities") or []),
+                },
                 excludes,
             )
             filters = dict(stripped.get("filters") or {})
             if "party_query" in stripped:
                 out["party_query"] = stripped.get("party_query")
+            if "extracted_entities" in stripped:
+                out["extracted_entities"] = stripped.get("extracted_entities")
+            # Party excludes must clear sticky party INCLUDE scope
+            if (
+                excludes.get("party")
+                or excludes.get("party_like")
+                or excludes.get("parties")
+            ):
+                for key in PARTY_SCOPE_KEYS:
+                    filters.pop(key, None)
+                    if key not in clear:
+                        clear.append(key)
+                out["party_query"] = None
+                if "party_query" not in clear:
+                    clear.append("party_query")
+                out["_clear_omitted"] = False
         elif prior:
             # Structural layer remove (remove city layer) still needs prior
             try:
@@ -940,8 +1020,23 @@ def _stick_party_scope_from_prior(
     answer should not lose the customer scope.
     """
     out = dict(spec)
+    # Never re-stick a party the user just asked to exclude/remove.
+    spoken_ex = _resolve_spoken_excludes(user_text) if user_text else {}
+    if spoken_ex.get("party") or spoken_ex.get("party_like") or spoken_ex.get("parties"):
+        return out
+    if _party_exclude_needles(out.get("excludes")):
+        # Spec already carries party excludes — don't restore include scope
+        return out
     scope = _prior_party_scope(prior)
     if not scope:
+        return out
+    # If prior party matches a spoken/spec exclude, do not stick it
+    trial = {"filters": dict(scope), "excludes": dict(out.get("excludes") or {})}
+    trial = _strip_conflicting_party_includes(trial, trial.get("excludes") or spoken_ex)
+    if not any(
+        (trial.get("filters") or {}).get(k) not in (None, "", [])
+        for k in PARTY_SCOPE_KEYS
+    ):
         return out
     filters = dict(out.get("filters") or {})
     clear = set(out.get("clear") or [])
@@ -1069,18 +1164,20 @@ def execute_query_spec(
     """Execute a planned QuerySpec blindly (universal pivot or legacy)."""
     spec = normalize_query_spec(raw_spec)
     # Soft-stick party scope before merge so short follow-ups keep the customer
+    # (skipped automatically when the user asked to exclude/remove a party).
+    spec = _enforce_exclude_wins(spec, user_text=user_text)
     spec = _stick_party_scope_from_prior(spec, prior, user_text=user_text)
     spec = merge_prior_into_spec(spec, prior)
     # Re-apply after merge in case merge cleared then model omitted party
     spec = _stick_party_scope_from_prior(spec, prior, user_text=user_text)
+    spec = _enforce_exclude_wins(spec, user_text=user_text)
     # Python entity resolution BEFORE validation (forgiving extracted_entities).
     # Pass user_text so "exclude al shaheer" never becomes filters.party.
     spec = _apply_extracted_entities(spec, user_text=user_text)
     # Spoken vocab safety nets (SKU / product / price_fetch / excludes)
     spec = _coerce_vocab_from_user_text(spec, user_text, prior=prior)
     # Final safety: excludes always beat party includes
-    if spec.get("excludes"):
-        spec = _strip_conflicting_party_includes(spec, spec.get("excludes"))
+    spec = _enforce_exclude_wins(spec, user_text=user_text)
     # Follow-up intents may promote base=prior after the first merge — re-apply
     if prior and spec.get("base") == "prior":
         keep_rows = list(spec.get("row_dimensions") or [])
@@ -1088,6 +1185,7 @@ def execute_query_spec(
         keep_ex = dict(spec.get("excludes") or {})
         keep_compare = spec.get("compare")
         keep_metrics = list(spec.get("metrics") or [])
+        keep_clear = list(spec.get("clear") or [])
         spec = merge_prior_into_spec(spec, prior)
         if keep_rows:
             spec["row_dimensions"] = keep_rows
@@ -1097,6 +1195,13 @@ def execute_query_spec(
             spec["compare"] = keep_compare
         if keep_metrics:
             spec["metrics"] = keep_metrics
+        if keep_clear:
+            # Preserve party clear so merge cannot restore excluded includes
+            merged_clear = list(spec.get("clear") or [])
+            for c in keep_clear:
+                if c not in merged_clear:
+                    merged_clear.append(c)
+            spec["clear"] = merged_clear
         if keep_ex or prior.get("excludes"):
             merged_ex = dict(prior.get("excludes") or {})
             for k, vals in keep_ex.items():
@@ -1107,8 +1212,7 @@ def execute_query_spec(
                 merged_ex[k] = bucket
             spec["excludes"] = merged_ex
         # Rematch can restore sticky party — strip again if excluded
-        if spec.get("excludes"):
-            spec = _strip_conflicting_party_includes(spec, spec.get("excludes"))
+        spec = _enforce_exclude_wins(spec, user_text=user_text)
     # Governed metrics/operations synonyms (Phase 3 semantic layer)
     from eva_dashboard.metrics_catalog import apply_metric_synonyms_to_spec
 
@@ -1255,6 +1359,13 @@ def execute_query_spec(
         "party_lookup",
     }:
         filters = _resolve_party_filters_silent(filters, spec)
+        spec["filters"] = filters
+
+    # NUCLEAR GATE (last moment before engines): exclude language always wins.
+    # Silent party resolve / sticky prior must not leave filters.party=Al Shaheer
+    # when the user said "exclude al shaheer".
+    spec = _enforce_exclude_wins(spec, user_text=user_text)
+    filters = dict(spec.get("filters") or {})
 
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")

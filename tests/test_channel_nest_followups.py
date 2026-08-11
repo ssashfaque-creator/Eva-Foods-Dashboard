@@ -529,6 +529,101 @@ def test_exclude_al_shaheer_keeps_table_grain() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_exclude_al_shaheer_never_becomes_party_include() -> None:
+    """Exact user ask from prod: Eva Lahore sales but exclude al shaheer.
+
+    Planner often emits filters.party=AL SHAHEER (INCLUDE). That must never
+    survive — caption must show excl., totals must exclude Shaheer volume.
+    Also covers sticky prior that previously locked party=Al Shaheer.
+    """
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            sq._CLIENTS_CACHE_SIG = None
+            _seed()
+            with connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO clients "
+                    "(client_id, client, type, city_filter, city, inactive, "
+                    "payload_json, updated_at) VALUES "
+                    "('99', 'AL SHAHEER CORPORATION LIMITED', 'Eva Distributors', "
+                    "'Lahore', 'Lahore', '', '{}', datetime('now'))"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                      payload_json
+                    ) VALUES (NULL, 'shaheer-mar', datetime('now'), '2026-03-05',
+                      'AL SHAHEER CORPORATION LIMITED', 'P1', 497, 'MT', 497, 100,
+                      49700, 'Eva Distributors', '{}')
+                    """
+                )
+                conn.commit()
+
+            text = "show me Eva sales in lahore but exclude al shaheer"
+            # Bad planner draft matching the screenshot (INCLUDE party)
+            draft = {
+                "operation": "pivot",
+                "row_dimensions": ["business_unit"],
+                "column_dimensions": ["month"],
+                "metrics": ["volume", "ams"],
+                "period_type": "LAST_N_MONTHS",
+                "months_back": 6,
+                "context_handling": "none",
+                "filters": {
+                    "city": "Lahore",
+                    "party": "AL SHAHEER CORPORATION LIMITED",
+                },
+                "business_units": ["Eva Consumer", "Eva Bulk"],
+                "extracted_entities": ["al shaheer", "Lahore"],
+            }
+            # Prior from a previous mistaken include — must not stick
+            prior = {
+                "row_dimensions": ["business_unit"],
+                "column_dimensions": ["month"],
+                "filters": {
+                    "city": "Lahore",
+                    "party": "AL SHAHEER CORPORATION LIMITED",
+                },
+                "business_units": ["Eva Consumer", "Eva Bulk"],
+                "months_back": 6,
+            }
+            out = execute_query_spec(draft, prior=prior, user_text=text)
+            assert out.get("ok"), out.get("error")
+            filters = (out.get("query_spec") or {}).get("filters") or {}
+            excludes = (out.get("query_spec") or {}).get("excludes") or {}
+            assert not filters.get("party"), filters
+            assert not filters.get("party_ilike"), filters
+            blob = " ".join(
+                str(v).lower()
+                for vals in excludes.values()
+                for v in (vals or [])
+            )
+            assert "shaheer" in blob, excludes
+            md = out.get("answer_markdown") or ""
+            # Must NOT caption as include-only party filter
+            assert "· party **AL SHAHEER" not in md
+            assert "excl." in md.lower()
+            # Shaheer-only March was 497; excluding it must drop that volume
+            total = float((out.get("matrix") or {}).get("grand_total_mt") or 0)
+            assert total < 497, (total, md[:400])
+        finally:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            sq._CLIENTS_CACHE_SIG = None
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
 def test_party_like_exclude_works_without_clients_master() -> None:
     """Regression: exclude al shaheer must drop sales parties even when
     they are missing from the clients master (was a silent no-op)."""

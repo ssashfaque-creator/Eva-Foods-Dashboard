@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 DEFAULT_REPO = "ssashfaque-creator/Eva-Foods-Dashboard"
-DEFAULT_BRANCH = "cursor/sales-dashboard-pdf-8203"
+DEFAULT_BRANCH = "cursor/phase1-single-planner-50eb"
 
 # Never overwrite these when applying an update
 PRESERVE_NAMES = {

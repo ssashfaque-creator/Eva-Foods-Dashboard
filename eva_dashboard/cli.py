@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument(
         "--branch",
         default=None,
-        help="GitHub branch (default: EVA_UPDATE_BRANCH or cursor/sales-dashboard-pdf-8203)",
+        help="GitHub branch (default: EVA_UPDATE_BRANCH or cursor/phase1-single-planner-50eb)",
     )
     update.add_argument(
         "--repo",
