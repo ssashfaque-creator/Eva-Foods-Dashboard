@@ -1,8 +1,4 @@
-"""Teaching material for the chatbot model — data model + vocabulary.
-
-This is guidance for the LLM, not hard routing. The model chooses tools and
-arguments; tools compute tables deterministically.
-"""
+"""Teaching material for the Semantic Planner — vocabulary only, not routing."""
 
 from __future__ import annotations
 
@@ -15,7 +11,7 @@ from eva_dashboard.client_language import (
 
 def vocabulary_for_prompt() -> str:
     """Compact spoken → canonical dictionary for the system prompt."""
-    # Deduplicate aliases → one line per canonical target
+
     def _group(aliases: dict[str, str]) -> list[str]:
         by_canon: dict[str, list[str]] = {}
         for spoken, canon in aliases.items():
@@ -27,125 +23,85 @@ def vocabulary_for_prompt() -> str:
         return lines
 
     parts = [
-        "VOCABULARY (spoken words → system values). Use these when setting tool args:",
+        "VOCABULARY (YOU translate spoken words → QuerySpec fields):",
         "",
-        "Client / channel types (ONLY when the user names a channel):",
+        "1. BRANDS → business_units",
+        "- Eva → [\"Eva Consumer\", \"Eva Bulk\"] (BOTH). Never Shortening/Meal.",
+        "- Maan → [\"Maan Consumer\", \"Maan Bulk\"] (BOTH).",
+        "- Consumer (alone) → [\"Eva Consumer\"].",
+        "- Bulk (Eva context) → Eva Bulk; \"Maan bulk\" → Maan Bulk.",
+        "- Full names: Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk, Cusine King.",
+        "",
+        "2. DISTRIBUTOR AMBIGUITY (CRITICAL)",
+        "- \"distributor sales\" / \"who are distributors\" → filters.client_type="
+        "\"Eva Distributors\".",
+        "- \"distributor-wise\" / \"by distributor\" / \"party-wise\" → group_by="
+        "\"party\". Do NOT invent client_type unless the channel is named.",
+        "- \"Eva distributor sales\" → BOTH brand BUs AND client_type=Eva Distributors.",
+        "",
+        "3. CHANNEL TYPES (only when named as a channel):",
         *_group(CLIENT_TYPE_ALIASES),
         "",
-        "CRITICAL — distributor grain vs channel:",
-        "- \"distributor-wise\" / \"by distributor\" / \"party-wise\" / "
-        "\"lowest performing distributors\" → grain.group_by=party. "
-        "Do NOT set filters.client_type=Eva Distributors.",
-        "- Set Eva Distributors ONLY when they name that channel "
-        "(\"Eva Distributors\", \"distributor sales\" as a channel ask).",
-        "- After an Eva Consumer vs Eva Bulk table, \"show this distributor "
-        "wise…\" → base=prior, keep business_units, clear client_type, "
-        "party_rank by party.",
+        "4. PRODUCT vs SKU",
+        "- \"product-wise\" / \"by product\" → group_by or row_dimension="
+        "packing_category.",
+        "- \"SKU-wise\" / \"by SKU\" → product.",
         "",
-        "Packing categories (spoken \"product\" usually means packing, not SKU):",
+        "5. PACKING:",
         *_group(PACKING_ALIASES),
         "",
-        "Oil types:",
+        "6. OIL TYPES:",
         *_group(OIL_TYPE_ALIASES),
         "",
-        "Business units (ALWAYS set business_unit / business_units in plan_query):",
-        "- Eva → Eva Consumer + Eva Bulk (BOTH). Never include Shortening, Meal, etc.",
-        "- Maan → Maan Consumer + Maan Bulk (BOTH).",
-        "- Consumer (alone) → Eva Consumer only.",
-        "- Bulk (alone, Eva context) → Eva Bulk; \"Maan bulk\" → Maan Bulk.",
-        "- Eva Consumer, Eva Bulk, Maan Consumer, Maan Bulk, Cusine King are full names.",
-        "- \"selling maan\" (who buys) → Maan Consumer parties, not a BU sales matrix.",
+        "7. GEOGRAPHY",
+        "- city / city_filter ← City-Filter (Lahore, Karachi, …)",
+        "- zone ← SOUTH | CENTRAL | NORTH",
+        "- nationally / all over Pakistan → clear_filters include city (+ zone)",
+        "- other cities → group_by=city + clear_filters: [\"city\"]",
         "",
-        "Geography:",
-        "- city ← City-Filter on clients (Karachi, Lahore, …)",
-        "- zone ← SOUTH | CENTRAL | NORTH (mapped from city)",
-        "- blank/unmapped city → treat as Karachi → SOUTH",
-        "- \"nationally\" / \"all over Pakistan\" → clear city + zone",
-        "- \"other cities\" / \"compared to other cities\" / city league → "
-        "group_by=city and CLEAR city filter (do not keep sticky Lahore)",
-        "- \"other zones\" / by zone → group_by=zone and clear city",
+        "8. PERIOD (period_type is REQUIRED on every plan)",
+        "- unspecified → period_type=MTD",
+        "- \"last 6 months\" → period_type=LAST_N_MONTHS, months_back=6",
+        "- \"July\" / \"July 2026\" → period_type=NAMED_MONTH, named_month=…",
+        "- \"last month\" → LAST_MONTH; \"last week\" → LAST_WEEK",
         "",
-        "Metrics language (analyze_parties.metric + sort):",
-        "- AMS = mean MT of the 3 full months BEFORE the report month "
-        "(not the same window as Volume). Parties with Volume but AMS=0 "
-        "have no baseline — do not call them \"lowest AMS\".",
-        "- \"lowest / worst performing\" distributors → metric=vs_ams, "
-        "sort=asc, title_mode=underperformers (behind their AMS).",
-        "- least / lowest / smallest / bottom gains or growth → "
-        "metric=ams_growth, sort=asc (do NOT set grown_only)",
-        "- biggest / highest / top gains → sort=desc + grown_only only if "
-        "they asked for growers",
-        "- \"this growth\" / \"how is this compared…\" → keep prior metric "
-        "(usually ams_growth) and reshape grain/geography",
-        "- only growing / that have grown → grown_only=true",
-        "- declined / dropped / fallen → declined_only=true, sort=asc",
-        "- vs AMS / behind on AMS → vs_ams",
-        "- YoY / last year volume → yoy or yoy_ams",
-        "- invoices / invoice size → invoices / invoice_mt",
-        "",
-        "Period language (ALWAYS set period.phrase when spoken — never omit):",
-        "- \"last 6 months\" / \"past N months\" → period=\"last N months\" AND "
-        "grain.column_dimension=month, months_back=N (month grid through latest "
-        "sales date). Omitting period falls through to useless MTD — do not.",
-        "- \"this month\" / MTD / so far → period=\"this month\"",
-        "- named month (\"for July\") → that month Volume + AMS + %",
-        "- \"last month\" / \"last week\" → those phrases",
-        "",
-        "Table shape language (query_sales):",
-        "- channel / client type wise → row_dimension=client_type",
-        "- city wise → row_dimension=city",
-        "- zone wise → row_dimension=zone",
-        "- product wise / by product → row_dimension=packing_category "
-        "(SKU only if user says SKU)",
-        "- month wise / last N months → columns=month",
-        "- how are / performance → still use a tool; with last N months keep "
-        "the month grid (do not collapse to a single MTD month)",
-        "",
-        "Follow-up reshape (analyze_parties):",
-        "- \"show this … wise\" / \"this distributor wise\" → base=prior, "
-        "keep prior business_units / brand scope",
-        "- Keep channel/oil/packing from the prior answer when user says "
-        "\"this growth\" / \"compared to…\" — but CLEAR client_type when "
-        "they ask distributor-/party-wise grain",
-        "- Change group_by when they ask for cities/zones vs parties",
-        "- Expanding geography clears sticky city — never rank cities "
-        "while filtered to one city",
+        "9. PERFORMANCE METRICS (party_rank)",
+        "- lowest/worst performing → ranking_metric=vs_ams, sort_order=asc",
+        "- least/lowest gains → ranking_metric=ams_growth, sort_order=asc "
+        "(grown_only=false)",
+        "- biggest/highest gains → ams_growth, sort_order=desc",
+        "- AMS = prior 3 full months mean (engine handles this; parties with "
+        "AMS=0 are excluded from vs_ams / ams_growth ranks).",
     ]
     return "\n".join(parts)
 
 
 def tool_guide_for_prompt() -> str:
     return """
-PRIMARY TOOL — plan_query (use this for almost every factual ask):
-Emit a QuerySpec JSON. The server executes it. Key fields:
-  intent: sales_matrix|sales_trend|sales_analytical|party_rank|party_list|
-          party_lookup|price|advanced|overview
-  base: none (fresh) | prior (follow-up — start from PRIOR_QUERY_CONTEXT)
-  clear: filter keys to drop from prior (e.g. [\"city\"] for other cities)
-  filters / grain / metric / sort / grown_only / declined_only / title_mode
+PRIMARY TOOL — plan_query (use for almost every factual ask):
+Emit a complete QuerySpec. Server executes BLINDLY — it will not rewrite your plan.
+If you omit required fields you get plan_errors; fix and call plan_query again.
+
+Required every time: intent, period_type
+Also set: context_handling (none|prior), filters, group_by / column_dimension,
+business_units, ranking_metric, sort_order, clear_filters when following up.
 
 Examples:
-- \"least AMS gains\" → party_rank, metric=ams_growth, sort=asc,
-  grown_only=false, title_mode=smallest_gains
-- \"growth vs other cities\" (after Lahore party growth) → base=prior,
-  clear=[\"city\"], grain.group_by=city, metric=ams_growth, title_mode=by_growth
-- \"show me Eva sales in Lahore\" → sales_*, city=Lahore,
-  business_units=[\"Eva Consumer\", \"Eva Bulk\"]  ← Eva means both; not Shortening
 - \"how Eva distributor sales in Lahore are doing last 6 months\" →
-  sales_matrix, city=Lahore, client_type=Eva Distributors,
-  business_units=[Eva Consumer, Eva Bulk], period=\"last 6 months\",
-  grain.column_dimension=month, months_back=6
-  (NOT Aug MTD; NOT empty period)
-- \"Maan sales\" → business_units=[\"Maan Consumer\", \"Maan Bulk\"]
-- \"Consumer sales\" → business_unit=\"Eva Consumer\"
-- After Eva Consumer vs Eva Bulk: \"show this distributor wise, lowest
-  performing distributors\" → base=prior, intent=party_rank,
-  business_units=[Eva Consumer, Eva Bulk], clear=[\"client_type\"],
-  grain.group_by=party, metric=vs_ams, sort=asc, title_mode=underperformers
-  (NOT filters.client_type=Eva Distributors; NOT metric=ams \"Top parties\")
+  intent=sales_matrix, period_type=LAST_N_MONTHS, months_back=6,
+  filters={city:Lahore, client_type:Eva Distributors},
+  business_units=[Eva Consumer, Eva Bulk]
+- \"show me Eva sales in Lahore\" → sales_*, city=Lahore,
+  business_units=[Eva Consumer, Eva Bulk], period_type=MTD (if no period spoken)
+- After Eva Consumer vs Bulk: \"show this distributor-wise, lowest performing\" →
+  context_handling=prior, intent=party_rank, group_by=party,
+  clear_filters=[\"client_type\"], ranking_metric=vs_ams, sort_order=asc,
+  keep business_units from prior
+- \"least AMS gains\" → party_rank, ranking_metric=ams_growth, sort_order=asc
+- \"growth vs other cities\" → prior, clear_filters=[\"city\"], group_by=city,
+  ranking_metric=ams_growth
 - \"who are Eva Distributors in Lahore\" → party_list + that channel
-- named store/distributor sales → party_lookup
 
-Legacy tools (query_sales, analyze_parties, …) still exist but prefer plan_query.
-Numbers come only from executed tables — paste answer_markdown, then Analysis.
+After tables: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
+Numbers come only from executed tables.
 """.strip()

@@ -180,24 +180,32 @@ def test_eva_distributor_sales_expands_brand_and_channel() -> None:
     hp = heuristic_plan_query(q)
     assert set(hp.get("business_units") or []) == {"Eva Consumer", "Eva Bulk"}
     assert (hp.get("filters") or {}).get("client_type") == "Eva Distributors"
+    assert hp["period_type"] == "LAST_N_MONTHS"
     assert hp["period"].get("phrase") == "last 6 months"
     assert hp["grain"].get("column_dimension") == "month"
 
 
-def test_plan_omitted_period_does_not_become_mtd_when_last_n_months() -> None:
-    """Model plan with filters but blank period must not fall through to MTD.
+def test_semantic_planner_rejects_missing_period_type() -> None:
+    """v1.0: incomplete plans error back to the LLM — no silent MTD fill."""
+    bad = {
+        "intent": "sales_matrix",
+        "context_handling": "none",
+        "filters": {"city": "Lahore", "client_type": "Eva Distributors"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+    }
+    out = execute_query_spec(bad)
+    assert out["ok"] is False
+    assert out.get("plan_errors")
+    assert any("period_type" in e.lower() for e in out["plan_errors"])
 
-    Regression: "how Eva distributor sales in lahore are doing last 6 months"
-    became Sales for Aug 2026 MTD → _No data._ because execute_query_spec
-    filled city/client_type but not period, and resolve_period(None) → MTD.
-    Helpers must ONLY fill blanks — never override an explicit period.
-    """
+
+def test_last_n_months_plan_executes_month_grid() -> None:
+    """Complete LAST_N_MONTHS plan → month grid, never Aug MTD / No data."""
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
         try:
             _seed()
-            # Extend seed with early Aug (max sales date) but no Lahore Aug rows
             with connect() as conn:
                 conn.execute(
                     """
@@ -210,26 +218,20 @@ def test_plan_omitted_period_does_not_become_mtd_when_last_n_months() -> None:
                 )
                 conn.commit()
 
-            q = (
-                "show me how Eva distributor sales in lahore are doing "
-                "last 6 months"
-            )
-            # Exact failure shape: analytical + filters + Eva BUs, empty period
-            bad_plan = {
-                "intent": "sales_analytical",
-                "base": "none",
+            plan = {
+                "intent": "sales_matrix",
+                "context_handling": "none",
+                "period_type": "LAST_N_MONTHS",
+                "months_back": 6,
                 "filters": {
                     "city": "Lahore",
                     "client_type": "Eva Distributors",
                 },
                 "business_units": ["Eva Consumer", "Eva Bulk"],
-                "period": {},
-                "grain": {},
             }
-            out = execute_query_spec(bad_plan, user_text=q)
-            assert out["ok"] is True
+            out = execute_query_spec(plan)
+            assert out["ok"] is True, out
             label = str((out.get("period") or {}).get("label") or "")
-            assert "MTD" not in label or "Last 6" in label
             assert "Aug 2026 MTD" not in label
             assert out.get("column_dimension") == "month"
             assert int((out.get("table_spec") or {}).get("months_back") or 0) == 6
@@ -238,32 +240,30 @@ def test_plan_omitted_period_does_not_become_mtd_when_last_n_months() -> None:
             assert "_No data._" not in md
             assert "Last 6 months" in md or "Mar 2026" in md
 
-            # Explicit period + explicit grain must not be rewritten by helpers
+            # Explicit column_dimension is not overwritten
             keep = execute_query_spec(
                 {
                     "intent": "sales_analytical",
-                    "base": "none",
+                    "context_handling": "none",
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
                     "filters": {
                         "city": "Lahore",
                         "client_type": "Eva Distributors",
                     },
-                    "period": {"phrase": "last 6 months"},
-                    "grain": {"column_dimension": "client_type"},
-                },
-                user_text=q,
+                    "column_dimension": "client_type",
+                }
             )
             assert keep["ok"] is True
             assert (keep.get("query_spec") or {}).get("period", {}).get(
                 "phrase"
             ) == "last 6 months"
             assert keep.get("column_dimension") == "city"  # ctype filter flips cols
-            keep_label = str((keep.get("period") or {}).get("label") or "")
-            assert "Last 6 months" in keep_label
-            assert "Aug 2026 MTD" not in keep_label
 
-            hp = heuristic_plan_query(q)
-            assert hp["period"].get("phrase") == "last 6 months"
-            assert hp["grain"].get("column_dimension") == "month"
+            hp = heuristic_plan_query(
+                "show me how Eva distributor sales in lahore are doing last 6 months"
+            )
+            assert hp["period_type"] == "LAST_N_MONTHS"
             assert hp["intent"] == "sales_matrix"
         finally:
             if previous is None:

@@ -1,34 +1,42 @@
-"""Deterministic execution of a QuerySpec against existing query engines."""
+"""Blind execution of a QuerySpec — no silent intent mutation.
+
+The LLM is the sole source of query parameters. This module:
+1. Normalizes / validates the plan
+2. Merges prior only when base/context_handling='prior' + clear[]
+3. Maps period_type → date windows (deterministic)
+4. Runs engines
+5. On invalid plans, returns ok=False + errors for the LLM to self-correct
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from eva_dashboard.client_language import (
-    extract_client_type_from_text,
-    extract_oil_type_from_text,
-    extract_packing_from_text,
-    is_distributor_party_grain,
     normalize_client_type,
     normalize_oil_type,
     normalize_packing_category,
 )
-from eva_dashboard.geo import extract_zone_from_text, normalize_zone
+from eva_dashboard.geo import normalize_zone
 from eva_dashboard.party_analytics import (
     analyze_parties,
-    extract_city_from_text,
     list_clients,
     lookup_party,
     party_sales,
 )
-from eva_dashboard.query_spec import merge_prior_into_spec, normalize_query_spec
+from eva_dashboard.query_spec import (
+    merge_prior_into_spec,
+    normalize_query_spec,
+    resolve_period_from_spec,
+    validate_query_spec,
+)
 from eva_dashboard.sales_query import query_price, query_sales
 
 
 def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize provided filter values only — never invent filters."""
     out = dict(filters or {})
     if out.get("city"):
-        # Keep spoken city as-is; extractors already canonicalize when used
         out["city"] = str(out["city"]).strip()
     if out.get("zone"):
         out["zone"] = normalize_zone(out.get("zone"))
@@ -43,56 +51,41 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _fill_spoken_period_and_month_grain(
-    *,
-    user_text: str,
-    period: dict[str, Any],
-    grain: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fill blank period/grain from spoken text — never override explicit values.
-
-    Critical for plan_query: the model often sets city/client_type/BUs but omits
-    ``period`` / ``grain.column_dimension``. An empty period then falls through
-    ``resolve_period(None)`` → current data month MTD (e.g. Aug 2026 MTD),
-    wiping an explicit user window like "last 6 months".
-    """
-    from eva_dashboard.chatbot import (
-        _extract_period_phrase,
-        _looks_month_wise,
-        _months_back_from_text,
-    )
-
-    period = dict(period or {})
-    grain = dict(grain or {})
-    phrase = (period.get("phrase") or "").strip() or None
-    date_from = period.get("date_from")
-    date_to = period.get("date_to")
-
-    # Period: fill only when the plan left phrase and ISO bounds blank.
-    if user_text and not phrase and not date_from and not date_to:
-        spoken = _extract_period_phrase(user_text)
-        if spoken:
-            period["phrase"] = spoken
-
-    # last N months / month-wise → month columns (only when grain blank).
-    # columns=month ignores a wrong single-month period phrase and uses months_back.
-    if user_text and not grain.get("column_dimension") and _looks_month_wise(user_text):
-        grain["column_dimension"] = "month"
-        if grain.get("months_back") is None:
-            grain["months_back"] = _months_back_from_text(user_text, 6)
-
-    return period, grain
-
-
 def execute_query_spec(
     raw_spec: dict[str, Any],
     *,
     prior: dict[str, Any] | None = None,
-    user_text: str = "",
+    user_text: str = "",  # kept for API compat; NOT used to mutate the plan
 ) -> dict[str, Any]:
-    """Run a planned QuerySpec. No silent sticky merges outside base/clear."""
+    """Execute a planned QuerySpec blindly.
+
+    ``user_text`` is ignored for planning — the LLM owns intent. Invalid specs
+    return ``{ok: False, error, plan_errors}`` so the model can retry.
+    """
+    del user_text  # explicit: no spoken-text mutation
     spec = normalize_query_spec(raw_spec)
     spec = merge_prior_into_spec(spec, prior)
+
+    # Resolve period_type → phrase / month grain (deterministic semantic layer)
+    resolved = resolve_period_from_spec(spec)
+    spec["period"] = resolved["period"]
+    spec["grain"] = resolved["grain"]
+    if resolved.get("months_back") is not None:
+        spec["months_back"] = resolved["months_back"]
+
+    errors = validate_query_spec(spec)
+    if errors:
+        return {
+            "ok": False,
+            "error": "Incomplete QuerySpec — fix and call plan_query again.",
+            "plan_errors": errors,
+            "query_spec": spec,
+            "response_instructions": (
+                "REQUIRED: Call plan_query again with a complete QuerySpec. "
+                "Address every plan_errors item. Do not invent numbers."
+            ),
+        }
+
     filters = _canon_filters(spec.get("filters") or {})
     grain = dict(spec.get("grain") or {})
     period = dict(spec.get("period") or {})
@@ -101,50 +94,9 @@ def execute_query_spec(
     if filters.get("business_unit") and not bus:
         bus = [filters["business_unit"]]
 
-    # Helpers ONLY fill blanks the model left empty from spoken text.
-    # Never invent Eva Distributors from "distributor-wise" grain language.
-    # Never override an explicit period / grain / business_units the plan set.
-    if user_text:
-        if not filters.get("city"):
-            filters["city"] = extract_city_from_text(user_text)
-        if not filters.get("zone"):
-            filters["zone"] = normalize_zone(extract_zone_from_text(user_text))
-        if not filters.get("client_type") and not is_distributor_party_grain(
-            user_text
-        ):
-            filters["client_type"] = normalize_client_type(
-                extract_client_type_from_text(user_text)
-            )
-        if not filters.get("oil_type"):
-            filters["oil_type"] = extract_oil_type_from_text(user_text)
-        if not filters.get("packing_category"):
-            filters["packing_category"] = extract_packing_from_text(user_text)
-        # Grain language must never keep a sticky Eva Distributors channel.
-        if is_distributor_party_grain(user_text):
-            filters["client_type"] = None
-        period, grain = _fill_spoken_period_and_month_grain(
-            user_text=user_text, period=period, grain=grain
-        )
-        if not bus and not filters.get("business_unit"):
-            from eva_dashboard.chatbot import _extract_business_units_from_text
-
-            spoken_bus = _extract_business_units_from_text(user_text)
-            if spoken_bus:
-                bus = list(spoken_bus)
-
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")
     date_to = period.get("date_to")
-
-    # Safety: city league cannot keep a city filter
-    if (grain.get("group_by") or "") == "city":
-        # Unless the user named that single city as the subject of a city-rank
-        # inside a larger ask — for "other cities" we already cleared.
-        if "city" in (spec.get("clear") or []) or not (
-            raw_spec.get("filters") or {}
-        ).get("city"):
-            if not extract_city_from_text(user_text):
-                filters["city"] = None
 
     result: dict[str, Any]
     if intent in {"sales_matrix", "sales_trend", "sales_analytical"}:
@@ -153,6 +105,10 @@ def execute_query_spec(
             "sales_trend": "trend",
             "sales_analytical": "analytical",
         }[intent]
+        # LAST_N_MONTHS semantic → month columns (already set in resolve_period)
+        columns = grain.get("column_dimension") or "client_type"
+        # Row grain from group_by / row_dimension when it is a sales dimension
+        row_dim = grain.get("row_dimension")
         bu = bus[0] if len(bus) == 1 else None
         bus_param = bus if len(bus) > 1 else None
         result = query_sales(
@@ -167,15 +123,15 @@ def execute_query_spec(
             packing_category=filters.get("packing_category"),
             client_type=filters.get("client_type"),
             party=filters.get("party"),
-            columns=grain.get("column_dimension") or "client_type",
-            months_back=int(grain.get("months_back") or 6),
-            row_dimension=grain.get("row_dimension"),
+            columns=columns,
+            months_back=int(spec.get("months_back") or grain.get("months_back") or 6),
+            row_dimension=row_dim,
             row_groups=list(grain.get("row_groups") or []) or None,
             excludes=spec.get("excludes") or None,
             mode=mode,
             compare=spec.get("compare"),
             active_only=bool(filters.get("active_only")),
-            prior_spec=None,  # never silent sticky
+            prior_spec=None,
         )
     elif intent == "party_list":
         result = list_clients(
@@ -191,9 +147,7 @@ def execute_query_spec(
         )
     elif intent == "party_rank":
         group_by = grain.get("group_by") or "party"
-        limit = int(spec.get("limit") or (25 if group_by in {"city", "zone"} else 25))
-        # Multi-BU brand scope (Eva Consumer+Bulk) via brand filter — do not
-        # silently drop prior Eva scope when the plan carried both units.
+        limit = int(spec.get("limit") or 25)
         brand = None
         single_bu = filters.get("business_unit") or (
             bus[0] if len(bus) == 1 else None
@@ -226,7 +180,7 @@ def execute_query_spec(
             mix_dimension=grain.get("mix_dimension"),
         )
     elif intent == "party_lookup":
-        q = spec.get("party_query") or filters.get("party") or user_text
+        q = spec.get("party_query") or filters.get("party") or ""
         if phrase:
             result = party_sales(
                 query=q, period=phrase, columns="city", mode="trend"
@@ -236,7 +190,7 @@ def execute_query_spec(
                 query=q,
                 period=None,
                 columns="month",
-                months_back=int(grain.get("months_back") or 6),
+                months_back=int(spec.get("months_back") or grain.get("months_back") or 6),
                 mode="matrix",
             )
         if result.get("ok") is False:
@@ -268,7 +222,7 @@ def execute_query_spec(
                 "date_from": date_from,
                 "date_to": date_to,
             },
-            user_text,
+            "",
             prior_spec=None,
         )
     elif intent == "overview":
@@ -283,11 +237,11 @@ def execute_query_spec(
 
     if isinstance(result, dict):
         result = dict(result)
-        # Persist filled period/grain so follow-ups see what was actually run.
         filled_spec = dict(spec)
         filled_spec["period"] = period
         filled_spec["grain"] = grain
         filled_spec["filters"] = filters
+        filled_spec["business_units"] = bus
         result["query_spec"] = filled_spec
         result.setdefault("ok", True)
     return result
@@ -298,26 +252,36 @@ def heuristic_plan_query(
     *,
     prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Offline planner for tests / fallback when the model skips plan_query.
+    """Offline / test-only planner. NOT used to override live LLM plans.
 
-    Uses vocabulary + reshape — still emits an explicit QuerySpec (no mute sticky).
+    Kept so unit tests can build valid QuerySpecs without an API key.
     """
     from eva_dashboard.analytics_reshape import resolve_analytics_reshape
     from eva_dashboard.chatbot import (
         _extract_business_units_from_text,
+        _extract_period_phrase,
+        _looks_month_wise,
         _looks_named_party_sales,
         _looks_price_query,
         _looks_scoped_performance_sales,
+        _months_back_from_text,
         suggest_preferred_tool,
     )
-    from eva_dashboard.party_analytics import infer_party_analytics_from_text
+    from eva_dashboard.client_language import (
+        extract_client_type_from_text,
+        is_distributor_party_grain,
+    )
+    from eva_dashboard.party_analytics import (
+        extract_city_from_text,
+        infer_party_analytics_from_text,
+    )
+    from eva_dashboard.geo import extract_zone_from_text, normalize_zone
     from eva_dashboard.advanced_routing import looks_advanced, infer_advanced_from_text
 
     preferred = suggest_preferred_tool(user_text)
     inf = infer_party_analytics_from_text(user_text)
     text_l = (user_text or "").lower()
 
-    # Map preferred tool → intent
     intent_map = {
         "query_sales": "sales_analytical"
         if _looks_scoped_performance_sales(user_text)
@@ -344,8 +308,6 @@ def heuristic_plan_query(
         or grain_distributors
         or text_l.strip().startswith("[follow-up")
     )
-    # "distributor wise / lowest performing distributors" after a sales table
-    # is a party rank reshape of that table — not a fresh channel list.
     if grain_distributors and (
         "lowest" in text_l
         or "worst" in text_l
@@ -365,21 +327,23 @@ def heuristic_plan_query(
     )
 
     filters: dict[str, Any] = {
-        "city": inf.get("city"),
-        "zone": inf.get("zone"),
-        "client_type": None if grain_distributors else inf.get("client_type"),
+        "city": extract_city_from_text(user_text) or inf.get("city"),
+        "zone": normalize_zone(extract_zone_from_text(user_text) or inf.get("zone")),
+        "client_type": None
+        if grain_distributors
+        else (extract_client_type_from_text(user_text) or inf.get("client_type")),
         "business_unit": inf.get("business_unit"),
         "oil_type": inf.get("oil_type"),
         "packing_category": inf.get("packing_category"),
     }
     bus = _extract_business_units_from_text(user_text)
-    # Carry prior Eva/Maan multi-BU when follow-up didn't rename the brand.
     if not bus and base == "prior" and prior:
         bus = list(prior.get("business_units") or [])
         if not bus:
             pbu = (prior.get("filters") or {}).get("business_unit")
             if pbu:
                 bus = [pbu]
+
     clear: list[str] = []
     if reshape.get("clear_city"):
         clear.append("city")
@@ -388,24 +352,18 @@ def heuristic_plan_query(
         clear.append("zone")
         filters["zone"] = None
     if grain_distributors:
-        # Explicitly drop a sticky channel so party grain can see all buyers
-        # of the prior brand scope (e.g. Eva Consumer+Bulk).
         clear.append("client_type")
         filters["client_type"] = None
 
     grain: dict[str, Any] = {}
+    group_by = None
     if intent == "party_rank":
-        grain["group_by"] = reshape.get("group_by") or inf.get("group_by") or "party"
+        group_by = reshape.get("group_by") or inf.get("group_by") or "party"
+        grain["group_by"] = group_by
     if intent.startswith("sales"):
-        from eva_dashboard.chatbot import _looks_month_wise, _months_back_from_text
-
-        # last N months / month-wise → month grid (not a single-month analytical pack)
-        if _looks_month_wise(user_text) or (
-            "month" in text_l and "wise" in text_l
-        ):
+        if _looks_month_wise(user_text) or ("month" in text_l and "wise" in text_l):
             grain["column_dimension"] = "month"
             grain["months_back"] = _months_back_from_text(user_text, 6)
-            # Month columns force matrix mode in query_sales; prefer matrix intent.
             if intent == "sales_analytical":
                 intent = "sales_matrix"
         if "city wise" in text_l or "city-wise" in text_l:
@@ -419,25 +377,43 @@ def heuristic_plan_query(
     sort = reshape.get("sort") or inf.get("sort") or "desc"
     title_mode = reshape.get("title_mode") or inf.get("title_mode")
 
-    # Prefer spoken period (incl. last N months); fall back to party-analytics infer.
-    from eva_dashboard.chatbot import _extract_period_phrase
-
     period_phrase = _extract_period_phrase(user_text) or inf.get("period")
+    months_back = grain.get("months_back")
+    if period_phrase and __import__("re").search(
+        r"\blast\s+(\d{1,2})\s+months?\b", period_phrase
+    ):
+        period_type = "LAST_N_MONTHS"
+        months_back = _months_back_from_text(user_text, 6)
+        grain["column_dimension"] = grain.get("column_dimension") or "month"
+        grain["months_back"] = months_back
+    elif period_phrase in {"this month", "mtd", "so far"} or not period_phrase:
+        period_type = "MTD"
+        period_phrase = period_phrase or "this month"
+    elif period_phrase == "last month":
+        period_type = "LAST_MONTH"
+    elif period_phrase == "last week":
+        period_type = "LAST_WEEK"
+    else:
+        period_type = "NAMED_MONTH"
 
     spec: dict[str, Any] = {
         "intent": intent,
-        "base": base,
-        "clear": clear,
+        "context_handling": base,
+        "clear_filters": clear,
         "filters": {k: v for k, v in filters.items() if v is not None},
         "grain": grain,
-        "metric": metric,
-        "sort": sort,
+        "group_by": group_by,
+        "ranking_metric": metric,
+        "sort_order": sort,
         "grown_only": bool(reshape.get("grown_only") or False),
         "declined_only": bool(reshape.get("declined_only") or False),
         "title_mode": title_mode,
         "business_units": bus,
+        "period_type": period_type,
+        "months_back": months_back,
         "period": {"phrase": period_phrase} if period_phrase else {},
-        "rationale": f"heuristic plan via {preferred}",
+        "named_month": period_phrase if period_type == "NAMED_MONTH" else None,
+        "rationale": f"test planner via {preferred}",
     }
     if intent == "party_lookup" and _looks_named_party_sales(user_text):
         from eva_dashboard.chatbot import _extract_named_party_query

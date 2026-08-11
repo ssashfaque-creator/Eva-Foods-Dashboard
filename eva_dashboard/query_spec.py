@@ -1,7 +1,11 @@
-"""Structured QuerySpec — the model plans; the executor runs.
+"""Semantic Planner QuerySpec — LLM plans; Python executes blindly.
 
-Prior answer context is shown to the model every turn. Inheritance is explicit
-via ``base`` + ``clear`` — never silent sticky merges.
+Division of responsibility:
+- LLM: vocabulary, disambiguation, follow-up clear[], sort/metric choice
+- Python: MT math, AMS windows, joins, zone mapping, date bounds
+
+No silent mutation of a valid plan. Invalid plans return errors for the LLM
+to self-correct.
 """
 
 from __future__ import annotations
@@ -22,6 +26,15 @@ INTENTS = {
     "overview",
 }
 
+PERIOD_TYPES = {
+    "MTD",
+    "LAST_N_MONTHS",
+    "LAST_MONTH",
+    "LAST_WEEK",
+    "NAMED_MONTH",
+    "CUSTOM_DATE",
+}
+
 FILTER_KEYS = (
     "city",
     "zone",
@@ -34,18 +47,28 @@ FILTER_KEYS = (
     "active_only",
 )
 
+GROUP_BY_DIMS = (
+    "city",
+    "zone",
+    "party",
+    "business_unit",
+    "packing_category",
+    "product",
+    "oil_type",
+    "client_type",
+)
+
 
 PLAN_QUERY_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "plan_query",
         "description": (
-            "Plan the data query for this user ask. Emit a complete QuerySpec. "
-            "If PRIOR_QUERY_CONTEXT exists and the user is reshaping/comparing/"
-            "following up, set base='prior' and use clear[] to drop sticky "
-            "filters (e.g. clear city when comparing to other cities). "
-            "For a fresh ask, set base='none'. Do NOT invent numbers — this "
-            "only plans; the server executes and returns tables."
+            "Semantic planner: translate ANY analytical ask into a QuerySpec. "
+            "You choose filters, grain, period, and metrics. The server executes "
+            "blindly — it will NOT rewrite your plan. If the plan is incomplete, "
+            "you get an error and must retry. "
+            "Follow-ups: context_handling='prior' + clear_filters for what drops."
         ),
         "parameters": {
             "type": "object",
@@ -54,54 +77,106 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": sorted(INTENTS),
                     "description": (
-                        "sales_* = volume pivots; party_rank = AMS/growth/"
-                        "rankings; party_list = who are the parties; "
-                        "party_lookup = one named party; price; advanced; overview"
+                        "sales_matrix = breakdowns; sales_trend = named-month "
+                        "Volume+AMS; sales_analytical = performance pack; "
+                        "party_rank = compare parties/cities/zones; "
+                        "party_list = who are the parties; party_lookup = one "
+                        "named party; price; advanced; overview"
+                    ),
+                },
+                "context_handling": {
+                    "type": "string",
+                    "enum": ["none", "prior"],
+                    "description": (
+                        "prior = follow-up from PRIOR_QUERY_CONTEXT; "
+                        "none = fresh topic. Alias of 'base'."
                     ),
                 },
                 "base": {
                     "type": "string",
                     "enum": ["none", "prior"],
+                    "description": "Legacy alias for context_handling.",
+                },
+                "clear_filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": list(FILTER_KEYS) + ["business_units", "city_filter"],
+                    },
                     "description": (
-                        "prior = start from PRIOR_QUERY_CONTEXT then apply "
-                        "filters/clear/grain; none = ignore prior filters"
+                        "When context_handling=prior, filter keys to REMOVE "
+                        "(e.g. ['city'] when going to other cities / nationally)."
                     ),
                 },
                 "clear": {
                     "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": list(FILTER_KEYS) + ["business_units"],
-                    },
+                    "items": {"type": "string"},
+                    "description": "Legacy alias for clear_filters.",
+                },
+                "period_type": {
+                    "type": "string",
+                    "enum": sorted(PERIOD_TYPES),
                     "description": (
-                        "Filter keys to drop from prior (e.g. ['city'] when "
-                        "user asks about other cities / nationally)"
+                        "REQUIRED. Always choose a period. "
+                        "MTD if user did not specify; LAST_N_MONTHS for "
+                        "'last 6 months'; NAMED_MONTH for 'July'; "
+                        "CUSTOM_DATE for ISO bounds."
+                    ),
+                },
+                "months_back": {
+                    "type": "integer",
+                    "description": "Required when period_type=LAST_N_MONTHS.",
+                },
+                "named_month": {
+                    "type": "string",
+                    "description": (
+                        "When period_type=NAMED_MONTH: e.g. 'July' or 'July 2026'."
                     ),
                 },
                 "period": {
                     "type": "object",
-                    "description": (
-                        "REQUIRED when the user names a window. "
-                        "phrase examples: 'last 6 months', 'July', 'this month'. "
-                        "Omitting period when they said last N months is wrong."
-                    ),
+                    "description": "Optional phrase / ISO bounds (CUSTOM_DATE).",
                     "properties": {
                         "phrase": {"type": "string"},
                         "date_from": {"type": "string"},
                         "date_to": {"type": "string"},
                     },
                 },
+                "group_by": {
+                    "type": "string",
+                    "enum": list(GROUP_BY_DIMS),
+                    "description": (
+                        "Row grain. distributor-wise→party; product-wise→"
+                        "packing_category; SKU-wise→product; city-wise→city."
+                    ),
+                },
                 "filters": {
                     "type": "object",
                     "properties": {
-                        "city": {"type": "string"},
-                        "zone": {"type": "string"},
-                        "client_type": {"type": "string"},
-                        "business_unit": {"type": "string"},
                         "business_units": {
                             "type": "array",
                             "items": {"type": "string"},
+                            "description": (
+                                "Eva→[Eva Consumer, Eva Bulk]; "
+                                "Maan→[Maan Consumer, Maan Bulk]; "
+                                "Consumer→[Eva Consumer]."
+                            ),
                         },
+                        "business_unit": {"type": "string"},
+                        "client_type": {
+                            "type": "string",
+                            "description": (
+                                "Channel filter only when named. "
+                                "'distributor sales'→Eva Distributors. "
+                                "Do NOT set for distributor-wise grain."
+                            ),
+                        },
+                        "city": {"type": "string"},
+                        "city_filter": {
+                            "type": "string",
+                            "description": "Alias for city (City-Filter).",
+                        },
+                        "zone": {"type": "string"},
                         "oil_type": {"type": "string"},
                         "packing_category": {"type": "string"},
                         "party": {"type": "string"},
@@ -109,38 +184,49 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "active_only": {"type": "boolean"},
                     },
                 },
-                "excludes": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
+                "column_dimension": {
+                    "type": "string",
+                    "description": (
+                        "Pivot columns for sales_matrix. LAST_N_MONTHS implies "
+                        "'month'. Else often client_type or city."
+                    ),
                 },
-                "grain": {
-                    "type": "object",
-                    "properties": {
-                        "row_dimension": {"type": "string"},
-                        "row_groups": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "column_dimension": {"type": "string"},
-                        "months_back": {"type": "integer"},
-                        "group_by": {
-                            "type": "string",
-                            "enum": ["party", "city", "zone"],
-                        },
-                    },
+                "ranking_metric": {
+                    "type": "string",
+                    "enum": [
+                        "volume",
+                        "ams",
+                        "vs_ams",
+                        "ams_growth",
+                        "yoy",
+                        "yoy_ams",
+                        "invoices",
+                        "invoice_mt",
+                        "new_parties",
+                        "lost_parties",
+                        "doing_well",
+                        "packing_mix",
+                        "product_mix",
+                    ],
+                    "description": (
+                        "party_rank metric. lowest/worst performing→vs_ams; "
+                        "least gains→ams_growth."
+                    ),
                 },
                 "metric": {
                     "type": "string",
-                    "description": (
-                        "For party_rank: ams|ams_growth|volume|yoy|yoy_ams|"
-                        "vs_ams|packing_mix|product_mix|…"
-                    ),
+                    "description": "Legacy alias for ranking_metric.",
                 },
-                "compare": {"type": "string"},
-                "sort": {"type": "string", "enum": ["asc", "desc"]},
+                "sort_order": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "description": "desc=highest/best; asc=lowest/worst.",
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": ["asc", "desc"],
+                    "description": "Legacy alias for sort_order.",
+                },
                 "grown_only": {"type": "boolean"},
                 "declined_only": {"type": "boolean"},
                 "limit": {"type": "integer"},
@@ -151,13 +237,34 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "smallest_gains",
                         "biggest_declines",
                         "by_growth",
+                        "underperformers",
                     ],
                 },
-                "advanced_mode": {"type": "string"},
-                "party_query": {
-                    "type": "string",
-                    "description": "Named party for party_lookup",
+                "excludes": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                 },
+                "grain": {
+                    "type": "object",
+                    "description": "Legacy nested grain; prefer top-level group_by.",
+                    "properties": {
+                        "row_dimension": {"type": "string"},
+                        "row_groups": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "column_dimension": {"type": "string"},
+                        "months_back": {"type": "integer"},
+                        "group_by": {"type": "string"},
+                        "mix_dimension": {"type": "string"},
+                    },
+                },
+                "compare": {"type": "string"},
+                "advanced_mode": {"type": "string"},
+                "party_query": {"type": "string"},
                 "price_flags": {
                     "type": "object",
                     "properties": {
@@ -167,21 +274,13 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "factor_only": {"type": "boolean"},
                     },
                 },
-                "rationale": {
-                    "type": "string",
-                    "description": "One short sentence: why this plan answers the user",
-                },
                 "business_units": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": (
-                        "Brand shorthand: Eva → [Eva Consumer, Eva Bulk]; "
-                        "Maan → [Maan Consumer, Maan Bulk]; "
-                        "Consumer alone → [Eva Consumer]. Required for brand asks."
-                    ),
                 },
+                "rationale": {"type": "string"},
             },
-            "required": ["intent", "base"],
+            "required": ["intent", "period_type"],
             "additionalProperties": False,
         },
     },
@@ -223,6 +322,7 @@ def prior_context_payload(
                 "filters": _compact(filters),
                 "period_phrase": party_spec.get("period_phrase"),
                 "period": party_spec.get("period"),
+                "business_units": list(party_spec.get("business_units") or []) or None,
             }
         )
     if table_spec:
@@ -260,70 +360,146 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
     if not prior:
         return (
             "PRIOR_QUERY_CONTEXT: none\n"
-            "This is a fresh ask — set base='none' unless the user clearly "
-            "refers to a previous table."
+            "Fresh ask → context_handling='none'."
         )
     return (
-        "PRIOR_QUERY_CONTEXT (the last answer the user can Reply on):\n"
+        "PRIOR_QUERY_CONTEXT (last answer the user can Reply on):\n"
         f"{json.dumps(prior, indent=2, default=str)}\n\n"
-        "Rules:\n"
-        "- Fresh complete ask → base='none'.\n"
-        "- Follow-up / reshape / 'this growth' / 'compared to other…' → "
-        "base='prior', keep useful filters (e.g. client_type), and clear[] "
-        "anything that contradicts the new ask.\n"
-        "- 'other cities' / city league → intent=party_rank, group_by=city, "
-        "clear=['city'], keep metric (often ams_growth).\n"
-        "- 'least/lowest gains' → sort=asc, grown_only=false, "
-        "title_mode=smallest_gains.\n"
-        "- Brand shorthand (YOU must set business_units — do not omit):\n"
-        "  Eva → [Eva Consumer, Eva Bulk]; Maan → [Maan Consumer, Maan Bulk];\n"
-        "  Consumer alone → Eva Consumer.\n"
-        "- 'distributor-wise' / 'lowest performing distributors' after a brand\n"
-        "  table → base='prior', party_rank, keep business_units, clear\n"
-        "  client_type, metric=vs_ams, sort=asc. Do NOT invent Eva Distributors.\n"
+        "Follow-up rules:\n"
+        "- Reshape / 'this…' / 'compared to…' → context_handling='prior'.\n"
+        "- You MUST list clear_filters for anything that no longer applies "
+        "(e.g. clear city when ranking other cities).\n"
+        "- Fresh complete ask → context_handling='none'.\n"
+        "- Keep business_units from prior when the user says 'this' and does "
+        "not rename the brand.\n"
+        "- distributor-wise after a brand table → group_by=party, "
+        "clear_filters include client_type if it was sticky; metric vs_ams "
+        "for lowest performing. Do NOT invent Eva Distributors.\n"
     )
 
 
+def _derive_period_type(raw: dict[str, Any], period: dict[str, Any]) -> str | None:
+    """Accept legacy period.phrase when period_type omitted (compat)."""
+    explicit = str(raw.get("period_type") or "").strip().upper()
+    if explicit in PERIOD_TYPES:
+        return explicit
+    phrase = str(period.get("phrase") or raw.get("period_phrase") or "").lower()
+    if period.get("date_from") and period.get("date_to"):
+        return "CUSTOM_DATE"
+    if not phrase:
+        return None
+    if "last week" in phrase or phrase == "this week":
+        return "LAST_WEEK" if "last" in phrase else "MTD"
+    if re_last_n := __import__("re").search(
+        r"\b(last|past|previous)\s+(\d{1,2})\s+months?\b", phrase
+    ):
+        return "LAST_N_MONTHS"
+    if "last month" in phrase or "previous month" in phrase:
+        return "LAST_MONTH"
+    if phrase in {"this month", "mtd", "so far"}:
+        return "MTD"
+    # Named month / other resolvable phrase
+    return "NAMED_MONTH"
+
+
 def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
-    """Coerce model JSON into a safe QuerySpec."""
+    """Coerce model JSON into a canonical QuerySpec (no silent intent fills)."""
     raw = dict(raw or {})
-    intent = str(raw.get("intent") or "sales_matrix").strip().lower()
-    if intent not in INTENTS:
-        # Map common aliases
-        aliases = {
-            "sales": "sales_matrix",
-            "matrix": "sales_matrix",
-            "trend": "sales_trend",
-            "analytical": "sales_analytical",
-            "list_clients": "party_list",
-            "analyze_parties": "party_rank",
-            "lookup_party": "party_lookup",
-            "query_price": "price",
-            "query_sales": "sales_matrix",
-            "advanced_query": "advanced",
-        }
-        intent = aliases.get(intent, "sales_matrix")
-    base = str(raw.get("base") or "none").strip().lower()
+    intent = str(raw.get("intent") or "").strip().lower()
+    aliases = {
+        "sales": "sales_matrix",
+        "matrix": "sales_matrix",
+        "trend": "sales_trend",
+        "analytical": "sales_analytical",
+        "list_clients": "party_list",
+        "analyze_parties": "party_rank",
+        "lookup_party": "party_lookup",
+        "query_price": "price",
+        "query_sales": "sales_matrix",
+        "advanced_query": "advanced",
+    }
+    if intent in aliases:
+        intent = aliases[intent]
+    if intent and intent not in INTENTS:
+        intent = ""
+
+    base = str(
+        raw.get("context_handling") or raw.get("base") or "none"
+    ).strip().lower()
     if base not in {"none", "prior"}:
         base = "none"
-    clear = [str(c) for c in (raw.get("clear") or []) if c]
+
+    clear_raw = raw.get("clear_filters")
+    if clear_raw is None:
+        clear_raw = raw.get("clear") or []
+    clear = []
+    for c in clear_raw or []:
+        key = str(c)
+        if key == "city_filter":
+            key = "city"
+        clear.append(key)
+
     filters = dict(raw.get("filters") or {})
+    # city_filter alias → city
+    if filters.get("city_filter") and not filters.get("city"):
+        filters["city"] = filters.pop("city_filter")
+    elif "city_filter" in filters:
+        filters.pop("city_filter", None)
+
     grain = dict(raw.get("grain") or {})
+    # Promote top-level group_by / column_dimension / months_back into grain
+    if raw.get("group_by") and not grain.get("group_by"):
+        gb = str(raw["group_by"]).strip().lower()
+        if gb in {"party", "city", "zone"}:
+            grain["group_by"] = gb
+        elif gb in GROUP_BY_DIMS and not grain.get("row_dimension"):
+            grain["row_dimension"] = gb
+    if raw.get("column_dimension") and not grain.get("column_dimension"):
+        grain["column_dimension"] = raw["column_dimension"]
+    if raw.get("months_back") is not None and grain.get("months_back") is None:
+        grain["months_back"] = int(raw["months_back"])
+
     period = dict(raw.get("period") or {})
-    # Flatten period.phrase convenience
     if raw.get("period_phrase") and not period.get("phrase"):
         period["phrase"] = raw.get("period_phrase")
+    if raw.get("named_month") and not period.get("phrase"):
+        period["phrase"] = raw["named_month"]
+
+    period_type = _derive_period_type(raw, period)
+    months_back = grain.get("months_back")
+    if months_back is None and raw.get("months_back") is not None:
+        months_back = int(raw["months_back"])
+    # Derive months_back from "last N months" phrase when omitted
+    if months_back is None and period_type == "LAST_N_MONTHS":
+        import re as _re
+
+        phrase = str(period.get("phrase") or "")
+        m = _re.search(r"\b(last|past|previous)\s+(\d{1,2})\s+months?\b", phrase, _re.I)
+        if m:
+            months_back = int(m.group(2))
+            grain["months_back"] = months_back
+            grain.setdefault("column_dimension", "month")
+
+    metric = raw.get("ranking_metric") or raw.get("metric")
+    sort = raw.get("sort_order") or raw.get("sort") or "desc"
+
+    bus = list(
+        filters.get("business_units") or raw.get("business_units") or []
+    )
+
     return {
         "intent": intent,
         "base": base,
         "clear": clear,
+        "period_type": period_type,
         "period": period,
+        "months_back": months_back,
         "filters": filters,
         "excludes": dict(raw.get("excludes") or {}),
         "grain": grain,
-        "metric": raw.get("metric"),
+        "metric": metric,
         "compare": raw.get("compare"),
-        "sort": raw.get("sort") or "desc",
+        "sort": sort,
         "grown_only": bool(raw.get("grown_only") or False),
         "declined_only": bool(raw.get("declined_only") or False),
         "limit": int(raw.get("limit") or 0) or None,
@@ -332,10 +508,80 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "party_query": raw.get("party_query") or filters.get("party"),
         "price_flags": dict(raw.get("price_flags") or {}),
         "rationale": raw.get("rationale") or "",
-        "business_units": list(
-            filters.get("business_units") or raw.get("business_units") or []
-        ),
+        "business_units": bus,
     }
+
+
+def validate_query_spec(spec: dict[str, Any]) -> list[str]:
+    """Return human-readable plan errors for the LLM (empty = ok)."""
+    errors: list[str] = []
+    if not spec.get("intent"):
+        errors.append(
+            "Missing intent. Choose sales_matrix, party_rank, sales_trend, …"
+        )
+    if not spec.get("period_type"):
+        errors.append(
+            "Missing period_type. REQUIRED: MTD | LAST_N_MONTHS | LAST_MONTH | "
+            "LAST_WEEK | NAMED_MONTH | CUSTOM_DATE. "
+            "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6. "
+            "If unspecified, use MTD."
+        )
+    pt = spec.get("period_type")
+    if pt == "LAST_N_MONTHS":
+        mb = spec.get("months_back") or (spec.get("grain") or {}).get("months_back")
+        if not mb:
+            errors.append(
+                "period_type=LAST_N_MONTHS requires months_back (e.g. 6)."
+            )
+    if pt == "NAMED_MONTH":
+        phrase = (spec.get("period") or {}).get("phrase")
+        if not phrase:
+            errors.append(
+                "period_type=NAMED_MONTH requires named_month or period.phrase "
+                "(e.g. 'July' or 'July 2026')."
+            )
+    if pt == "CUSTOM_DATE":
+        period = spec.get("period") or {}
+        if not (period.get("date_from") and period.get("date_to")):
+            errors.append(
+                "period_type=CUSTOM_DATE requires period.date_from and period.date_to."
+            )
+    if spec.get("intent") == "party_lookup" and not (
+        spec.get("party_query") or (spec.get("filters") or {}).get("party")
+    ):
+        errors.append("party_lookup requires party_query (the party name).")
+    return errors
+
+
+def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Map period_type → executor period phrase / bounds / month grain flags.
+
+    Deterministic business logic — not LLM judgment.
+    """
+    pt = spec.get("period_type") or "MTD"
+    period = dict(spec.get("period") or {})
+    grain = dict(spec.get("grain") or {})
+    mb = spec.get("months_back") or grain.get("months_back")
+
+    if pt == "MTD":
+        period.setdefault("phrase", "this month")
+    elif pt == "LAST_MONTH":
+        period.setdefault("phrase", "last month")
+    elif pt == "LAST_WEEK":
+        period.setdefault("phrase", "last week")
+    elif pt == "LAST_N_MONTHS":
+        n = int(mb or 6)
+        period["phrase"] = f"last {n} months"
+        grain["column_dimension"] = grain.get("column_dimension") or "month"
+        grain["months_back"] = n
+    elif pt == "NAMED_MONTH":
+        # phrase already set from named_month
+        pass
+    elif pt == "CUSTOM_DATE":
+        # date_from / date_to already on period
+        pass
+
+    return {"period": period, "grain": grain, "months_back": grain.get("months_back") or mb}
 
 
 def merge_prior_into_spec(
@@ -348,11 +594,9 @@ def merge_prior_into_spec(
         return out
     prior_filters = dict(prior.get("filters") or {})
     merged_filters = dict(prior_filters)
-    # Patches from spec overwrite
     for k, v in (spec.get("filters") or {}).items():
         if v is not None and v != "":
             merged_filters[k] = v
-    # Explicit clears win
     for key in spec.get("clear") or []:
         merged_filters.pop(key, None)
         if key == "business_units":
@@ -361,7 +605,6 @@ def merge_prior_into_spec(
             merged_filters.pop("business_unit", None)
     out["filters"] = merged_filters
 
-    # Inherit metric / group_by / period when omitted
     if not out.get("metric") and prior.get("metric"):
         out["metric"] = prior.get("metric")
     grain = dict(out.get("grain") or {})
@@ -375,15 +618,19 @@ def merge_prior_into_spec(
         grain["months_back"] = prior.get("months_back")
     out["grain"] = grain
 
+    # Inherit period only when this plan did not set period_type / phrase
     period = dict(out.get("period") or {})
-    if not period.get("phrase") and not period.get("date_from"):
+    if not out.get("period_type") and not period.get("phrase") and not period.get(
+        "date_from"
+    ):
         if prior.get("period_phrase"):
             period["phrase"] = prior.get("period_phrase")
         elif isinstance(prior.get("period"), dict):
             p = prior["period"]
             period.setdefault("date_from", p.get("date_from"))
             period.setdefault("date_to", p.get("date_to"))
-    out["period"] = period
+        out["period"] = period
+        out["period_type"] = _derive_period_type({}, period)
 
     if not out.get("business_units") and prior.get("business_units"):
         if "business_units" not in (spec.get("clear") or []):
@@ -392,15 +639,12 @@ def merge_prior_into_spec(
     if not out.get("excludes") and prior.get("excludes"):
         out["excludes"] = dict(prior.get("excludes") or {})
 
-    # City grain without a named city ⇒ clear city (safety)
-    if (grain.get("group_by") or "") == "city" and not merged_filters.get("city"):
-        merged_filters.pop("city", None)
-        out["filters"] = merged_filters
-    if (grain.get("group_by") or "") == "city" and "city" not in (
-        spec.get("clear") or []
-    ):
-        # If user asked city league, city filter must not remain
-        if not (spec.get("filters") or {}).get("city"):
+    # City league safety: ranking cities cannot keep a sticky city filter
+    # unless the plan explicitly re-set city after clear.
+    if (grain.get("group_by") or "") == "city":
+        if "city" in (spec.get("clear") or []) or not (spec.get("filters") or {}).get(
+            "city"
+        ):
             merged_filters.pop("city", None)
             out["filters"] = merged_filters
 

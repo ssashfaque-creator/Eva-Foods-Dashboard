@@ -1559,11 +1559,11 @@ def analyze_parties(
         rows.sort(key=lambda r: sk(r["pct_vs_ams"], r["volume_mt"] or 0))
         score_key, score_label = "pct_vs_ams", "% vs AMS/Expected"
     elif metric_n == "ams_growth":
-        # Rank on AMS windows only — need a real prior/current AMS baseline.
+        # Semantic layer: exclude zero-AMS baselines (useless comparisons).
         rows = [
             r
             for r in rows
-            if (r.get("ams_mt") or 0) > 0 or (r.get("ams_prior_mt") or 0) > 0
+            if (r.get("ams_mt") or 0) > 0 and (r.get("ams_prior_mt") or 0) > 0
         ]
         rows.sort(
             key=lambda r: sk(

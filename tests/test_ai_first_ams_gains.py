@@ -115,5 +115,12 @@ def test_system_prompt_teaches_vocab_and_tools() -> None:
     assert "VOCABULARY" in text
     assert "TOOL GUIDE" in text
     assert "analyze_parties" in text
-    assert "least / lowest" in text.lower() or "sort=asc" in text
-    assert "plan" in text.lower() or "AI-first" in text
+    low = text.lower()
+    assert (
+        "least/lowest" in low
+        or "least / lowest" in low
+        or "sort_order" in low
+        or "sort=asc" in text
+        or "sort_order=asc" in low
+    )
+    assert "plan" in low or "semantic planner" in low

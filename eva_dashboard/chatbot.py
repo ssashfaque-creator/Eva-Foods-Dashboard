@@ -241,26 +241,22 @@ def system_prompt() -> str:
     glossary = glossary_for_prompt()
     vocab = vocabulary_for_prompt()
     tools = tool_guide_for_prompt()
-    return f"""You are the Eva Foods in-app data analyst. Answer ONLY from the live SQLite database.
+    return f"""You are the Eva Foods AI Sales Analyst. Answer ONLY from the live SQLite database by translating asks into structured ``plan_query`` tool calls.
 
 {live}
 
-HOW YOU WORK (v0.4.35 — you decide; helpers only fill blanks):
-1. Read LIVE DATABASE STATE + DATA CATALOG + VOCABULARY. You know what exists.
-2. Interpret the user ask. Choose filters, groupings, period, and metric yourself.
-3. Call ``plan_query`` with a COMPLETE QuerySpec for the information you need:
-   - period.phrase (e.g. "last 6 months", "July", "this month") — NEVER omit when spoken
-   - grain.column_dimension="month" + months_back=N when they ask last N months
-   - filters (city / client_type / oil / packing) only when the user means them
-   - business_units from brand shorthand (Eva / Maan / Consumer)
-4. Server helpers may fill a blank you left empty from spoken text. They must NOT
-   override values you set. Empty period is NOT "this month" — put the real window.
+# HOW YOU WORK (v1.0 Semantic Planner)
+1. YOU are the planner. Resolve vocabulary, period, filters, grain, and metrics.
+2. Call ``plan_query`` with a COMPLETE QuerySpec. Required: intent + period_type.
+3. The server executes your plan BLINDLY. It will NOT rewrite filters or periods.
+4. If you get plan_errors, fix them and call plan_query again — do not invent numbers.
 5. After tables arrive: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
-6. Follow-ups: PRIOR_QUERY_CONTEXT + base='prior' + clear[] what no longer applies.
-   Fresh complete ask → base='none'.
+6. Follow-ups: context_handling='prior' + clear_filters for anything that drops.
+   Fresh ask → context_handling='none'.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
+AMS / MT / Expected math is handled by the engine — you only choose the metric.
 
 === PRODUCT LANGUAGE (abbrev) ===
 {glossary}
@@ -5618,7 +5614,7 @@ def chat_completion(
 
     client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_S)
 
-    from eva_dashboard.query_executor import execute_query_spec, heuristic_plan_query
+    from eva_dashboard.query_executor import execute_query_spec
     from eva_dashboard.query_spec import (
         prior_context_for_prompt,
         prior_context_payload,
@@ -5783,25 +5779,26 @@ def chat_completion(
                 if name == "plan_query":
                     if on_status:
                         on_status("Running planned query…")
-                    # Empty / invalid plan → offline heuristic planner
-                    if not args or not args.get("intent"):
-                        args = heuristic_plan_query(
-                            last_user, prior=prior_ctx
-                        )
-                    result = execute_query_spec(
-                        args,
-                        prior=prior_ctx,
-                        user_text=last_user,
-                    )
-                    if result.get("ok") is False and round_i == 0:
-                        # One recovery with heuristic plan
-                        args = heuristic_plan_query(
-                            last_user, prior=prior_ctx
-                        )
+                    # Semantic Planner: LLM owns the plan. Do NOT silently
+                    # replace it with heuristics. Incomplete plans return
+                    # plan_errors so the model can self-correct.
+                    if not args:
+                        result = {
+                            "ok": False,
+                            "error": "Empty plan_query arguments.",
+                            "plan_errors": [
+                                "Emit intent, period_type, context_handling, "
+                                "and filters/grain for the user ask."
+                            ],
+                            "response_instructions": (
+                                "REQUIRED: Call plan_query again with a "
+                                "complete QuerySpec."
+                            ),
+                        }
+                    else:
                         result = execute_query_spec(
                             args,
                             prior=prior_ctx,
-                            user_text=last_user,
                         )
                     # Surface as the executed intent for analysis routing
                     name = {
