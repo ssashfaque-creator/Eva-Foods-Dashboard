@@ -30,6 +30,7 @@ from eva_dashboard.entity_catalog import (
     is_business_unit_label,
     resolve_extracted_entities,
 )
+from eva_dashboard.party_match import fuzzy_match_party
 from eva_dashboard.query_spec import (
     merge_prior_into_spec,
     normalize_query_spec,
@@ -149,14 +150,23 @@ def execute_query_spec(
     spec["grain"] = resolved["grain"]
     if resolved.get("months_back") is not None:
         spec["months_back"] = resolved["months_back"]
-    if resolved.get("row_dimensions"):
+    if resolved.get("target_month"):
+        spec["target_month"] = resolved["target_month"]
+    if "row_dimensions" in resolved:
         spec["row_dimensions"] = resolved["row_dimensions"]
-    if resolved.get("column_dimensions"):
+    if "column_dimensions" in resolved:
         spec["column_dimensions"] = resolved["column_dimensions"]
         grain = dict(spec.get("grain") or {})
-        grain["column_dimension"] = resolved["column_dimensions"][0]
-        if resolved["column_dimensions"][0] == "month":
-            grain["time_grain"] = "month"
+        cols_r = resolved["column_dimensions"]
+        if cols_r:
+            grain["column_dimension"] = cols_r[0]
+            if cols_r[0] == "month":
+                grain["time_grain"] = "month"
+        else:
+            # SPECIFIC_MONTH cleared month columns — keep grain non-month
+            if grain.get("column_dimension") == "month":
+                grain["column_dimension"] = "client_type"
+            grain["time_grain"] = "none"
         spec["grain"] = grain
     # Sync grain row dims from resolved/defaulted row_dimensions
     rows = list(spec.get("row_dimensions") or [])
@@ -183,6 +193,8 @@ def execute_query_spec(
                 "Address every plan_errors item. "
                 "Business Units (Eva Consumer, Eva Bulk, …) go in business_units — "
                 "NEVER in client_type. Use extracted_entities when unsure. "
+                "For a single month like March use period_type=SPECIFIC_MONTH + "
+                "target_month=YYYY-MM (not LAST_N_MONTHS). "
                 "Do not invent numbers."
             ),
         }
@@ -200,6 +212,29 @@ def execute_query_spec(
     )
     if filters.get("business_unit") and not bus:
         bus = _expand_business_units([filters["business_unit"]])
+
+    # Fuzzy party / customer resolution (Al Shaheer → canonical DB name)
+    party_raw = filters.get("party") or spec.get("party_query")
+    if party_raw and operation not in {"party_list"}:
+        matched = fuzzy_match_party(str(party_raw))
+        if not matched.get("ok"):
+            return {
+                "ok": False,
+                "error": matched.get("error") or "Ambiguous party",
+                "plan_errors": [matched.get("error") or "Ambiguous party"],
+                "matches": matched.get("matches") or [],
+                "query_spec": spec,
+                "response_instructions": (
+                    "REQUIRED: Ask the user which party they mean using the "
+                    "`matches` list, then call plan_query again with "
+                    "filters.party set to the exact chosen name. "
+                    "Do not invent numbers."
+                ),
+            }
+        if matched.get("party"):
+            filters["party"] = matched["party"]
+            if spec.get("party_query"):
+                spec["party_query"] = matched["party"]
 
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")
@@ -296,19 +331,37 @@ def execute_query_spec(
             title_mode=spec.get("title_mode"),
             mix_dimension=grain.get("mix_dimension"),
         )
-    elif "avg_price" in metrics:
-        # Universal price pivot when rows or month columns are set;
-        # plain aggregate (optional Price Fetch flags) uses query_price.
-        flags = spec.get("price_flags") or {}
-        # Row grain (e.g. customer-wise) → universal PKR pivot.
-        # Month-only / aggregate (+ Price Fetch flags) → query_price.
-        has_row_grain = bool(row_dimensions)
-        want_fetch = bool(
-            flags.get("include_price_fetch")
-            or flags.get("include_cost_factor")
-            or flags.get("factor_breakdown")
+    elif "price_fetch" in metrics or "avg_price" in metrics:
+        flags = dict(spec.get("price_flags") or {})
+        want_fetch = (
+            "price_fetch" in metrics
+            or bool(flags.get("include_price_fetch"))
+            or bool(flags.get("include_cost_factor"))
+            or bool(flags.get("factor_breakdown"))
         )
-        if has_row_grain and not want_fetch:
+        # Hardcoded Price Fetch composite — engine owns the math
+        if want_fetch:
+            result = query_price(
+                period=phrase,
+                date_from=date_from,
+                date_to=date_to,
+                city=filters.get("city"),
+                business_unit=filters.get("business_unit") or (bus[0] if bus else None),
+                oil_type=filters.get("oil_type"),
+                packing_category=filters.get("packing_category"),
+                client_type=filters.get("client_type"),
+                product=filters.get("product"),
+                include_price_fetch=True,
+                include_cost_factor=True,
+                factor_breakdown=bool(flags.get("factor_breakdown")),
+                time_grain=(
+                    "month"
+                    if "month" in column_dimensions
+                    else None
+                ),
+            )
+        elif bool(row_dimensions):
+            # Plain avg_price pivot (no cost factor)
             result = execute_universal_pivot(
                 row_dimensions=row_dimensions,
                 column_dimensions=column_dimensions,
@@ -341,9 +394,9 @@ def execute_query_spec(
                 packing_category=filters.get("packing_category"),
                 client_type=filters.get("client_type"),
                 product=filters.get("product"),
-                include_price_fetch=bool(flags.get("include_price_fetch")),
-                include_cost_factor=bool(flags.get("include_cost_factor")),
-                factor_breakdown=bool(flags.get("factor_breakdown")),
+                include_price_fetch=False,
+                include_cost_factor=False,
+                factor_breakdown=False,
                 time_grain=time_grain,
             )
     elif intent in {"sales_matrix", "sales_trend", "sales_analytical"} or (

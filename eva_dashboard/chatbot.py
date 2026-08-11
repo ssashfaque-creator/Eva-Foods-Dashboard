@@ -262,6 +262,10 @@ def system_prompt() -> str:
    (category_1). client_type is ONLY channels (Eva Distributors, Imtiaz, …).
    Wrong column → Validation failed tool error — fix and retry.
    Unsure → extracted_entities and let Python resolve.
+9. SPECIFIC_MONTH: \"March\" → period_type=SPECIFIC_MONTH + target_month=YYYY-MM.
+   Never LAST_N_MONTHS for a single named month.
+10. price_fetch metric for Price Fetch / oil price fetched / cost factor —
+    engine computes; do not invent the formula.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -3414,7 +3418,15 @@ def _looks_price_query(text: str) -> bool:
 
 def _looks_price_fetch_followup(text: str) -> bool:
     t = (text or "").lower()
-    return bool(re.search(r"\bprice\s*fetch\b|\brecovery\b", t))
+    return bool(
+        re.search(
+            r"\bprice\s*fetch\b|\brecovery\b|"
+            r"\boil\s+price\s+fetch|\bprice\s+fetched\b|"
+            r"\bapply\s+(the\s+)?cost\s+factor\b|"
+            r"\bcost\s+factor\b",
+            t,
+        )
+    )
 
 
 def _extract_business_units_from_text(text: str) -> list[str]:

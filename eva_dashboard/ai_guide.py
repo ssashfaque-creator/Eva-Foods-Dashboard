@@ -68,15 +68,26 @@ def vocabulary_for_prompt() -> str:
         "  metrics=[\"volume\",\"ams\"].",
         "- \"last N months\" → MUST set column_dimensions=[\"month\"].",
         "- \"this month\"/MTD/so far → period_type=MTD.",
-        "- Named month → NAMED_MONTH + named_month=…",
+        "- SINGLE month ('March', 'March 2026') → period_type=SPECIFIC_MONTH,",
+        "  target_month=YYYY-MM. DO NOT use LAST_N_MONTHS. DO NOT put 'month'",
+        "  in column_dimensions unless the user asked for a multi-month trend.",
         "",
-        "9. PRICE → metrics=['avg_price'] (STRICT)",
-        "- price / rates / average price / Price Fetch → metrics=[\"avg_price\"].",
-        "- monthly / last N months price → also column_dimensions=[\"month\"].",
+        "9. PRICE / PRICE FETCH (STRICT — engine owns the math)",
+        "- plain rate / average price → metrics=[\"avg_price\"].",
+        "- Price Fetch / recovery / 'oil price fetched' / 'apply the cost factor'",
+        "  / 'what's the cost factor' → metrics=[\"price_fetch\"].",
+        "  Do NOT calculate Price Fetch yourself; the engine joins factor_costs",
+        "  and returns Avg Price (Incl GST/kg), Cost Factor, Price Fetch/maund.",
+        "- monthly price trends → column_dimensions=[\"month\"] + avg_price.",
         "- customer-wise price trends → row_dimensions=[\"party\"],",
         "  column_dimensions=[\"month\"], metrics=[\"avg_price\"].",
         "",
-        "10. PERFORMANCE METRICS",
+        "10. PARTY / CUSTOMER NAMES",
+        "- Put the spoken name in filters.party (e.g. \"al shaheer\").",
+        "- Python fuzzy-matches to the canonical client. If ambiguous, you get",
+        "  plan_errors with top matches — ask the user which one, then retry.",
+        "",
+        "11. PERFORMANCE METRICS",
         "- lowest/worst performing → metrics=[\"vs_ams\"], sort_order=asc,",
         "  row_dimensions=[\"party\"].",
         "- least/lowest gains → metrics=[\"ams_growth\"], sort_order=asc.",
@@ -125,6 +136,17 @@ Examples:
 - \"monthly average price for Eva canola standup\" →
   metrics=["avg_price"], column_dimensions=["month"], LAST_N_MONTHS/6,
   filters={oil_type:Eva Canola, packing_category:Stand up}
+- \"March Eva sales in Lahore\" →
+  period_type=SPECIFIC_MONTH, target_month=2026-03 (anchor year to live data),
+  business_units=[Eva Consumer, Eva Bulk], filters={city:Lahore},
+  row_dimensions=["business_unit"], metrics=["volume","ams"]
+  — NO column_dimensions month, NO LAST_N_MONTHS
+- \"Price Fetch for canola standup Distributors\" / \"oil price fetched\" /
+  \"apply the cost factor\" → metrics=["price_fetch"],
+  filters={oil_type:Eva Canola, packing_category:Stand up,
+  client_type:Eva Distributors}
+- \"al shaheer sales last 6 months\" → filters.party=\"al shaheer\"
+  (Python resolves; if ambiguous, ask user from matches)
 - After brand table: \"distributor-wise, lowest performing\" →
   context_handling=prior, row_dimensions=["party"], metrics=["vs_ams"],
   sort_order=asc, clear_filters=["client_type"]

@@ -32,6 +32,7 @@ PERIOD_TYPES = {
     "LAST_MONTH",
     "LAST_WEEK",
     "NAMED_MONTH",
+    "SPECIFIC_MONTH",
     "CUSTOM_DATE",
 }
 
@@ -70,6 +71,7 @@ COLUMN_DIMENSIONS = (
 PIVOT_METRICS = (
     "volume",
     "avg_price",
+    "price_fetch",
     "ams",
     "vs_ams",
     "ams_growth",
@@ -120,9 +122,12 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "string", "enum": list(PIVOT_METRICS)},
                     "description": (
-                        "volume=MT; avg_price=PKR rate; ams / vs_ams / "
-                        "ams_growth for performance. price/rates/Price Fetch → "
-                        "['avg_price']."
+                        "volume=MT; avg_price=PKR rate; "
+                        "price_fetch=Incl GST/kg − cost factor → per maund "
+                        "(engine computes; also for 'oil price fetched' / "
+                        "'apply the cost factor' / 'Price Fetch' / 'recovery'); "
+                        "ams / vs_ams / ams_growth for performance. "
+                        "Plain rates without cost factor → ['avg_price']."
                     ),
                 },
                 "operation": {
@@ -167,6 +172,10 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "description": (
                         "REQUIRED. Sales with no period → LAST_N_MONTHS + "
                         "months_back=6 + column_dimensions=['month']. "
+                        "A single calendar month ('March', 'March 2026') → "
+                        "SPECIFIC_MONTH + target_month=YYYY-MM — DO NOT use "
+                        "LAST_N_MONTHS and DO NOT put 'month' in "
+                        "column_dimensions unless the user asked for a trend. "
                         "MTD only when user says this month/MTD/so far."
                     ),
                 },
@@ -176,7 +185,15 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                 },
                 "named_month": {
                     "type": "string",
-                    "description": "When period_type=NAMED_MONTH.",
+                    "description": "Legacy month phrase (prefer target_month).",
+                },
+                "target_month": {
+                    "type": "string",
+                    "description": (
+                        "When period_type=SPECIFIC_MONTH: exact month as YYYY-MM "
+                        "(e.g. 2026-03 for March). Anchor year to live max sales "
+                        "date when the user omits the year."
+                    ),
                 },
                 "period": {
                     "type": "object",
@@ -383,9 +400,14 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
 def _derive_period_type(raw: dict[str, Any], period: dict[str, Any]) -> str | None:
     """Accept legacy period.phrase when period_type omitted (compat)."""
     explicit = str(raw.get("period_type") or "").strip().upper()
+    # Treat SPECIFIC_MONTH / NAMED_MONTH aliases
+    if explicit == "SPECIFIC_MONTH" or explicit == "NAMED_MONTH":
+        return explicit
     if explicit in PERIOD_TYPES:
         return explicit
-    phrase = str(period.get("phrase") or raw.get("period_phrase") or "").lower()
+    if raw.get("target_month"):
+        return "SPECIFIC_MONTH"
+    phrase = str(period.get("phrase") or raw.get("period_phrase") or raw.get("named_month") or "").lower()
     if period.get("date_from") and period.get("date_to"):
         return "CUSTOM_DATE"
     if not phrase:
@@ -400,7 +422,15 @@ def _derive_period_type(raw: dict[str, Any], period: dict[str, Any]) -> str | No
         return "LAST_MONTH"
     if phrase in {"this month", "mtd", "so far"}:
         return "MTD"
-    # Named month / other resolvable phrase
+    # Bare month name / YYYY-MM → specific month (not a 6-month trend)
+    if __import__("re").fullmatch(r"\d{4}-\d{2}", phrase.strip()):
+        return "SPECIFIC_MONTH"
+    month_names = (
+        "january|february|march|april|may|june|july|august|september|"
+        "october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+    )
+    if __import__("re").search(rf"\b({month_names})\b", phrase):
+        return "SPECIFIC_MONTH"
     return "NAMED_MONTH"
 
 
@@ -478,7 +508,7 @@ def _derive_intent_from_universal(
     mets = set(metrics)
     if mets & {"vs_ams", "ams_growth"} and "month" not in column_dimensions:
         return "party_rank"
-    if "avg_price" in mets:
+    if "price_fetch" in mets or "avg_price" in mets:
         return "price"
     if "month" in column_dimensions:
         return "sales_trend"
@@ -605,6 +635,9 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         period["phrase"] = raw.get("period_phrase")
     if raw.get("named_month") and not period.get("phrase"):
         period["phrase"] = raw["named_month"]
+    target_month = str(raw.get("target_month") or "").strip() or None
+    if target_month and not period.get("phrase"):
+        period["phrase"] = target_month
 
     period_type = _derive_period_type(raw, period)
     months_back = grain.get("months_back")
@@ -674,6 +707,13 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     if metric and not metrics:
         metrics = _as_dim_list(metric, allowed=PIVOT_METRICS)
 
+    # Price Fetch flags → metric
+    price_flags = dict(raw.get("price_flags") or {})
+    if price_flags.get("include_price_fetch") and "price_fetch" not in metrics:
+        metrics.append("price_fetch")
+    if price_flags.get("include_cost_factor") and not metrics:
+        metrics.append("price_fetch")
+
     if not operation:
         operation = "pivot"
 
@@ -699,6 +739,11 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
             column_dimensions=column_dimensions,
             metrics=metrics,
         )
+    # Single calendar month + volume → Volume+AMS pack (not a month grid)
+    if period_type in {"SPECIFIC_MONTH", "NAMED_MONTH"} and intent == "sales_matrix":
+        if (set(metrics) & {"volume", "ams"}) or not metrics:
+            if "month" not in column_dimensions:
+                intent = "sales_trend"
 
     # Ranking metric from metrics array
     if not metric:
@@ -731,10 +776,11 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "title_mode": raw.get("title_mode"),
         "advanced_mode": raw.get("advanced_mode"),
         "party_query": raw.get("party_query") or filters.get("party"),
-        "price_flags": dict(raw.get("price_flags") or {}),
+        "price_flags": price_flags,
         "rationale": raw.get("rationale") or "",
         "business_units": bus,
         "extracted_entities": extracted_entities,
+        "target_month": target_month,
     }
 
 
@@ -751,9 +797,12 @@ def validate_query_spec(
     if operation == "pivot":
         if not metrics:
             errors.append(
-                "Missing metrics. Use e.g. [\"volume\",\"ams\"] or [\"avg_price\"]."
+                "Missing metrics. Use e.g. [\"volume\",\"ams\"], [\"avg_price\"], "
+                "or [\"price_fetch\"]."
             )
-        if not rows and "avg_price" not in metrics:
+        if not rows and not (
+            set(metrics) & {"avg_price", "price_fetch"}
+        ):
             errors.append(
                 "Missing row_dimensions. Example: customer-wise → [\"party\"]; "
                 "default sales trend → [\"business_unit\"]."
@@ -761,9 +810,11 @@ def validate_query_spec(
     if not spec.get("period_type"):
         errors.append(
             "Missing period_type. REQUIRED: MTD | LAST_N_MONTHS | LAST_MONTH | "
-            "LAST_WEEK | NAMED_MONTH | CUSTOM_DATE. "
+            "LAST_WEEK | SPECIFIC_MONTH | NAMED_MONTH | CUSTOM_DATE. "
             "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6 "
             "+ column_dimensions=[\"month\"]. "
+            "If the user said 'March' / a single month, use SPECIFIC_MONTH + "
+            "target_month=YYYY-MM (NOT LAST_N_MONTHS). "
             "If unspecified for a sales ask, use LAST_N_MONTHS + months_back=6 "
             "(Trend Default) — not MTD."
         )
@@ -800,12 +851,19 @@ def validate_query_spec(
             errors.append(
                 "period_type=LAST_N_MONTHS requires months_back (e.g. 6)."
             )
+    if pt == "SPECIFIC_MONTH":
+        tm = spec.get("target_month") or (spec.get("period") or {}).get("phrase")
+        if not tm:
+            errors.append(
+                "period_type=SPECIFIC_MONTH requires target_month (YYYY-MM) "
+                "or named_month / period.phrase (e.g. 'March' / '2026-03')."
+            )
     if pt == "NAMED_MONTH":
         phrase = (spec.get("period") or {}).get("phrase")
-        if not phrase:
+        if not phrase and not spec.get("target_month"):
             errors.append(
                 "period_type=NAMED_MONTH requires named_month or period.phrase "
-                "(e.g. 'July' or 'July 2026')."
+                "(e.g. 'July' or 'July 2026'). Prefer SPECIFIC_MONTH + target_month."
             )
     if pt == "CUSTOM_DATE":
         period = spec.get("period") or {}
@@ -831,6 +889,28 @@ def validate_query_spec(
     return errors
 
 
+def _resolve_specific_month_bounds(spec: dict[str, Any]) -> dict[str, Any]:
+    """Compute ISO bounds for SPECIFIC_MONTH / NAMED_MONTH; never a month grid."""
+    from eva_dashboard.sales_query import resolve_period
+
+    period = dict(spec.get("period") or {})
+    tm = str(spec.get("target_month") or "").strip()
+    phrase = tm or str(period.get("phrase") or spec.get("named_month") or "").strip()
+    info = resolve_period(phrase or None)
+    if info.get("ok") is False or not info.get("date_from"):
+        return {"period": period, "error": info.get("error")}
+    period["date_from"] = info["date_from"]
+    period["date_to"] = info["date_to"]
+    period["phrase"] = phrase or info.get("label")
+    period["label"] = info.get("label")
+    # Persist YYYY-MM for the planner
+    try:
+        target = str(info["date_from"])[:7]
+    except Exception:  # noqa: BLE001
+        target = tm or None
+    return {"period": period, "target_month": target, "period_info": info}
+
+
 def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """Map period_type → executor period phrase / bounds / month grain flags.
 
@@ -840,6 +920,9 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
     period = dict(spec.get("period") or {})
     grain = dict(spec.get("grain") or {})
     mb = spec.get("months_back") or grain.get("months_back")
+    rows = list(spec.get("row_dimensions") or [])
+    cols = list(spec.get("column_dimensions") or [])
+    mets = set(spec.get("metrics") or [])
 
     if pt == "MTD":
         period.setdefault("phrase", "this month")
@@ -852,14 +935,12 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         period["phrase"] = f"last {n} months"
         grain["column_dimension"] = grain.get("column_dimension") or "month"
         grain["months_back"] = n
-        cols = list(spec.get("column_dimensions") or [])
         if "month" not in cols:
             cols = ["month"] + [c for c in cols if c != "month"]
-        # Trend default: BU rows when planner omitted row grain on a volume trend
-        rows = list(spec.get("row_dimensions") or [])
-        mets = set(spec.get("metrics") or [])
         if not rows and not grain.get("row_dimension") and not grain.get("group_by"):
-            if "avg_price" not in mets and str(spec.get("operation") or "pivot") == "pivot":
+            if not (mets & {"avg_price", "price_fetch"}) and str(
+                spec.get("operation") or "pivot"
+            ) == "pivot":
                 if str(spec.get("intent") or "") in {
                     "",
                     "sales_trend",
@@ -874,8 +955,31 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
             "row_dimensions": rows,
             "column_dimensions": cols,
         }
-    elif pt == "NAMED_MONTH":
-        pass
+    elif pt in {"SPECIFIC_MONTH", "NAMED_MONTH"}:
+        # Exact calendar month — NOT a multi-month time-series
+        resolved = _resolve_specific_month_bounds(spec)
+        period = resolved.get("period") or period
+        if resolved.get("target_month"):
+            spec["target_month"] = resolved["target_month"]
+        # Strip accidental month pivot columns — single month is not a trend grid
+        cols = [c for c in cols if c != "month"]
+        if grain.get("column_dimension") == "month":
+            grain.pop("column_dimension", None)
+        grain["time_grain"] = "none"
+        if not rows and not (mets & {"avg_price", "price_fetch"}):
+            grain.setdefault("row_dimension", "business_unit")
+            rows = rows or ["business_unit"]
+        # Volume for one month → Volume+AMS pack (client_type cross-tab, not months)
+        if ("volume" in mets or "ams" in mets or not mets) and not cols:
+            grain.setdefault("column_dimension", "client_type")
+        return {
+            "period": period,
+            "grain": grain,
+            "months_back": None,
+            "row_dimensions": rows,
+            "column_dimensions": cols,
+            "target_month": resolved.get("target_month"),
+        }
     elif pt == "CUSTOM_DATE":
         pass
 
@@ -883,8 +987,8 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "period": period,
         "grain": grain,
         "months_back": grain.get("months_back") or mb,
-        "row_dimensions": list(spec.get("row_dimensions") or []),
-        "column_dimensions": list(spec.get("column_dimensions") or []),
+        "row_dimensions": rows,
+        "column_dimensions": cols,
     }
 
 
