@@ -136,6 +136,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only refresh files; skip pip install -e .",
     )
+
+    bridge = sub.add_parser(
+        "bridge",
+        help=(
+            "Start the phone/Vercel chat bridge (API key + DB stay on this Mac). "
+            "Pair with Cloudflare Tunnel + the mobile-chat Vercel app."
+        ),
+    )
+    bridge.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1 — use Cloudflare Tunnel to expose)",
+    )
+    bridge.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="Bridge port (default: 8787)",
+    )
+    bridge.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Override data directory (default: ./data or EVA_DATA_DIR)",
+    )
     return parser
 
 
@@ -295,6 +320,20 @@ def cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bridge(args: argparse.Namespace) -> int:
+    from eva_dashboard.bridge import run_bridge
+
+    data_dir = None
+    if args.data_dir is not None:
+        data_dir = str(args.data_dir.expanduser().resolve())
+    try:
+        run_bridge(host=args.host, port=int(args.port), data_dir=data_dir)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -306,6 +345,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(cmd_costs(args))
     if args.command == "update":
         raise SystemExit(cmd_update(args))
+    if args.command == "bridge":
+        raise SystemExit(cmd_bridge(args))
     parser.error(f"Unknown command: {args.command}")
 
 

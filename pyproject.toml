@@ -14,10 +14,13 @@ dependencies = [
   "reportlab>=4.0",
   "streamlit>=1.28",
   "openai>=1.40",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
 ]
 
 [project.optional-dependencies]
 preview = ["pypdfium2>=4.0", "Pillow>=10.0"]
+bridge = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [project.scripts]
 eva-dashboard = "eva_dashboard.cli:main"
