@@ -105,6 +105,7 @@ def test_question_bank_preferred_tool_hints() -> None:
 
 
 def test_table_followups_require_prior_spec() -> None:
+    """Phase 1: follow-ups stay required (plan_query); preferred hint may still be sales."""
     assert resolve_forced_tool("Does this include bulk?") in {
         "query_sales",
         "required",
@@ -113,19 +114,19 @@ def test_table_followups_require_prior_spec() -> None:
     assert resolve_forced_tool(
         "Does this include bulk?",
         prior_table_spec={"filters": {"city": "Lahore"}},
-    ) == "query_sales"
+    ) == "required"
     assert resolve_forced_tool(
         "City wise",
         prior_table_spec={"filters": {"city": "Lahore"}},
-    ) == "query_sales"
+    ) == "required"
     assert resolve_forced_tool(
         "Remove Lahore",
         prior_table_spec={"filters": {"city": "Lahore"}},
-    ) == "query_sales"
+    ) == "required"
     assert resolve_forced_tool(
         "Group by oil type",
         prior_table_spec={"column_dimension": "client_type"},
-    ) == "query_sales"
+    ) == "required"
 
 
 def test_named_party_natural_phrasing() -> None:

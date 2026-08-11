@@ -56,8 +56,8 @@ def test_golden_preferred_tool_hint() -> None:
     assert not failures, "Preferred-tool mismatches:\n" + "\n".join(failures)
 
 
-def test_ai_first_forces_only_reply_mutations() -> None:
-    """New asks are required; only short Reply mutations pin query_sales."""
+def test_phase1_never_pins_legacy_tools() -> None:
+    """Phase 1: factual asks are required; Reply mutations no longer pin query_sales."""
     assert resolve_forced_tool("Show me Lahore sales") == "required"
     assert resolve_forced_tool("how are Maan sales in Karachi") == "required"
     assert resolve_forced_tool("how are distributor sales in karachi") == "required"
@@ -76,5 +76,12 @@ def test_ai_first_forces_only_reply_mutations() -> None:
             "group by city",
             prior_table_spec={"column_dimension": "month"},
         )
-        == "query_sales"
+        == "required"
+    )
+    assert (
+        resolve_forced_tool(
+            "Does this include bulk?",
+            prior_table_spec={"filters": {"city": "Lahore"}},
+        )
+        == "required"
     )

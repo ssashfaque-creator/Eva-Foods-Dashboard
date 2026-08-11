@@ -39,6 +39,7 @@ from eva_dashboard.entity_catalog import (
 )
 from eva_dashboard.party_match import resolve_party_filter, resolve_party_filters
 from eva_dashboard.query_spec import (
+    PARTY_SCOPE_KEYS,
     merge_prior_into_spec,
     normalize_query_spec,
     resolve_period_from_spec,
@@ -305,9 +306,9 @@ def _coerce_vocab_from_user_text(
         if (vol_metrics or not metrics) and not price_metrics and "month" not in cols:
             cols = ["month"]
             metrics = metrics or ["volume", "ams"]
-    # Single named city from text when planner missed it (keep multi-city path above)
-    if len(named_cities) == 1 and not filters.get("cities") and not filters.get("city"):
-        filters["city"] = named_cities[0]
+    # Do NOT invent a single city/client_type from user_text — the planner must
+    # set filters (blind execute). Multi-city / multi-channel compare above is
+    # the only filter injection allowed from spoken text.
 
     # --- Spoken wise / layer follow-ups ---
     add_layer = bool(re.search(r"\b(add|nest|layer|under)\b", t))
@@ -514,6 +515,103 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _looks_party_metric_followup(user_text: str) -> bool:
+    """Short follow-ups that should keep a prior customer scope.
+
+    Conservative: only short metric asks, or ones that refer back to
+    \"their/this/that\" customer. Full fresh asks keep context_handling=none.
+    """
+    t = (user_text or "").lower().strip()
+    if not t:
+        return False
+    has_metric = bool(
+        re.search(
+            r"\b("
+            r"price\s*fetch|avg\.?\s*rate|average\s+(price|rate)|"
+            r"what'?s\s+the\s+price|what\s+is\s+the\s+price|"
+            r"selling\s+price|"
+            r"%\s*(of\s+)?(their\s+|its\s+)?ams|percent\s+of\s+ams|"
+            r"vs\.?\s*ams|against\s+ams|of\s+their\s+ams|"
+            r"last\s+(purchase|invoice|order|buy)|"
+            r"days\s+since|when\s+did\s+they\s+last|"
+            r"sku[-\s]?wise|product\s+break|packing\s+break|"
+            r"cost\s*factor"
+            r")\b",
+            t,
+        )
+    )
+    if not has_metric:
+        return False
+    refers_back = bool(
+        re.search(r"\b(their|this|that|same|the\s+customer|the\s+party)\b", t)
+    )
+    # Long / fully scoped asks are fresh topics, not sticky follow-ups
+    if len(t.split()) > 12 and not refers_back:
+        return False
+    if (
+        re.search(
+            r"\b(in|for)\s+(lahore|karachi|islamabad|imtiaz|distributors?|"
+            r"eva\s+consumer|maan)\b",
+            t,
+        )
+        and not refers_back
+        and len(t.split()) > 6
+    ):
+        return False
+    return True
+
+
+def _prior_party_scope(prior: dict[str, Any] | None) -> dict[str, Any]:
+    if not prior:
+        return {}
+    scope = dict(prior.get("party_scope") or {})
+    filters = dict(prior.get("filters") or {})
+    for key in PARTY_SCOPE_KEYS:
+        if key not in scope and filters.get(key) not in (None, "", []):
+            scope[key] = filters[key]
+    return scope
+
+
+def _stick_party_scope_from_prior(
+    spec: dict[str, Any],
+    prior: dict[str, Any] | None,
+    *,
+    user_text: str = "",
+) -> dict[str, Any]:
+    """Keep prior customer filters on metric follow-ups / explicit prior base.
+
+    Even when the model forgets ``context_handling='prior'``, short asks like
+    \"what's the price\" / \"% of AMS\" / \"last purchase\" after a named-party
+    answer should not lose the customer scope.
+    """
+    out = dict(spec)
+    scope = _prior_party_scope(prior)
+    if not scope:
+        return out
+    filters = dict(out.get("filters") or {})
+    clear = set(out.get("clear") or [])
+    if clear & set(PARTY_SCOPE_KEYS):
+        return out
+    if any(filters.get(k) not in (None, "", []) for k in PARTY_SCOPE_KEYS):
+        return out
+    stick = out.get("base") == "prior" or _looks_party_metric_followup(user_text)
+    if not stick:
+        return out
+    for key, val in scope.items():
+        filters[key] = val
+    out["filters"] = filters
+    if not out.get("party_query") and filters.get("party"):
+        out["party_query"] = filters["party"]
+    # Promote to prior merge semantics so period/BU inherit when model omitted them
+    if out.get("base") != "prior" and _looks_party_metric_followup(user_text):
+        out["base"] = "prior"
+        # clear_filters was omitted — treat as keep-all for this soft stick
+        if out.get("_clear_omitted"):
+            out["_clear_omitted"] = False
+            out["clear"] = list(out.get("clear") or [])
+    return out
+
+
 def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     """Inject exact party / silent party_ilike — never returns plan_errors.
 
@@ -590,7 +688,11 @@ def execute_query_spec(
 ) -> dict[str, Any]:
     """Execute a planned QuerySpec blindly (universal pivot or legacy)."""
     spec = normalize_query_spec(raw_spec)
+    # Soft-stick party scope before merge so short follow-ups keep the customer
+    spec = _stick_party_scope_from_prior(spec, prior, user_text=user_text)
     spec = merge_prior_into_spec(spec, prior)
+    # Re-apply after merge in case merge cleared then model omitted party
+    spec = _stick_party_scope_from_prior(spec, prior, user_text=user_text)
     # Python entity resolution BEFORE validation (forgiving extracted_entities)
     spec = _apply_extracted_entities(spec)
     # Spoken vocab safety nets (SKU / product / price_fetch)
@@ -958,4 +1060,20 @@ def execute_query_spec(
         filled_spec["metrics"] = metrics
         result["query_spec"] = filled_spec
         result.setdefault("ok", True)
+        # Ensure follow-up specs retain party scope for PRIOR_QUERY_CONTEXT
+        party_bits = {
+            k: filters[k]
+            for k in PARTY_SCOPE_KEYS
+            if filters.get(k) not in (None, "", [])
+        }
+        if party_bits:
+            for spec_key in ("table_spec", "price_spec", "party_spec"):
+                if not isinstance(result.get(spec_key), dict):
+                    continue
+                stamped = dict(result[spec_key])
+                f = dict(stamped.get("filters") or {})
+                for k, v in party_bits.items():
+                    f.setdefault(k, v)
+                stamped["filters"] = f
+                result[spec_key] = stamped
     return result

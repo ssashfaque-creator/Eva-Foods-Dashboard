@@ -137,10 +137,14 @@ def vocabulary_for_prompt() -> str:
 
 def tool_guide_for_prompt() -> str:
     return """
-PRIMARY TOOL — plan_query (Universal Pivot):
+PRIMARY TOOL — plan_query (Universal Pivot) — ONLY analytics path:
 Emit row_dimensions + column_dimensions + metrics + period_type + context_handling.
 Do NOT pick rigid intents like sales_matrix vs sales_trend — describe the pivot.
+Do NOT call query_sales / list_clients / analyze_parties / lookup_party /
+advanced_query for analytics — they are disabled; server will reject them.
 Server executes BLINDLY. plan_errors → fix and call plan_query again.
+Customer follow-ups (price / % AMS / last purchase): context_handling='prior',
+clear_filters=[], keep filters.party from PRIOR_QUERY_CONTEXT.party_scope.
 
 Required: row_dimensions, metrics, period_type, context_handling
 Optional: column_dimensions, filters, months_back, clear_filters, operation,

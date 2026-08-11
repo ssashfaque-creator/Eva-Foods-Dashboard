@@ -235,7 +235,7 @@ def test_extensive_offline_eval_bank() -> None:
             try:
                 out = run(
                     "can you show product wise",
-                    forced_exp="query_sales",
+                    forced_exp="required",
                     tool="query_sales",
                     prior_spec=prior,
                 )
@@ -248,7 +248,7 @@ def test_extensive_offline_eval_bank() -> None:
                 pack_prior["row_dimension"] = "packing_category"
                 out = run(
                     "SKU wise",
-                    forced_exp="query_sales",
+                    forced_exp="required",
                     tool="query_sales",
                     prior_spec=pack_prior,
                 )

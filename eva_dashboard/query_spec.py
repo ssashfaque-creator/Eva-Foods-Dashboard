@@ -47,9 +47,13 @@ FILTER_KEYS = (
     "packing_category",
     "party",
     "parties",
+    "party_ilike",
     "product",
     "active_only",
 )
+
+# Keys that define a named-customer scope (sticky across party follow-ups).
+PARTY_SCOPE_KEYS = ("party", "parties", "party_ilike")
 
 GROUP_BY_DIMS = (
     "city",
@@ -346,6 +350,18 @@ def _compact(d: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _party_scope_from_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract sticky customer scope keys from a filters dict."""
+    out: dict[str, Any] = {}
+    src = dict(filters or {})
+    for key in PARTY_SCOPE_KEYS:
+        val = src.get(key)
+        if val is None or val == "" or val == []:
+            continue
+        out[key] = val
+    return out
+
+
 def prior_context_payload(
     *,
     table_spec: dict[str, Any] | None = None,
@@ -355,6 +371,7 @@ def prior_context_payload(
     """Build the PRIOR_QUERY_CONTEXT dict shown to the model."""
     if party_spec:
         filters = dict(party_spec.get("filters") or {})
+        party_scope = _party_scope_from_filters(filters)
         return _compact(
             {
                 "source": "party",
@@ -368,6 +385,7 @@ def prior_context_payload(
                 "metric": party_spec.get("metric"),
                 "group_by": party_spec.get("group_by") or filters.get("group_by"),
                 "filters": _compact(filters),
+                "party_scope": party_scope or None,
                 "period_phrase": party_spec.get("period_phrase"),
                 "period": party_spec.get("period"),
                 "business_units": list(party_spec.get("business_units") or []) or None,
@@ -375,15 +393,20 @@ def prior_context_payload(
         )
     if table_spec:
         filters = dict(table_spec.get("filters") or {})
+        party_scope = _party_scope_from_filters(filters)
         return _compact(
             {
                 "source": "sales",
                 "intent_hint": "sales_matrix",
                 "filters": _compact(filters),
+                "party_scope": party_scope or None,
                 "business_units": list(table_spec.get("business_units") or []) or None,
                 "row_dimension": table_spec.get("row_dimension"),
+                "row_dimensions": table_spec.get("row_dimensions"),
                 "row_groups": table_spec.get("row_groups"),
                 "column_dimension": table_spec.get("column_dimension"),
+                "column_dimensions": table_spec.get("column_dimensions"),
+                "metrics": table_spec.get("metrics"),
                 "months_back": table_spec.get("months_back"),
                 "period_phrase": table_spec.get("period_phrase"),
                 "period": table_spec.get("period"),
@@ -392,11 +415,14 @@ def prior_context_payload(
             }
         )
     if price_spec:
+        filters = dict(price_spec.get("filters") or {})
+        party_scope = _party_scope_from_filters(filters)
         return _compact(
             {
                 "source": "price",
                 "intent_hint": "price",
-                "filters": _compact(dict(price_spec.get("filters") or {})),
+                "filters": _compact(filters),
+                "party_scope": party_scope or None,
                 "period_phrase": price_spec.get("period_phrase"),
                 "period": price_spec.get("period"),
             }
@@ -410,6 +436,20 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
             "PRIOR_QUERY_CONTEXT: none\n"
             "Fresh ask → context_handling='none'."
         )
+    party_hint = ""
+    scope = prior.get("party_scope") or _party_scope_from_filters(
+        prior.get("filters")
+    )
+    if scope:
+        party_hint = (
+            "- CUSTOMER SCOPE ACTIVE: "
+            f"{json.dumps(scope, default=str)}. "
+            "Short follow-ups (price / Price Fetch / % of AMS / vs AMS / "
+            "last purchase / days since invoice / SKU breakup) MUST use "
+            "context_handling='prior', clear_filters=[] (or clear only "
+            "non-party keys), and KEEP this party scope. "
+            "Do NOT drop filters.party unless the user names a different customer.\n"
+        )
     return (
         "PRIOR_QUERY_CONTEXT (last answer the user can Reply on):\n"
         f"{json.dumps(prior, indent=2, default=str)}\n\n"
@@ -417,6 +457,7 @@ def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
         "- Reshape / 'this…' / 'compared to…' → context_handling='prior'.\n"
         "- When context_handling='prior', clear_filters is REQUIRED "
         "(use [] only if every prior filter still applies).\n"
+        f"{party_hint}"
         "- Lahore → national / all Pakistan → clear_filters:[\"city\"] "
         "(and \"zone\" if set). Omit filters.city.\n"
         "- Lahore → other cities league → clear_filters:[\"city\"], "
@@ -1029,6 +1070,12 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _clear_party_scope(filters: dict[str, Any]) -> None:
+    """Drop all customer-scope keys together (party / parties / party_ilike)."""
+    for key in PARTY_SCOPE_KEYS:
+        filters.pop(key, None)
+
+
 def merge_prior_into_spec(
     spec: dict[str, Any],
     prior: dict[str, Any] | None,
@@ -1038,11 +1085,19 @@ def merge_prior_into_spec(
     if out.get("base") != "prior" or not prior:
         return out
     prior_filters = dict(prior.get("filters") or {})
+    # Promote party_scope into filters when prior stored it separately
+    for k, v in (prior.get("party_scope") or {}).items():
+        prior_filters.setdefault(k, v)
     merged_filters = dict(prior_filters)
     for k, v in (spec.get("filters") or {}).items():
         if v is not None and v != "":
             merged_filters[k] = v
-    for key in spec.get("clear") or []:
+    clear = list(spec.get("clear") or [])
+    for key in clear:
+        if key in PARTY_SCOPE_KEYS or key == "party_query":
+            _clear_party_scope(merged_filters)
+            out["party_query"] = None
+            continue
         merged_filters.pop(key, None)
         if key == "business_units":
             out["business_units"] = []
@@ -1084,18 +1139,20 @@ def merge_prior_into_spec(
         out["period_type"] = _derive_period_type({}, period)
 
     if not out.get("business_units") and prior.get("business_units"):
-        if "business_units" not in (spec.get("clear") or []):
+        if "business_units" not in clear:
             out["business_units"] = list(prior.get("business_units") or [])
 
     if not out.get("excludes") and prior.get("excludes"):
         out["excludes"] = dict(prior.get("excludes") or {})
 
+    # Keep party_query aligned with sticky party filter
+    if not out.get("party_query") and merged_filters.get("party"):
+        out["party_query"] = merged_filters.get("party")
+
     # City league safety: ranking cities cannot keep a sticky city filter
     # unless the plan explicitly re-set city after clear.
     if (grain.get("group_by") or "") == "city":
-        if "city" in (spec.get("clear") or []) or not (spec.get("filters") or {}).get(
-            "city"
-        ):
+        if "city" in clear or not (spec.get("filters") or {}).get("city"):
             merged_filters.pop("city", None)
             out["filters"] = merged_filters
 

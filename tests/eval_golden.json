@@ -1,6 +1,6 @@
 {
-  "version": "0.4.29",
-  "description": "Golden eval set (AI-first): expected_forced is almost always required (model picks the tool). Only short Reply table mutations pin query_sales. preferred_tool is the soft business hint.",
+  "version": "0.4.30",
+  "description": "Golden eval set (Phase-1 single planner): expected_forced is required for all factual asks (chat forces plan_query). preferred_tool remains a soft business/CSV hint only.",
   "cases": [
     {
       "id": "sales-bu-city",
@@ -173,7 +173,7 @@
     {
       "id": "followup-include-bulk",
       "q": "Does this include bulk?",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {
@@ -187,7 +187,7 @@
     {
       "id": "followup-city-wise",
       "q": "City wise",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {
@@ -200,7 +200,7 @@
     {
       "id": "followup-group-by-city",
       "q": "group by city",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {
@@ -213,7 +213,7 @@
     {
       "id": "followup-remove-lahore",
       "q": "Remove Lahore",
-      "expected_forced": "query_sales",
+      "expected_forced": "required",
       "preferred_tool": "query_sales",
       "prior_table_spec": {
         "filters": {

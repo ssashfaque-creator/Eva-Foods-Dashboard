@@ -146,7 +146,7 @@ def test_hide_sku_and_include_bulk_keep_packing() -> None:
             assert resolve_forced_tool(
                 "don't show individual sku",
                 prior_table_spec=sku["table_spec"],
-            ) == "query_sales"
+            ) == "required"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

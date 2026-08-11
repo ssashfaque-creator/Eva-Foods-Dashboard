@@ -161,7 +161,7 @@ def test_city_wise_after_zone_nests_under_zone() -> None:
             assert rg["row_groups"] == ["zone"]
             assert (
                 resolve_forced_tool("city wise", prior_table_spec=prior)
-                == "query_sales"
+                == "required"
             )
             out = _dispatch_tool(
                 "query_sales", {}, user_text="show city wise", prior_spec=prior

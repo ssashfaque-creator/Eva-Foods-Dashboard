@@ -245,7 +245,7 @@ def system_prompt() -> str:
 
 {live}
 
-# HOW YOU WORK (v1.0 Universal Pivot Planner)
+# HOW YOU WORK (v1.0 Universal Pivot Planner — single planner)
 1. YOU describe a pivot: row_dimensions, column_dimensions, metrics, filters.
 2. Call ``plan_query`` with a COMPLETE QuerySpec. Required: row_dimensions +
    metrics + period_type + context_handling. Do NOT pick rigid intents.
@@ -253,7 +253,8 @@ def system_prompt() -> str:
 4. If you get plan_errors, fix them and call plan_query again — do not invent numbers.
 5. After tables arrive: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
 6. Follow-ups: context_handling='prior' + clear_filters for anything that drops.
-   Fresh ask → context_handling='none'.
+   Fresh ask → context_handling='none'. Customer follow-ups (price / % AMS /
+   last purchase) MUST keep filters.party via prior (clear_filters=[] if unchanged).
 7. TREND DEFAULT: sales with no period → LAST_N_MONTHS/6,
    row_dimensions=["business_unit"], column_dimensions=["month"],
    metrics=["volume","ams"]. customer/party/account/buyer/store →
@@ -279,6 +280,10 @@ def system_prompt() -> str:
     compare side into filters so the other side disappears. Growth →
     metrics=[\"ams_growth\"]. Mixed party-vs-channel → two plans + Analysis.
     See VOCABULARY §12 and TOOL GUIDE compare examples.
+14. Do NOT call query_sales / list_clients / analyze_parties / lookup_party /
+    advanced_query / product_sales for analytics — only plan_query.
+    Escape tools: get_schema, get_sales_overview, run_sql,
+    resolve_product_language, report_snapshot, list_unmapped_products.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -4260,8 +4265,10 @@ def _dispatch_tool(
     prior_price_spec: dict[str, Any] | None = None,
     prior_party_spec: dict[str, Any] | None = None,
 ) -> Any:
-    # AI-first: honor the model's tool choice. Do not rewrite the tool from
-    # text heuristics. Only keep Reply-style continuity helpers below.
+    # LEGACY / offline-test helper. chat_completion no longer routes analytics
+    # through this path (Phase 1 single planner → plan_query only). Kept for
+    # unit tests that exercise engine continuity helpers directly.
+    # Escape-hatch tools (schema/SQL/overview/factor-only price) still call here.
 
     # Period-only follow-up on a party/distributor list → stay on that view
     if prior_party_spec and _looks_period_only_followup(user_text):
@@ -5701,6 +5708,61 @@ def _resolve_party_declined_only(
     return bool(inferred.get("declined_only"))
 
 
+# Analytics tools that must go through plan_query in chat_completion.
+# Escape hatches (schema/SQL/overview/product resolve) stay callable.
+# query_price is allowed only for factor-only asks (forced separately).
+_PLANNER_REDIRECT_TOOLS = frozenset(
+    {
+        "query_sales",
+        "list_clients",
+        "analyze_parties",
+        "lookup_party",
+        "advanced_query",
+        "query_price",
+        "category_mt_totals",
+        "sales_by_city_and_category",
+        "product_sales",
+    }
+)
+
+
+def should_redirect_to_plan_query(name: str, *, user_text: str = "") -> bool:
+    """True when chat must reject a legacy tool call and demand plan_query."""
+    if name == "plan_query":
+        return False
+    if name not in _PLANNER_REDIRECT_TOOLS:
+        return False
+    if name == "query_price" and _looks_factor_only_ask(user_text):
+        return False
+    return True
+
+
+def plan_query_redirect_result(name: str) -> dict[str, Any]:
+    """Tool payload that forces the model back onto the Universal Pivot."""
+    return {
+        "ok": False,
+        "error": (
+            f"Tool `{name}` is disabled for analytics. "
+            "Use plan_query (Universal Pivot) instead."
+        ),
+        "plan_errors": [
+            f"Do not call `{name}`. Emit row_dimensions, metrics, "
+            "period_type, and context_handling via plan_query.",
+            "Follow-ups: context_handling='prior' + clear_filters "
+            "(use [] to keep all prior filters, including party).",
+            "Named customers → filters.party / extracted_entities; "
+            "price → metrics=['avg_price'] or ['price_fetch']; "
+            "% of AMS → metrics=['vs_ams']; "
+            "days since last invoice → operation=advanced, "
+            "advanced_mode=days_since_invoice.",
+        ],
+        "response_instructions": (
+            "REQUIRED: Call plan_query again with a complete QuerySpec. "
+            "Do not invent numbers."
+        ),
+    }
+
+
 def resolve_forced_tool(
     user_text: str,
     *,
@@ -5708,41 +5770,16 @@ def resolve_forced_tool(
     prior_party_spec: dict[str, Any] | None = None,
     explicit_followup: bool | None = None,
 ) -> str:
-    """AI-first tool_choice: require a tool; model picks which one.
+    """Phase-1 single planner: factual asks require a tool; never pin legacy tools.
 
-    Only pin a named tool for UI table mutations on Reply (remove/regroup/…)
-    where the user is editing the prior grid, not asking a new question.
+    ``prior_*`` / ``explicit_followup`` are accepted for API compat (CSV/eval)
+    but no longer force ``query_sales`` — chat always routes factual turns
+    through ``plan_query`` (or ``query_price`` for factor-only).
     """
+    del prior_table_spec, prior_party_spec, explicit_followup  # unused (compat)
     text = user_text or ""
     if not _looks_factual(text):
         return "auto"
-
-    is_followup = (
-        bool(explicit_followup)
-        if explicit_followup is not None
-        else _is_explicit_followup(text)
-    )
-    has_table_prior = bool(prior_table_spec or prior_party_spec)
-
-    # Short mutations on a prior sales grid — keep the matrix tool
-    table_ops = (
-        _looks_include_check(text)
-        or _looks_combine_tables(text)
-        or _looks_regroup(text)
-        or _looks_remove(text)
-        or _looks_hide_sku(text)
-        or _looks_same_format(text)
-        or _looks_row_drilldown(text)
-        or _looks_sales_yoy_compare(text)
-    )
-    if (
-        (has_table_prior or is_followup)
-        and table_ops
-        and not _looks_complete_sales_ask(text)
-    ):
-        return "query_sales"
-
-    # Default: model chooses among available tools
     return "required"
 
 
@@ -5979,7 +6016,13 @@ def chat_completion(
                         str((result.get("query_spec") or {}).get("intent") or ""),
                         "query_sales",
                     )
+                elif should_redirect_to_plan_query(name, user_text=last_user):
+                    # Phase 1: single planner — no legacy _dispatch_tool path
+                    # for analytics (regex rewrite dual-path removed from chat).
+                    result = plan_query_redirect_result(name)
                 else:
+                    # Escape hatches only: schema/SQL/overview/product resolve /
+                    # factor-only query_price. Execute model args as-is.
                     prior = forced_prior_spec or _last_table_spec(working)
                     prior_price = forced_prior_price_spec or _last_price_spec(working)
                     prior_party = forced_prior_party_spec or _last_party_spec(working)

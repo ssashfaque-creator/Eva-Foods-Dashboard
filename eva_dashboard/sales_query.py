@@ -2497,6 +2497,8 @@ def query_sales(
             "client_type": ctype,
             "client_types": ctypes_f,
             "party": party_f,
+            "parties": parties_f or None,
+            "party_ilike": party_ilike_f or None,
             "active_only": True if active_only_f else None,
         },
         "business_units": units,
