@@ -17,7 +17,6 @@ import re
 from typing import Any
 
 from eva_dashboard.client_language import (
-    extract_client_type_from_text,
     extract_oil_and_packing,
     match_client_type_alias,
     normalize_client_type,
@@ -198,12 +197,9 @@ def _coerce_vocab_from_user_text(
             else:
                 filters.pop("parties", None)
                 redirected = True
-        if not redirected and not party_raw and not parties:
-            # "sales for metro" with no party field yet
-            ct = extract_client_type_from_text(user_text)
-            if ct:
-                filters["client_type"] = ct
-                redirected = True
+        # Do NOT invent client_type from free user_text — that breaks blind
+        # execute. Channel words must come from filters.party / parties /
+        # extracted_entities / filters.client_type (then we redirect/normalize).
         if redirected:
             out["filters"] = filters
 
