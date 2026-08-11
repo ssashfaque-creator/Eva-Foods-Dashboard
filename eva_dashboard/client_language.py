@@ -226,6 +226,49 @@ def normalize_oil_type(value: str | None) -> str | None:
     return OIL_TYPE_ALIASES.get(_norm(text), text)
 
 
+def extract_oil_and_packing(text: str | None) -> tuple[str | None, str | None]:
+    """Split composite spoken SKUs like ``canola standup`` → oil + packing.
+
+    Longest packing alias wins; remaining tokens resolve via oil aliases.
+    Returns ``(oil_type, packing_category)`` — either may be None.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, None
+    key = _norm(raw)
+    if not key:
+        return None, None
+    if key in OIL_TYPE_ALIASES and key not in PACKING_ALIASES:
+        return OIL_TYPE_ALIASES[key], None
+    if key in PACKING_ALIASES and key not in OIL_TYPE_ALIASES:
+        return None, PACKING_ALIASES[key]
+
+    pack: str | None = None
+    tokens = key.split()
+    for spoken in sorted(PACKING_ALIASES, key=len, reverse=True):
+        spoken_toks = spoken.split()
+        if not spoken_toks:
+            continue
+        for i in range(len(tokens) - len(spoken_toks) + 1):
+            if tokens[i : i + len(spoken_toks)] == spoken_toks:
+                pack = PACKING_ALIASES[spoken]
+                tokens = tokens[:i] + tokens[i + len(spoken_toks) :]
+                break
+        if pack:
+            break
+
+    rest = " ".join(tokens).strip()
+    oil: str | None = None
+    if rest:
+        if rest in OIL_TYPE_ALIASES:
+            oil = OIL_TYPE_ALIASES[rest]
+        else:
+            # Canonical oil labels already in the phrase
+            canon_oils = {_norm(v): v for v in OIL_TYPE_ALIASES.values()}
+            oil = canon_oils.get(rest) or OIL_TYPE_ALIASES.get(rest)
+    return oil, pack
+
+
 _GENERIC_CLIENT_ALIASES = {
     "store",
     "stores",

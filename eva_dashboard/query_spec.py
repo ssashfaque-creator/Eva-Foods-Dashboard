@@ -77,8 +77,11 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": sorted(INTENTS),
                     "description": (
-                        "sales_matrix = breakdowns; sales_trend = named-month "
-                        "Volume+AMS; sales_analytical = performance pack; "
+                        "sales_trend = DEFAULT for sales / last-N-months "
+                        "(BU×Month + AMS, or named-month Volume+AMS); "
+                        "sales_matrix = ONLY when user asks a static cross-tab "
+                        "(e.g. Channel×BU without months); "
+                        "sales_analytical = performance pack; "
                         "party_rank = compare parties/cities/zones; "
                         "party_list = who are the parties; party_lookup = one "
                         "named party; price; advanced; overview"
@@ -118,9 +121,11 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "enum": sorted(PERIOD_TYPES),
                     "description": (
                         "REQUIRED. Always choose a period. "
-                        "MTD if user did not specify; LAST_N_MONTHS for "
-                        "'last 6 months'; NAMED_MONTH for 'July'; "
-                        "CUSTOM_DATE for ISO bounds."
+                        "If the user did NOT specify a period for a sales ask, "
+                        "use LAST_N_MONTHS + months_back=6 (Trend Default) — "
+                        "NOT MTD. LAST_N_MONTHS for 'last 6 months'; "
+                        "NAMED_MONTH for 'July'; MTD only when user says "
+                        "'this month'/'MTD'/'so far'; CUSTOM_DATE for ISO bounds."
                     ),
                 },
                 "months_back": {
@@ -143,11 +148,35 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     },
                 },
                 "group_by": {
-                    "type": "string",
-                    "enum": list(GROUP_BY_DIMS),
+                    "oneOf": [
+                        {
+                            "type": "string",
+                            "enum": list(GROUP_BY_DIMS) + ["month"],
+                        },
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": list(GROUP_BY_DIMS) + ["month"],
+                            },
+                            "minItems": 1,
+                        },
+                    ],
                     "description": (
-                        "Row grain. distributor-wise→party; product-wise→"
-                        "packing_category; SKU-wise→product; city-wise→city."
+                        "Row grain. String OR array for MultiIndex rows "
+                        "(e.g. [\"client_type\",\"business_unit\"] for channel "
+                        "monthly). distributor-wise→party; product-wise→"
+                        "packing_category; SKU-wise→product; city-wise→city; "
+                        "sales_trend default→[\"business_unit\"]; "
+                        "monthly price→[\"month\"] (or set time_grain=month)."
+                    ),
+                },
+                "time_grain": {
+                    "type": "string",
+                    "enum": ["none", "month"],
+                    "description": (
+                        "For intent=price: 'month' returns a calendar-month "
+                        "time-series of Avg Rate (not a single aggregate)."
                     ),
                 },
                 "filters": {
@@ -408,12 +437,57 @@ def _derive_period_type(raw: dict[str, Any], period: dict[str, Any]) -> str | No
     return "NAMED_MONTH"
 
 
+def _promote_group_by(raw_gb: Any, grain: dict[str, Any]) -> None:
+    """Map group_by string|array → grain.group_by / row_dimension / row_groups / time_grain."""
+    if raw_gb is None or raw_gb == "":
+        return
+    if isinstance(raw_gb, (list, tuple)):
+        items = [str(x).strip().lower() for x in raw_gb if str(x).strip()]
+    else:
+        items = [str(raw_gb).strip().lower()]
+    if not items:
+        return
+
+    if "month" in items:
+        grain.setdefault("time_grain", "month")
+        items = [x for x in items if x != "month"]
+    if not items:
+        return
+
+    rank_dims = {"party", "city", "zone"}
+    dims = [x for x in items if x in GROUP_BY_DIMS]
+    if not dims:
+        return
+
+    # Pure ranking grain (party_rank / party_list)
+    if all(d in rank_dims for d in dims) and not grain.get("group_by"):
+        grain["group_by"] = dims[-1]
+        return
+
+    # Sales MultiIndex: [...parents, leaf]
+    if len(dims) >= 2:
+        if not grain.get("row_groups"):
+            grain["row_groups"] = dims[:-1]
+        if not grain.get("row_dimension"):
+            grain["row_dimension"] = dims[-1]
+        # Ranking dim as leaf still sets group_by for party_rank
+        if dims[-1] in rank_dims and not grain.get("group_by"):
+            grain["group_by"] = dims[-1]
+        return
+
+    d = dims[0]
+    if d in rank_dims and not grain.get("group_by"):
+        grain["group_by"] = d
+    elif d in GROUP_BY_DIMS and not grain.get("row_dimension"):
+        grain["row_dimension"] = d
+
+
 def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Coerce model JSON into a canonical QuerySpec (no silent intent fills)."""
     raw = dict(raw or {})
     intent = str(raw.get("intent") or "").strip().lower()
     aliases = {
-        "sales": "sales_matrix",
+        "sales": "sales_trend",  # bare "sales" → trend default, not static matrix
         "matrix": "sales_matrix",
         "trend": "sales_trend",
         "analytical": "sales_analytical",
@@ -421,7 +495,7 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "analyze_parties": "party_rank",
         "lookup_party": "party_lookup",
         "query_price": "price",
-        "query_sales": "sales_matrix",
+        "query_sales": "sales_trend",
         "advanced_query": "advanced",
     }
     if intent in aliases:
@@ -458,17 +532,20 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         filters.pop("city_filter", None)
 
     grain = dict(raw.get("grain") or {})
-    # Promote top-level group_by / column_dimension / months_back into grain
-    if raw.get("group_by") and not grain.get("group_by"):
-        gb = str(raw["group_by"]).strip().lower()
-        if gb in {"party", "city", "zone"}:
-            grain["group_by"] = gb
-        elif gb in GROUP_BY_DIMS and not grain.get("row_dimension"):
-            grain["row_dimension"] = gb
+    # Promote top-level group_by / column_dimension / months_back / time_grain
+    _promote_group_by(raw.get("group_by"), grain)
     if raw.get("column_dimension") and not grain.get("column_dimension"):
         grain["column_dimension"] = raw["column_dimension"]
     if raw.get("months_back") is not None and grain.get("months_back") is None:
         grain["months_back"] = int(raw["months_back"])
+    if raw.get("time_grain") and not grain.get("time_grain"):
+        tg = str(raw["time_grain"]).strip().lower()
+        if tg in {"month", "none"}:
+            grain["time_grain"] = tg
+    if raw.get("row_groups") and not grain.get("row_groups"):
+        grain["row_groups"] = [
+            str(g).strip().lower() for g in (raw.get("row_groups") or []) if g
+        ]
 
     period = dict(raw.get("period") or {})
     if raw.get("period_phrase") and not period.get("phrase"):
@@ -540,7 +617,8 @@ def validate_query_spec(
             "Missing period_type. REQUIRED: MTD | LAST_N_MONTHS | LAST_MONTH | "
             "LAST_WEEK | NAMED_MONTH | CUSTOM_DATE. "
             "If the user said 'last 6 months', use LAST_N_MONTHS + months_back=6. "
-            "If unspecified, use MTD."
+            "If unspecified for a sales ask, use LAST_N_MONTHS + months_back=6 "
+            "+ intent=sales_trend (Trend Default) — not MTD."
         )
     # Follow-up state: when using prior, clear_filters must be explicit
     # (empty list is OK — means keep all prior filters).
@@ -614,6 +692,10 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         period["phrase"] = f"last {n} months"
         grain["column_dimension"] = grain.get("column_dimension") or "month"
         grain["months_back"] = n
+        # Trend Default Rule C: sales_trend → BU × Month when row grain omitted
+        if str(spec.get("intent") or "") == "sales_trend":
+            if not grain.get("row_dimension") and not grain.get("group_by"):
+                grain["row_dimension"] = "business_unit"
     elif pt == "NAMED_MONTH":
         # phrase already set from named_month
         pass

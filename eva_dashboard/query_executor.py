@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from eva_dashboard.client_language import (
+    extract_oil_and_packing,
     normalize_client_type,
     normalize_oil_type,
     normalize_packing_category,
@@ -42,12 +43,35 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
         out["zone"] = normalize_zone(out.get("zone"))
     if out.get("client_type"):
         out["client_type"] = normalize_client_type(out.get("client_type"))
-    if out.get("oil_type"):
-        out["oil_type"] = normalize_oil_type(out.get("oil_type"))
-    if out.get("packing_category"):
-        out["packing_category"] = normalize_packing_category(
-            out.get("packing_category")
-        )
+
+    oil = out.get("oil_type")
+    pack = out.get("packing_category")
+    # Defensive: composite phrases left in oil_type / product → split
+    if oil and not pack:
+        o2, p2 = extract_oil_and_packing(str(oil))
+        if o2 and p2:
+            oil, pack = o2, p2
+    if pack and not oil:
+        o2, p2 = extract_oil_and_packing(str(pack))
+        if o2 and p2:
+            oil, pack = o2, p2
+    product = out.get("product")
+    if product and (not oil or not pack):
+        o2, p2 = extract_oil_and_packing(str(product))
+        if o2 and not oil:
+            oil = o2
+        if p2 and not pack:
+            pack = p2
+        # Composite spoken product is not an exact SKU — drop product filter
+        if o2 and p2 and " " in str(product).strip():
+            # Keep exact SKU when it looks like a real product name with size codes
+            if not any(ch.isdigit() for ch in str(product)):
+                out.pop("product", None)
+
+    if oil:
+        out["oil_type"] = normalize_oil_type(oil)
+    if pack:
+        out["packing_category"] = normalize_packing_category(pack)
     return out
 
 
@@ -197,6 +221,9 @@ def execute_query_spec(
             result = lookup_party(q, limit=int(spec.get("limit") or 10))
     elif intent == "price":
         flags = spec.get("price_flags") or {}
+        time_grain = str(
+            grain.get("time_grain") or (spec.get("time_grain") or "none")
+        ).strip().lower()
         result = query_price(
             period=phrase,
             date_from=date_from,
@@ -210,6 +237,7 @@ def execute_query_spec(
             include_price_fetch=bool(flags.get("include_price_fetch")),
             include_cost_factor=bool(flags.get("include_cost_factor")),
             factor_breakdown=bool(flags.get("factor_breakdown")),
+            time_grain=time_grain if time_grain in {"month"} else None,
         )
     elif intent == "advanced":
         from eva_dashboard.chatbot import _dispatch_advanced

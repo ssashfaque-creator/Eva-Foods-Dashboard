@@ -42,10 +42,15 @@ def vocabulary_for_prompt() -> str:
         "3. CHANNEL TYPES (only when named as a channel):",
         *_group(CLIENT_TYPE_ALIASES),
         "",
-        "4. PRODUCT vs SKU",
+        "4. PRODUCT vs SKU vs COMPOSITE FILTERS (CRITICAL)",
         "- \"product-wise\" / \"by product\" → group_by or row_dimension="
         "packing_category.",
         "- \"SKU-wise\" / \"by SKU\" → product.",
+        "- Named oil+packing combos are FILTERS, not a whole BU:",
+        "  \"canola standup\" / \"Eva canola stand-up\" →",
+        "  filters={oil_type:\"Eva Canola\", packing_category:\"Stand up\"}.",
+        "  Do NOT broaden to all of Eva Consumer.",
+        "- \"cooking tin\" → oil_type=Eva Cooking + packing_category=Tin (same pattern).",
         "",
         "5. PACKING:",
         *_group(PACKING_ALIASES),
@@ -63,13 +68,28 @@ def vocabulary_for_prompt() -> str:
         "- other cities / city league → group_by=city + clear_filters:[\"city\"]",
         "- Switching Lahore → national: MUST clear_filters:[\"city\"].",
         "",
-        "8. PERIOD (period_type is REQUIRED on every plan)",
-        "- unspecified → period_type=MTD",
-        "- \"last 6 months\" → period_type=LAST_N_MONTHS, months_back=6",
-        "- \"July\" / \"July 2026\" → period_type=NAMED_MONTH, named_month=…",
+        "8. PERIOD + INTENT DEFAULTS (Trend Default Rule)",
+        "- Rule A: sales ask with NO period spoken → period_type=LAST_N_MONTHS, "
+        "months_back=6, intent=sales_trend. Do NOT default to MTD or a static "
+        "Channel×BU matrix unless the user asks for that breakdown.",
+        "- Rule B: \"last 6 months\" / \"last N months\" → intent=sales_trend "
+        "(month columns + AMS). Never sales_matrix with client_type columns.",
+        "- Rule C: sales_trend default grain → group_by=[\"business_unit\"] "
+        "(BU rows × Month columns), matching the distributor monthly AMS table.",
+        "- \"channel monthly\" / \"channel × BU monthly\" → sales_trend, "
+        "group_by=[\"client_type\",\"business_unit\"], period LAST_N_MONTHS.",
+        "- \"this month\" / \"MTD\" / \"so far\" → period_type=MTD "
+        "(named-month Volume+AMS when a calendar month is named).",
+        "- \"July\" / \"July 2026\" → period_type=NAMED_MONTH, named_month=…, "
+        "intent=sales_trend (Volume+AMS pack).",
         "- \"last month\" → LAST_MONTH; \"last week\" → LAST_WEEK",
         "",
-        "9. PERFORMANCE METRICS (party_rank)",
+        "9. PRICE TIME-SERIES",
+        "- \"monthly average price\" / \"price by month\" → intent=price, "
+        "time_grain=month (or group_by=[\"month\"]), plus oil/packing filters.",
+        "- Do NOT return a single 6-month aggregate when the user said monthly.",
+        "",
+        "10. PERFORMANCE METRICS (party_rank)",
         "- lowest/worst performing → ranking_metric=vs_ams, sort_order=asc",
         "- least/lowest gains → ranking_metric=ams_growth, sort_order=asc "
         "(grown_only=false)",
@@ -86,17 +106,31 @@ PRIMARY TOOL — plan_query (use for almost every factual ask):
 Emit a complete QuerySpec. Server executes BLINDLY — it will not rewrite your plan.
 If you omit required fields you get plan_errors; fix and call plan_query again.
 
-Required every time: intent, period_type
-Also set: context_handling (none|prior), filters, group_by / column_dimension,
-business_units, ranking_metric, sort_order, clear_filters when following up.
+Required every time: intent, period_type, context_handling
+Also set: filters, group_by (string OR array for MultiIndex rows), column_dimension,
+time_grain (for price), business_units, ranking_metric, sort_order,
+clear_filters when following up.
+
+TREND DEFAULT (mandatory):
+- Sales with no period → sales_trend + LAST_N_MONTHS + months_back=6 +
+  group_by=["business_unit"] (NOT MTD, NOT client_type matrix).
+- \"last N months\" sales → always sales_trend (month+AMS grid).
 
 Examples:
 - \"how Eva distributor sales in Lahore are doing last 6 months\" →
-  intent=sales_matrix, period_type=LAST_N_MONTHS, months_back=6,
+  intent=sales_trend, period_type=LAST_N_MONTHS, months_back=6,
+  group_by=["business_unit"],
   filters={city:Lahore, client_type:Eva Distributors},
   business_units=[Eva Consumer, Eva Bulk]
-- \"show me Eva sales in Lahore\" → sales_*, city=Lahore,
-  business_units=[Eva Consumer, Eva Bulk], period_type=MTD (if no period spoken)
+- \"show me Eva sales in Lahore\" (no period) → same as above (trend default),
+  city=Lahore, business_units=[Eva Consumer, Eva Bulk]
+- \"channel monthly table\" → sales_trend, LAST_N_MONTHS, months_back=6,
+  group_by=["client_type","business_unit"]
+- \"Eva canola standup sales last 6 months\" → sales_trend, LAST_N_MONTHS,
+  filters={oil_type:Eva Canola, packing_category:Stand up}
+- \"monthly average price for Eva canola standup\" → intent=price,
+  period_type=LAST_N_MONTHS, months_back=6, time_grain=month,
+  filters={oil_type:Eva Canola, packing_category:Stand up}
 - After Eva Consumer vs Bulk: \"show this distributor-wise, lowest performing\" →
   context_handling=prior, intent=party_rank, group_by=party,
   clear_filters=[\"client_type\"], ranking_metric=vs_ams, sort_order=asc,

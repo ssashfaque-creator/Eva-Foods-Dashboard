@@ -252,6 +252,10 @@ def system_prompt() -> str:
 5. After tables arrive: paste answer_markdown verbatim, then ### Analysis (2–4 bullets).
 6. Follow-ups: context_handling='prior' + clear_filters for anything that drops.
    Fresh ask → context_handling='none'.
+7. TREND DEFAULT: sales with no period → sales_trend + LAST_N_MONTHS +
+   months_back=6 + group_by=["business_unit"]. Never invent a static
+   Channel×BU matrix unless asked. Composite SKUs ("canola standup") →
+   oil_type + packing_category filters (AND). Monthly price → time_grain=month.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
