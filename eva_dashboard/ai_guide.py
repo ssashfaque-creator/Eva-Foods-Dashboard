@@ -45,10 +45,12 @@ def vocabulary_for_prompt() -> str:
         "3. CHANNEL TYPES (client_type enum ONLY — never Business Units):",
         *_group(CLIENT_TYPE_ALIASES),
         "",
-        "4. PRODUCT / SKU / COMPOSITE FILTERS",
-        "- product-wise → row_dimensions=[\"packing_category\"]",
-        "- SKU-wise → row_dimensions=[\"product\"]",
-        "- \"canola standup\" → filters={oil_type:\"Eva Canola\", "
+        "4. PRODUCT vs SKU (UNBREAKABLE)",
+        "- Spoken \"product\" / \"product-wise\" / \"by product\" →",
+        "  row_dimensions=[\"packing_category\"] (packing category, NOT SKU name).",
+        "- Spoken \"SKU\" / \"SKU-wise\" / \"SKU breakup\" / \"item-wise\" →",
+        "  row_dimensions=[\"product\"] (actual product / SKU name). ALWAYS.",
+        "- \"canola standup\" → filters={oil_type:\"Eva Canola\", ",
         "packing_category:\"Stand up\"} (AND). Do NOT broaden to all Eva Consumer.",
         "",
         "5. PACKING:",
@@ -76,17 +78,21 @@ def vocabulary_for_prompt() -> str:
         "- plain rate / average price → metrics=[\"avg_price\"].",
         "- Price Fetch / recovery / 'oil price fetched' / 'apply the cost factor'",
         "  / 'what's the cost factor' → metrics=[\"price_fetch\"].",
-        "  Do NOT calculate Price Fetch yourself; the engine joins factor_costs",
-        "  and returns Incl GST/unit (SKU pack size from Mes Qty÷units), "
-        "Cost Factor (Ltrs/Kgs), Price Fetch/maund.",
+        "  Engine returns a dedicated table: row dims + Avg Price (Incl GST/unit)",
+        "  + Cost Factor + Price Fetch/Maund. Do NOT use monthly trend for this.",
+        "- SKU-wise Price Fetch → row_dimensions=[\"product\"], metrics=[\"price_fetch\"].",
         "- monthly price trends → column_dimensions=[\"month\"] + avg_price.",
         "- customer-wise price trends → row_dimensions=[\"party\"],",
         "  column_dimensions=[\"month\"], metrics=[\"avg_price\"].",
         "",
-        "10. PARTY / CUSTOMER NAMES",
-        "- Put the spoken name in filters.party (e.g. \"al shaheer\").",
-        "- Python fuzzy-matches to the canonical client. If ambiguous, you get",
-        "  plan_errors with top matches — ask the user which one, then retry.",
+        "10. PARTY / CUSTOMER NAMES (silent ILIKE — no retry loops)",
+        "- Put the spoken name in filters.party (e.g. \"al shaheer\") OR",
+        "  extracted_entities=[\"al shaheer\"].",
+        "- Compare two customers → filters.parties=[\"al shaheer\",\"Metro Habib\"]",
+        "  (or extracted_entities with both names) + row_dimensions=[\"party\"].",
+        "- Python applies SQL ILIKE '%name%' — do NOT ask the user to pick",
+        "  among Al Shaheer branches for analytics. \"who is X\" →",
+        "  operation=party_lookup (shows the match list).",
         "",
         "11. PERFORMANCE METRICS",
         "- lowest/worst performing → metrics=[\"vs_ams\"], sort_order=asc,",
@@ -146,8 +152,17 @@ Examples:
   \"apply the cost factor\" → metrics=["price_fetch"],
   filters={oil_type:Eva Canola, packing_category:Stand up,
   client_type:Eva Distributors}
-- \"al shaheer sales last 6 months\" → filters.party=\"al shaheer\"
-  (Python resolves; if ambiguous, ask user from matches)
+- \"SKU-wise breakup of al shaheer with average prices and the price fetch\" →
+  row_dimensions=["product"], metrics=["price_fetch"],
+  filters.party="al shaheer" (or extracted_entities=["al shaheer"]),
+  LAST_N_MONTHS/6 — NO column_dimensions month
+- \"product-wise sales\" → row_dimensions=["packing_category"] (NOT product)
+- \"al shaheer sales last 6 months\" → filters.party="al shaheer"
+  (Python ILIKE — includes all Al Shaheer branches; no clarify loop)
+- \"compare al shaheer with Metro Habib\" →
+  filters.parties=["al shaheer","Metro Habib"], row_dimensions=["party"],
+  metrics=["volume","ams"], column_dimensions=["month"]
+- \"who is al shaheer\" → operation=party_lookup, party_query="al shaheer"
 - After brand table: \"distributor-wise, lowest performing\" →
   context_handling=prior, row_dimensions=["party"], metrics=["vs_ams"],
   sort_order=asc, clear_filters=["client_type"]

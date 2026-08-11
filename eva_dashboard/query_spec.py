@@ -44,6 +44,7 @@ FILTER_KEYS = (
     "oil_type",
     "packing_category",
     "party",
+    "parties",
     "product",
     "active_only",
 )
@@ -105,7 +106,8 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "items": {"type": "string", "enum": list(ROW_DIMENSIONS)},
                     "description": (
                         "Row groupings. customer/party/account/buyer/store-wise "
-                        "→ ['party']; product-wise → ['packing_category']; "
+                        "→ ['party']; spoken product/product-wise → "
+                        "['packing_category']; SKU/SKU-wise → ['product']; "
                         "channel monthly → ['client_type','business_unit']; "
                         "default sales trend → ['business_unit']."
                     ),
@@ -217,7 +219,22 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "zone": {"type": "string"},
                         "oil_type": {"type": "string"},
                         "packing_category": {"type": "string"},
-                        "party": {"type": "string"},
+                        "party": {
+                            "type": "string",
+                            "description": (
+                                "Spoken customer name (e.g. 'al shaheer'). "
+                                "Python applies silent ILIKE — no clarify loop."
+                            ),
+                        },
+                        "parties": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Multiple spoken customer names for compare "
+                                "(e.g. ['al shaheer','Metro Habib']). "
+                                "Python ORs ILIKE matches."
+                            ),
+                        },
                         "product": {"type": "string"},
                         "active_only": {"type": "boolean"},
                     },
@@ -262,9 +279,10 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Ambiguous brand/product/packing/city phrases. "
-                        "Python maps them to the correct columns. Use when unsure "
-                        "instead of guessing client_type vs business_unit."
+                        "Ambiguous brand/product/packing/city/party phrases "
+                        "(e.g. 'al shaheer', 'Metro Habib', 'Eva Consumer'). "
+                        "Python maps them: brands→business_units, unresolved "
+                        "names→silent party ILIKE. Prefer this over guessing."
                     ),
                 },
                 "rationale": {"type": "string"},

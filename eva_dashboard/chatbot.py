@@ -265,7 +265,11 @@ def system_prompt() -> str:
 9. SPECIFIC_MONTH: \"March\" → period_type=SPECIFIC_MONTH + target_month=YYYY-MM.
    Never LAST_N_MONTHS for a single named month.
 10. price_fetch metric for Price Fetch / oil price fetched / cost factor —
-    engine computes; do not invent the formula.
+    engine computes a dedicated table (not monthly trend). Do not invent math.
+11. UNBREAKABLE: \"SKU\"/\"SKU-wise\" → row_dimensions=[\"product\"].
+    Spoken \"product\"/\"product-wise\" → row_dimensions=[\"packing_category\"].
+12. Party names: filters.party or extracted_entities / filters.parties —
+    Python silent ILIKE (no clarify loops). \"who is X\" → operation=party_lookup.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.
@@ -5825,6 +5829,7 @@ def chat_completion(
                         result = execute_query_spec(
                             args,
                             prior=prior_ctx,
+                            user_text=last_user,
                         )
                     # Surface as the executed intent for analysis routing
                     name = {

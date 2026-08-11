@@ -151,15 +151,16 @@ def test_fuzzy_party_unique_match() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
-def test_fuzzy_party_ambiguous_al_shaheer() -> None:
+def test_fuzzy_party_ambiguous_al_shaheer_silent_ilike() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
         try:
             _seed()
             hit = fuzzy_match_party("al shaheer")
-            assert hit["ok"] is False
-            assert "Ambiguous" in (hit.get("error") or "")
+            # Silent ILIKE — never kick ambiguous errors to the LLM
+            assert hit["ok"] is True
+            assert hit.get("party_ilike") == ["al shaheer"]
             assert len(hit.get("matches") or []) >= 2
 
             out = execute_query_spec(
@@ -171,11 +172,13 @@ def test_fuzzy_party_ambiguous_al_shaheer() -> None:
                     "months_back": 6,
                     "context_handling": "none",
                     "filters": {"party": "al shaheer"},
-                }
+                },
+                user_text="al shaheer sales last 6 months",
             )
-            assert out["ok"] is False
-            assert out.get("matches")
-            assert "Ambiguous" in (out.get("error") or "")
+            assert out["ok"] is True, out
+            assert not out.get("plan_errors")
+            filt = (out.get("query_spec") or {}).get("filters") or {}
+            assert filt.get("party_ilike") or filt.get("party")
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

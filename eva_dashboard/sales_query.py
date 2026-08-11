@@ -584,13 +584,22 @@ def normalize_row_dimension(value: str | None) -> str | None:
         "product categories": "packing_category",
         "pack category": "packing_category",
         "category 3": "packing_category",
-        "product": "product",
-        "products": "product",
+        # Spoken "product/product-wise" = packing category; schema "product" = SKU
+        "products": "packing_category",
+        "product wise": "packing_category",
+        "by product": "packing_category",
+        "by products": "packing_category",
+        "product breakup": "packing_category",
+        "product break up": "packing_category",
         "sku": "product",
         "skus": "product",
         "sku wise": "product",
         "item": "product",
         "items": "product",
+        "item wise": "product",
+        "by sku": "product",
+        "by skus": "product",
+        "product": "product",  # schema token / SKU dim (spoken product-wise above)
         "city": "city",
         "cities": "city",
         "zone": "zone",
@@ -614,6 +623,41 @@ def normalize_row_dimension(value: str | None) -> str | None:
     return None
 
 
+def _party_filter_sql(
+    *,
+    party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
+) -> tuple[str | None, list[Any]]:
+    """Build OR'd exact / ILIKE party predicates for sales.party."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    exacts: list[str] = []
+    if party and str(party).strip():
+        exacts.append(str(party).strip())
+    for p in parties or []:
+        s = str(p or "").strip()
+        if s and s not in exacts:
+            exacts.append(s)
+    for name in exacts:
+        clauses.append(
+            "lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
+            "= lower(trim(replace(replace(?, '  ', ' '), '  ', ' ')))"
+        )
+        params.append(name)
+    seen_like: set[str] = set()
+    for frag in party_ilike or []:
+        key = str(frag or "").strip().lower()
+        if not key or key in seen_like:
+            continue
+        seen_like.add(key)
+        clauses.append("lower(s.party) LIKE ?")
+        params.append(f"%{key}%")
+    if not clauses:
+        return None, []
+    return "(" + " OR ".join(clauses) + ")", params
+
+
 def _fetch_lines(
     *,
     date_from: str,
@@ -626,6 +670,8 @@ def _fetch_lines(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     excludes: dict[str, list[str]] | None = None,
     active_only: bool = False,
 ) -> pd.DataFrame:
@@ -633,6 +679,10 @@ def _fetch_lines(
 
     Fast path: sales ↔ category in SQL (indexed), then attach city/zone/client_type
     from an in-memory clients map. Avoids the O(sales×clients) expression JOIN.
+
+    Party filters:
+      - ``party`` / ``parties`` → exact name match
+      - ``party_ilike`` → OR of ``lower(party) LIKE %frag%`` (silent fuzzy)
     """
     init_db()
     params: list[Any] = [date_from, date_to]
@@ -703,12 +753,12 @@ def _fetch_lines(
     if packing_category:
         where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
         params.append(packing_category)
-    if party:
-        where.append(
-            "lower(trim(replace(replace(s.party, '  ', ' '), '  ', ' '))) "
-            "= lower(trim(replace(replace(?, '  ', ' '), '  ', ' ')))"
-        )
-        params.append(party)
+    party_sql, party_params = _party_filter_sql(
+        party=party, parties=parties, party_ilike=party_ilike
+    )
+    if party_sql:
+        where.append(party_sql)
+        params.extend(party_params)
 
     ex = excludes or {}
     # City / zone / client_type excludes applied after attach (need resolved dims).
@@ -1327,6 +1377,8 @@ def _ams_fetch_filters(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "city": city,
@@ -1337,6 +1389,8 @@ def _ams_fetch_filters(
         "packing_category": packing_category,
         "client_type": client_type,
         "party": party,
+        "parties": parties,
+        "party_ilike": party_ilike,
     }
 
 
@@ -1352,6 +1406,8 @@ def _load_ams_window_frame(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One window covering the N prior full months (reuse ``frame`` when it already covers it)."""
@@ -1382,6 +1438,8 @@ def _load_ams_window_frame(
             packing_category=packing_category,
             client_type=client_type,
             party=party,
+            parties=parties,
+            party_ilike=party_ilike,
         ),
     )
 
@@ -1514,6 +1572,8 @@ def _enrich_month_matrix_with_ams(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     lines_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Insert AMS columns before Total on a month matrix.
@@ -1559,6 +1619,8 @@ def _enrich_month_matrix_with_ams(
         packing_category=packing_category,
         client_type=client_type,
         party=party,
+        parties=parties,
+        party_ilike=party_ilike,
         frame=lines_frame,
     )
 
@@ -1977,6 +2039,8 @@ def query_sales(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     columns: str = "client_type",
     months_back: int = 6,
     mode: str = "matrix",
@@ -2039,6 +2103,12 @@ def query_sales(
     zone_f = normalize_zone(zone)
     ctype = normalize_client_type((client_type or "").strip() or None)
     party_f = (party or "").strip() or None
+    parties_f = [
+        str(p).strip() for p in (parties or []) if str(p or "").strip()
+    ] or None
+    party_ilike_f = [
+        str(p).strip() for p in (party_ilike or []) if str(p or "").strip()
+    ] or None
     col = (columns or "client_type").strip().lower().replace(" ", "_")
     mb = int(months_back or 6)
     row_override = normalize_row_dimension(row_dimension)
@@ -2247,6 +2317,8 @@ def query_sales(
         packing_category=pack,
         client_type=ctype,
         party=party_f,
+        parties=parties_f,
+        party_ilike=party_ilike_f,
         excludes=ex_map or None,
         active_only=active_only_f,
     )
@@ -2268,6 +2340,8 @@ def query_sales(
             packing_category=pack,
             client_type=ctype,
             party=party_f,
+            parties=parties_f,
+            party_ilike=party_ilike_f,
             lines_frame=frame,
         )
     else:
@@ -2928,6 +3002,18 @@ def _filter_blurb(
         )
     if filters.get("party"):
         bits.append(f"party **{filters['party']}**")
+    elif filters.get("parties"):
+        bits.append(
+            "parties **"
+            + "**, **".join(str(p) for p in filters["parties"])
+            + "**"
+        )
+    elif filters.get("party_ilike"):
+        bits.append(
+            "party matching **"
+            + "**, **".join(str(p) for p in filters["party_ilike"])
+            + "**"
+        )
     if filters.get("zone"):
         bits.append(f"zone **{filters['zone']}**")
     if filters.get("city"):
@@ -3620,6 +3706,9 @@ def query_price(
     oil_type: str | None = None,
     packing_category: str | None = None,
     client_type: str | None = None,
+    party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     product: str | None = None,
     product_query: str | None = None,
     include_price_fetch: bool = False,
@@ -3647,6 +3736,13 @@ def query_price(
     city_f = (city or "").strip() or None
     ctype = normalize_client_type((client_type or "").strip() or None)
     bu = _normalize_business_unit(business_unit)
+    party_f = (party or "").strip() or None
+    parties_f = [
+        str(p).strip() for p in (parties or []) if str(p or "").strip()
+    ] or None
+    party_ilike_f = [
+        str(p).strip() for p in (party_ilike or []) if str(p or "").strip()
+    ] or None
     exact_product = (product or "").strip() or None
     resolution = None
 
@@ -3664,6 +3760,12 @@ def query_price(
             bu = prior_filters.get("business_unit") or None
         if not exact_product:
             exact_product = prior_filters.get("product") or None
+        if not party_f:
+            party_f = prior_filters.get("party") or None
+        if not parties_f:
+            parties_f = prior_filters.get("parties") or None
+        if not party_ilike_f:
+            party_ilike_f = prior_filters.get("party_ilike") or None
         if not period and not date_from and prior_spec.get("period_phrase"):
             period = prior_spec.get("period_phrase")
         if not period and not date_from and prior_spec.get("period"):
@@ -3734,10 +3836,17 @@ def query_price(
     if exact_product:
         where.append("s.product = ?")
         params.append(exact_product)
+    party_sql, party_params = _party_filter_sql(
+        party=party_f, parties=parties_f, party_ilike=party_ilike_f
+    )
+    if party_sql:
+        where.append(party_sql)
+        params.extend(party_params)
 
     sql = f"""
     SELECT
       s.date,
+      s.party,
       s.product,
       s.qty,
       s.unit,
@@ -3789,6 +3898,9 @@ def query_price(
             "oil_type": oil,
             "packing_category": pack,
             "client_type": ctype,
+            "party": party_f,
+            "parties": parties_f,
+            "party_ilike": party_ilike_f,
             "product": exact_product,
         }
         return {
@@ -3942,6 +4054,9 @@ def query_price(
         "oil_type": oil,
         "packing_category": pack,
         "client_type": ctype,
+        "party": party_f,
+        "parties": parties_f,
+        "party_ilike": party_ilike_f,
         "product": exact_product,
     }
     price_spec = {
@@ -4206,4 +4321,318 @@ def query_price(
             "or 'what's the cost factor?' / factor breakdown. "
             "Show Incl GST per unit (SKU pack), not per kg."
         ),
+    }
+
+
+_PRICE_FETCH_ROW_DIMS = {
+    "party",
+    "product",
+    "packing_category",
+    "oil_type",
+    "business_unit",
+    "client_type",
+}
+
+
+def query_price_fetch_table(
+    *,
+    row_dimensions: list[str] | None = None,
+    period: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    city: str | None = None,
+    business_unit: str | None = None,
+    business_units: list[str] | None = None,
+    oil_type: str | None = None,
+    packing_category: str | None = None,
+    client_type: str | None = None,
+    party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
+    product: str | None = None,
+) -> dict[str, Any]:
+    """Dedicated Price Fetch breakdown — rigid columns, no monthly fallback.
+
+    Columns: [row dims] | Avg Price (Incl GST/unit) | Cost Factor | Price Fetch / Maund
+    Groups by ``row_dimensions`` (default ``product``). Never routes through
+    the trend / matrix HTML renderer.
+    """
+    rows = [d for d in (row_dimensions or []) if d in _PRICE_FETCH_ROW_DIMS]
+    if not rows:
+        rows = ["product"]
+
+    # Reuse query_price line fetch + by_product math via a wide call, then reshape.
+    # For multi-dim groups we fetch lines ourselves with the same SQL path.
+    oil = normalize_oil_type((oil_type or "").strip() or None)
+    pack = normalize_packing_category((packing_category or "").strip() or None)
+    city_f = (city or "").strip() or None
+    ctype = normalize_client_type((client_type or "").strip() or None)
+    units = [u for u in (business_units or []) if u]
+    bu_one = _normalize_business_unit(business_unit)
+    if bu_one and bu_one not in units:
+        units.append(bu_one)
+    party_f = (party or "").strip() or None
+    parties_f = [
+        str(p).strip() for p in (parties or []) if str(p or "").strip()
+    ] or None
+    party_ilike_f = [
+        str(p).strip() for p in (party_ilike or []) if str(p or "").strip()
+    ] or None
+    exact_product = (product or "").strip() or None
+
+    period_info = resolve_period(period, date_from=date_from, date_to=date_to)
+    if period_info.get("ok") is False or not period_info.get("date_from"):
+        return {
+            "ok": False,
+            "error": period_info.get("error") or "Bad period",
+            "period": period_info,
+        }
+    d0 = period_info["date_from"]
+    d1 = period_info["date_to"]
+
+    params: list[Any] = [d0, d1]
+    where = ["s.date >= ?", "s.date <= ?"]
+    if city_f:
+        where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
+        params.append(city_f)
+    if len(units) == 1:
+        where.append("lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))")
+        params.append(units[0])
+    elif len(units) > 1:
+        placeholders = ",".join("?" for _ in units)
+        where.append(
+            f"lower(trim(COALESCE(c.category_1, ''))) IN ({placeholders})"
+        )
+        params.extend(u.lower().strip() for u in units)
+    if oil:
+        where.append("lower(trim(COALESCE(c.category_2, ''))) = lower(trim(?))")
+        params.append(oil)
+    if pack:
+        where.append("lower(trim(COALESCE(c.packing_category, ''))) = lower(trim(?))")
+        params.append(pack)
+    if ctype:
+        where.append(
+            """
+            lower(trim(COALESCE(
+              NULLIF(trim(cl.type), ''),
+              NULLIF(trim(s.client_type), ''),
+              'Unmapped'
+            ))) = lower(trim(?))
+            """
+        )
+        params.append(ctype)
+    if exact_product:
+        where.append("s.product = ?")
+        params.append(exact_product)
+    party_sql, party_params = _party_filter_sql(
+        party=party_f, parties=parties_f, party_ilike=party_ilike_f
+    )
+    if party_sql:
+        where.append(party_sql)
+        params.extend(party_params)
+
+    sql = f"""
+    SELECT
+      s.date,
+      s.party,
+      s.product,
+      s.qty,
+      s.unit,
+      s.rate,
+      s.mes_qty,
+      s.mes_unit,
+      s.incl_gst_fed_amount,
+      s.basic_amount,
+      COALESCE(NULLIF(trim(c.category_1), ''), '(unmapped)') AS business_unit,
+      COALESCE(NULLIF(trim(c.category_2), ''), '(unmapped)') AS oil_type,
+      COALESCE(NULLIF(trim(c.packing_category), ''), '(unmapped)') AS packing_category,
+      COALESCE(
+        NULLIF(trim(cl.type), ''),
+        NULLIF(trim(s.client_type), ''),
+        'Unmapped'
+      ) AS client_type,
+      CASE
+        WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
+        WHEN lower(trim(COALESCE(s.unit,''))) IN ('kg','kgs')
+          THEN COALESCE(s.qty,0)/1000.0
+        WHEN lower(trim(COALESCE(s.unit,''))) IN
+             ('mt','m.t','m.t.','ton','tons','tonne','tonnes')
+          THEN COALESCE(s.qty,0)
+        ELSE 0
+      END AS mt,
+      fc.total_factor_cost,
+      fc.product_cost,
+      fc.packing_cost,
+      fc.unit AS cost_unit
+    FROM sales s
+    {_PARTY_JOIN}
+    LEFT JOIN factor_costs fc
+      ON lower(trim(fc.client_type)) = lower(trim(COALESCE(
+           NULLIF(trim(cl.type), ''),
+           NULLIF(trim(s.client_type), ''),
+           ''
+         )))
+     AND lower(trim(fc.product)) = lower(trim(s.product))
+    WHERE {' AND '.join(where)}
+    """
+    init_db()
+    with connect() as conn:
+        frame = pd.read_sql_query(sql, conn, params=params)
+
+    filters = {
+        "city": city_f,
+        "business_unit": units[0] if len(units) == 1 else None,
+        "business_units": units if len(units) > 1 else None,
+        "oil_type": oil,
+        "packing_category": pack,
+        "client_type": ctype,
+        "party": party_f,
+        "parties": parties_f,
+        "party_ilike": party_ilike_f,
+        "product": exact_product,
+    }
+    blurb = _filter_blurb(filters, period_info, units=units if len(units) > 1 else None)
+
+    if frame.empty:
+        return {
+            "ok": True,
+            "mode": "price_fetch_table",
+            "period": period_info,
+            "filters": filters,
+            "row_dimensions": rows,
+            "lines": 0,
+            "rows": [],
+            "answer_markdown": (
+                f"No sales lines for {blurb} — cannot compute Price Fetch.\n"
+            ),
+            "response_instructions": "REQUIRED: Reply with `answer_markdown` verbatim.",
+        }
+
+    dim_labels = {
+        "party": "Party",
+        "product": "SKU",
+        "packing_category": "Packing",
+        "oil_type": "Oil Type",
+        "business_unit": "Business Unit",
+        "client_type": "Client Type",
+    }
+    out_rows: list[dict[str, Any]] = []
+    group_cols = list(rows)
+    for keys, grp in frame.groupby(group_cols, sort=False, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        g_units = _blend_unit_economics(grp)
+        g_factor = _blend_cost_factor(grp)
+        # Line-level Price Fetch then MT-weighted
+        p_vals: list[float] = []
+        p_w: list[float] = []
+        for _, r in grp.iterrows():
+            mt = float(r.get("mt") or 0)
+            incl_v = float(r.get("incl_gst_fed_amount") or 0)
+            kg = mt * 1000.0
+            apk = (incl_v / kg) if kg else None
+            cf = cost_factor_per_kg(r.get("total_factor_cost"), r.get("cost_unit"))
+            if apk is None or cf is None:
+                continue
+            pf = price_fetch_per_maund(apk, cf)
+            if pf is None:
+                continue
+            w = mt if mt > 0 else float(r.get("mes_qty") or 0)
+            if w <= 0:
+                continue
+            p_vals.append(float(pf))
+            p_w.append(w)
+        pf_val = None
+        if p_vals:
+            pf_val = weighted_avg(
+                pd.Series(p_vals),
+                pd.Series(p_w),
+                allow_unweighted_fallback=False,
+            )
+        entry: dict[str, Any] = {
+            dim: str(keys[i]) for i, dim in enumerate(group_cols)
+        }
+        entry["mt"] = round(float(grp["mt"].fillna(0).sum()), 3)
+        entry["avg_price_incl_gst"] = g_units.get("incl_gst_per_unit")
+        entry["pack_label"] = g_units.get("pack_label")
+        entry["cost_factor"] = g_factor.get("cost_factor")
+        entry["cost_unit"] = g_factor.get("cost_unit_label")
+        entry["price_fetch"] = (
+            round(float(pf_val), 2) if pf_val is not None else None
+        )
+        out_rows.append(entry)
+
+    out_rows.sort(key=lambda r: -float(r.get("mt") or 0))
+
+    hdr_dims = [dim_labels.get(d, d) for d in rows]
+    header = (
+        "| "
+        + " | ".join(hdr_dims)
+        + " | Avg Price (Incl GST/unit) | Cost Factor | Price Fetch / Maund |"
+    )
+    sep = (
+        "| "
+        + " | ".join("---" for _ in hdr_dims)
+        + " | --- | --- | --- |"
+    )
+    lines_md = [
+        f"### Price Fetch — {' × '.join(hdr_dims)}\n",
+        f"_{blurb}_\n",
+        header,
+        sep,
+    ]
+    for row in out_rows[:80]:
+        cells = [str(row.get(d) or "—").replace("|", "/") for d in rows]
+        ap = row.get("avg_price_incl_gst")
+        pack = row.get("pack_label")
+        ap_txt = f"{ap:,.2f}" if ap is not None else "—"
+        if pack:
+            ap_txt = f"{ap_txt} ({pack})"
+        cf = row.get("cost_factor")
+        cu = row.get("cost_unit")
+        if cf is not None and cu and cu != "mixed":
+            cf_txt = f"{cf} {cu}"
+        elif cf is not None:
+            cf_txt = str(cf)
+        else:
+            cf_txt = "—"
+        pf = row.get("price_fetch")
+        pf_txt = f"{pf:,.2f}" if pf is not None else "—"
+        cells.extend([ap_txt, cf_txt, pf_txt])
+        lines_md.append("| " + " | ".join(cells) + " |")
+
+    lines_md.append(
+        "\n_Avg Price is Incl GST/FED per sellable unit (pack size from "
+        "Mes Qty ÷ rate-units). Price Fetch = (Incl GST/kg − cost factor/kg) × "
+        f"{MAUND_FACTOR_PRICE_FETCH:.4f} kg/maund (Ltrs costs ÷ {LTR_TO_KG})._"
+    )
+
+    return {
+        "ok": True,
+        "mode": "price_fetch_table",
+        "period": period_info,
+        "filters": filters,
+        "row_dimensions": rows,
+        "lines": int(len(frame)),
+        "mt": round(float(frame["mt"].fillna(0).sum()), 3),
+        "rows": out_rows,
+        "include_price_fetch": True,
+        "include_cost_factor": True,
+        "answer_markdown": "\n".join(lines_md).strip() + "\n",
+        "response_instructions": (
+            "REQUIRED: Reply with `answer_markdown` verbatim. "
+            "This is the Price Fetch table — do not reformat columns."
+        ),
+        "price_spec": {
+            "period_phrase": period,
+            "period": {
+                "date_from": d0,
+                "date_to": d1,
+                "label": period_info.get("label"),
+            },
+            "filters": filters,
+            "row_dimensions": rows,
+            "include_price_fetch": True,
+            "include_cost_factor": True,
+        },
     }

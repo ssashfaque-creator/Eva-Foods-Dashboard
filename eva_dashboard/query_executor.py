@@ -6,10 +6,14 @@ The LLM is the sole source of query parameters. This module:
 3. Maps period_type → date windows (deterministic)
 4. Runs engines (query_sales / analyze_parties / universal_pivot / …)
 5. On invalid plans, returns ok=False + errors for the LLM to self-correct
+
+Party names are resolved silently via ILIKE (no ambiguous-party retry loops).
+Price Fetch uses a dedicated table renderer (never the monthly trend fallback).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from eva_dashboard.client_language import (
@@ -30,14 +34,18 @@ from eva_dashboard.entity_catalog import (
     is_business_unit_label,
     resolve_extracted_entities,
 )
-from eva_dashboard.party_match import fuzzy_match_party
+from eva_dashboard.party_match import resolve_party_filter, resolve_party_filters
 from eva_dashboard.query_spec import (
     merge_prior_into_spec,
     normalize_query_spec,
     resolve_period_from_spec,
     validate_query_spec,
 )
-from eva_dashboard.sales_query import query_price, query_sales
+from eva_dashboard.sales_query import (
+    query_price,
+    query_price_fetch_table,
+    query_sales,
+)
 from eva_dashboard.universal_pivot import execute_universal_pivot
 
 
@@ -60,7 +68,11 @@ def _expand_business_units(values: list[str] | None) -> list[str]:
 
 
 def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
-    """Merge Python-resolved extracted_entities into filters / business_units."""
+    """Merge Python-resolved extracted_entities into filters / business_units.
+
+    Unresolved entities that look like customer names become silent party
+    ILIKE fragments (e.g. \"al shaheer\", \"Metro Habib\").
+    """
     out = dict(spec)
     resolved = resolve_extracted_entities(list(out.get("extracted_entities") or []))
     filters = dict(out.get("filters") or {})
@@ -75,6 +87,22 @@ def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
         if resolved.get(key) and not filters.get(key):
             filters[key] = resolved[key]
 
+    # Unresolved → party candidates (compare / fuzzy names)
+    unresolved = [
+        str(u).strip()
+        for u in (resolved.get("unresolved") or [])
+        if str(u).strip() and len(str(u).strip()) >= 3
+    ]
+    if unresolved and not filters.get("party") and not filters.get("parties"):
+        if len(unresolved) == 1 and not filters.get("party"):
+            filters.setdefault("party", unresolved[0])
+        else:
+            existing = list(filters.get("parties") or [])
+            for u in unresolved:
+                if u not in existing:
+                    existing.append(u)
+            filters["parties"] = existing
+
     if bus:
         out["business_units"] = bus
         filters["business_units"] = bus
@@ -82,6 +110,63 @@ def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
             filters.setdefault("business_unit", bus[0])
     out["filters"] = filters
     out["_entity_resolution"] = resolved
+    return out
+
+
+def _coerce_vocab_from_user_text(
+    spec: dict[str, Any], user_text: str
+) -> dict[str, Any]:
+    """Hard safety nets: SKU→product, product→packing_category, price_fetch."""
+    out = dict(spec)
+    t = (user_text or "").lower()
+    if not t.strip():
+        return out
+
+    rows = list(out.get("row_dimensions") or [])
+    metrics = list(out.get("metrics") or [])
+    cols = list(out.get("column_dimensions") or [])
+
+    has_sku = bool(
+        re.search(
+            r"\bskus?\b|\bsku[-\s]?wise\b|\bitems?\b|\bitem[-\s]?wise\b|"
+            r"\bby\s+sku\b|\bsku\s+break",
+            t,
+        )
+    )
+    has_product_spoken = bool(
+        re.search(
+            r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
+            r"\bproducts?\s+(break|breakup|mix|layer)\b",
+            t,
+        )
+    )
+
+    if has_sku:
+        rows = ["product" if r == "packing_category" else r for r in rows]
+        if "product" not in rows:
+            rows.append("product")
+        # SKU breakup + price fetch → not a monthly trend
+        if "price_fetch" in metrics or re.search(r"price\s*fetch|cost\s*factor", t):
+            cols = [c for c in cols if c != "month"]
+    elif has_product_spoken:
+        rows = ["packing_category" if r == "product" else r for r in rows]
+        if "packing_category" not in rows:
+            rows.append("packing_category")
+
+    if re.search(
+        r"price\s*fetch|oil\s*price\s*fetched|apply\s+the\s+cost\s+factor|"
+        r"what.?s\s+the\s+cost\s+factor|cost\s+factor",
+        t,
+    ):
+        if "price_fetch" not in metrics:
+            metrics.append("price_fetch")
+        # Dedicated PF path — drop accidental month columns
+        if has_sku or "product" in rows or "party" in rows:
+            cols = [c for c in cols if c != "month"]
+
+    out["row_dimensions"] = rows
+    out["metrics"] = metrics
+    out["column_dimensions"] = cols
     return out
 
 
@@ -122,6 +207,54 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
         out["oil_type"] = normalize_oil_type(oil)
     if pack:
         out["packing_category"] = normalize_packing_category(pack)
+
+    if out.get("parties") and not isinstance(out["parties"], list):
+        out["parties"] = [str(out["parties"])]
+    return out
+
+
+def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    """Inject exact party / silent party_ilike — never returns plan_errors."""
+    out = dict(filters)
+    queries: list[str] = []
+    if out.get("parties"):
+        queries.extend(str(p).strip() for p in out["parties"] if str(p).strip())
+    party_raw = out.get("party") or spec.get("party_query")
+    if party_raw and str(party_raw).strip():
+        # Avoid duplicating if already in parties
+        pr = str(party_raw).strip()
+        if pr not in queries:
+            queries.insert(0, pr)
+
+    if not queries:
+        return out
+
+    if len(queries) == 1:
+        matched = resolve_party_filter(queries[0])
+        if matched.get("party"):
+            out["party"] = matched["party"]
+            out.pop("party_ilike", None)
+            out.pop("parties", None)
+        else:
+            out.pop("party", None)
+            out["party_ilike"] = list(matched.get("party_ilike") or queries)
+        out["_party_matches"] = matched.get("matches") or []
+        if spec.get("party_query") and matched.get("party"):
+            spec["party_query"] = matched["party"]
+        return out
+
+    multi = resolve_party_filters(queries)
+    out.pop("party", None)
+    if multi.get("parties") and not multi.get("party_ilike"):
+        out["parties"] = list(multi["parties"])
+        out.pop("party_ilike", None)
+    else:
+        # Mix of exact + ilike, or all ilike — use OR of both
+        if multi.get("parties"):
+            out["parties"] = list(multi["parties"])
+        if multi.get("party_ilike"):
+            out["party_ilike"] = list(multi["party_ilike"])
+    out["_party_matches"] = multi.get("matches") or []
     return out
 
 
@@ -132,11 +265,12 @@ def execute_query_spec(
     user_text: str = "",
 ) -> dict[str, Any]:
     """Execute a planned QuerySpec blindly (universal pivot or legacy)."""
-    del user_text
     spec = normalize_query_spec(raw_spec)
     spec = merge_prior_into_spec(spec, prior)
     # Python entity resolution BEFORE validation (forgiving extracted_entities)
     spec = _apply_extracted_entities(spec)
+    # Spoken vocab safety nets (SKU / product / price_fetch)
+    spec = _coerce_vocab_from_user_text(spec, user_text)
     spec["business_units"] = _expand_business_units(
         list(spec.get("business_units") or [])
     )
@@ -195,6 +329,8 @@ def execute_query_spec(
                 "NEVER in client_type. Use extracted_entities when unsure. "
                 "For a single month like March use period_type=SPECIFIC_MONTH + "
                 "target_month=YYYY-MM (not LAST_N_MONTHS). "
+                "SKU / SKU-wise → row_dimensions=[\"product\"]. "
+                "product / product-wise → row_dimensions=[\"packing_category\"]. "
                 "Do not invent numbers."
             ),
         }
@@ -213,33 +349,24 @@ def execute_query_spec(
     if filters.get("business_unit") and not bus:
         bus = _expand_business_units([filters["business_unit"]])
 
-    # Fuzzy party / customer resolution (Al Shaheer → canonical DB name)
-    party_raw = filters.get("party") or spec.get("party_query")
-    if party_raw and operation not in {"party_list"}:
-        matched = fuzzy_match_party(str(party_raw))
-        if not matched.get("ok"):
-            return {
-                "ok": False,
-                "error": matched.get("error") or "Ambiguous party",
-                "plan_errors": [matched.get("error") or "Ambiguous party"],
-                "matches": matched.get("matches") or [],
-                "query_spec": spec,
-                "response_instructions": (
-                    "REQUIRED: Ask the user which party they mean using the "
-                    "`matches` list, then call plan_query again with "
-                    "filters.party set to the exact chosen name. "
-                    "Do not invent numbers."
-                ),
-            }
-        if matched.get("party"):
-            filters["party"] = matched["party"]
-            if spec.get("party_query"):
-                spec["party_query"] = matched["party"]
+    # Silent party resolution for all analytics paths (no LLM retry loops).
+    # party_lookup / party_list keep their own disambiguation UIs.
+    if operation not in {"party_list", "party_lookup"} and intent not in {
+        "party_list",
+        "party_lookup",
+    }:
+        filters = _resolve_party_filters_silent(filters, spec)
 
     phrase = (period.get("phrase") or "").strip() or None
     date_from = period.get("date_from")
     date_to = period.get("date_to")
     mb = int(spec.get("months_back") or grain.get("months_back") or 6)
+
+    party_kw = {
+        "party": filters.get("party"),
+        "parties": filters.get("parties"),
+        "party_ilike": filters.get("party_ilike"),
+    }
 
     result: dict[str, Any]
 
@@ -257,6 +384,7 @@ def execute_query_spec(
             active_only=bool(filters.get("active_only")),
         )
     elif operation == "party_lookup" or intent == "party_lookup":
+        # "who is al shaheer" — keep match list UI via lookup_party
         q = spec.get("party_query") or filters.get("party") or ""
         if phrase:
             result = party_sales(
@@ -339,27 +467,54 @@ def execute_query_spec(
             or bool(flags.get("include_cost_factor"))
             or bool(flags.get("factor_breakdown"))
         )
-        # Hardcoded Price Fetch composite — engine owns the math
+        # Dedicated Price Fetch path — never monthly trend / matrix HTML
         if want_fetch:
-            result = query_price(
-                period=phrase,
-                date_from=date_from,
-                date_to=date_to,
-                city=filters.get("city"),
-                business_unit=filters.get("business_unit") or (bus[0] if bus else None),
-                oil_type=filters.get("oil_type"),
-                packing_category=filters.get("packing_category"),
-                client_type=filters.get("client_type"),
-                product=filters.get("product"),
-                include_price_fetch=True,
-                include_cost_factor=True,
-                factor_breakdown=bool(flags.get("factor_breakdown")),
-                time_grain=(
-                    "month"
-                    if "month" in column_dimensions
-                    else None
-                ),
+            pf_rows = [d for d in row_dimensions if d != "month"]
+            has_party_scope = bool(
+                party_kw.get("party")
+                or party_kw.get("parties")
+                or party_kw.get("party_ilike")
             )
+            if not pf_rows:
+                # SKU breakup default when party scoped or user asked for fetch
+                pf_rows = ["product"] if has_party_scope else []
+            if pf_rows:
+                result = query_price_fetch_table(
+                    row_dimensions=pf_rows,
+                    period=phrase,
+                    date_from=date_from,
+                    date_to=date_to,
+                    city=filters.get("city"),
+                    business_unit=(
+                        filters.get("business_unit")
+                        or (bus[0] if len(bus) == 1 else None)
+                    ),
+                    business_units=bus if len(bus) > 1 else None,
+                    oil_type=filters.get("oil_type"),
+                    packing_category=filters.get("packing_category"),
+                    client_type=filters.get("client_type"),
+                    product=filters.get("product"),
+                    **party_kw,
+                )
+            else:
+                result = query_price(
+                    period=phrase,
+                    date_from=date_from,
+                    date_to=date_to,
+                    city=filters.get("city"),
+                    business_unit=(
+                        filters.get("business_unit") or (bus[0] if bus else None)
+                    ),
+                    oil_type=filters.get("oil_type"),
+                    packing_category=filters.get("packing_category"),
+                    client_type=filters.get("client_type"),
+                    product=filters.get("product"),
+                    include_price_fetch=True,
+                    include_cost_factor=True,
+                    factor_breakdown=bool(flags.get("factor_breakdown")),
+                    time_grain=None,
+                    **party_kw,
+                )
         elif bool(row_dimensions):
             # Plain avg_price pivot (no cost factor)
             result = execute_universal_pivot(
@@ -377,8 +532,8 @@ def execute_query_spec(
                 oil_type=filters.get("oil_type"),
                 packing_category=filters.get("packing_category"),
                 client_type=filters.get("client_type"),
-                party=filters.get("party"),
                 active_only=bool(filters.get("active_only")),
+                **party_kw,
             )
         else:
             time_grain = "month" if "month" in column_dimensions else None
@@ -398,6 +553,7 @@ def execute_query_spec(
                 include_cost_factor=False,
                 factor_breakdown=False,
                 time_grain=time_grain,
+                **party_kw,
             )
     elif intent in {"sales_matrix", "sales_trend", "sales_analytical"} or (
         set(metrics) & {"volume", "ams"}
@@ -431,7 +587,6 @@ def execute_query_spec(
             oil_type=filters.get("oil_type"),
             packing_category=filters.get("packing_category"),
             client_type=filters.get("client_type"),
-            party=filters.get("party"),
             columns=columns,
             months_back=mb,
             row_dimension=row_dim,
@@ -441,6 +596,7 @@ def execute_query_spec(
             compare=spec.get("compare"),
             active_only=bool(filters.get("active_only")),
             prior_spec=None,
+            **party_kw,
         )
     else:
         result = {

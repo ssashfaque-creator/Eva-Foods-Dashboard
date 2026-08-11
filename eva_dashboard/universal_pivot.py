@@ -55,6 +55,8 @@ def _fetch_priced_lines(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     active_only: bool = False,
 ) -> pd.DataFrame:
     """Volume-dim lines merged with rate / amount columns."""
@@ -69,6 +71,8 @@ def _fetch_priced_lines(
         packing_category=packing_category,
         client_type=client_type,
         party=party,
+        parties=parties,
+        party_ilike=party_ilike,
         active_only=active_only,
     )
     if base.empty:
@@ -266,6 +270,8 @@ def execute_universal_pivot(
     packing_category: str | None = None,
     client_type: str | None = None,
     party: str | None = None,
+    parties: list[str] | None = None,
+    party_ilike: list[str] | None = None,
     active_only: bool = False,
 ) -> dict[str, Any]:
     """OLAP pivot for avg_price (PKR) and optional volume matrices."""
@@ -319,6 +325,8 @@ def execute_universal_pivot(
             packing_category=packing_category,
             client_type=client_type,
             party=party,
+            parties=parties,
+            party_ilike=party_ilike,
             active_only=active_only,
         )
     else:
@@ -333,6 +341,8 @@ def execute_universal_pivot(
             packing_category=packing_category,
             client_type=client_type,
             party=party,
+            parties=parties,
+            party_ilike=party_ilike,
             active_only=active_only,
         )
 
@@ -344,6 +354,8 @@ def execute_universal_pivot(
         "packing_category": packing_category,
         "client_type": client_type,
         "party": party,
+        "parties": parties,
+        "party_ilike": party_ilike,
     }
     blurb = _filter_blurb(filters, period_info, units=business_units)
     col_dim = cols[0] if cols else None
@@ -403,6 +415,8 @@ def execute_universal_pivot(
                 packing_category=packing_category,
                 client_type=client_type,
                 party=party,
+                parties=parties,
+                party_ilike=party_ilike,
                 lines_frame=frame,
             )
         result["matrix"] = primary
