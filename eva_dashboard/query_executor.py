@@ -17,7 +17,9 @@ import re
 from typing import Any
 
 from eva_dashboard.client_language import (
+    extract_client_type_from_text,
     extract_oil_and_packing,
+    match_client_type_alias,
     normalize_client_type,
     normalize_oil_type,
     normalize_packing_category,
@@ -70,8 +72,8 @@ def _expand_business_units(values: list[str] | None) -> list[str]:
 def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
     """Merge Python-resolved extracted_entities into filters / business_units.
 
-    Unresolved entities that look like customer names become silent party
-    ILIKE fragments (e.g. \"al shaheer\", \"Metro Habib\").
+    Channel aliases (metro, LMT, chase up, …) → client_type.
+    Remaining unresolved names → silent party ILIKE (e.g. \"al shaheer\").
     """
     out = dict(spec)
     resolved = resolve_extracted_entities(list(out.get("extracted_entities") or []))
@@ -87,21 +89,26 @@ def _apply_extracted_entities(spec: dict[str, Any]) -> dict[str, Any]:
         if resolved.get(key) and not filters.get(key):
             filters[key] = resolved[key]
 
-    # Unresolved → party candidates (compare / fuzzy names)
+    # Unresolved → channel alias first, else party candidates
     unresolved = [
         str(u).strip()
         for u in (resolved.get("unresolved") or [])
         if str(u).strip() and len(str(u).strip()) >= 3
     ]
-    if unresolved and not filters.get("party") and not filters.get("parties"):
-        if len(unresolved) == 1 and not filters.get("party"):
-            filters.setdefault("party", unresolved[0])
+    party_bits: list[str] = []
+    for u in unresolved:
+        ct = match_client_type_alias(u)
+        if ct and not filters.get("client_type"):
+            filters["client_type"] = ct
+        elif ct:
+            continue  # already have a channel; don't also party-search it
         else:
-            existing = list(filters.get("parties") or [])
-            for u in unresolved:
-                if u not in existing:
-                    existing.append(u)
-            filters["parties"] = existing
+            party_bits.append(u)
+    if party_bits and not filters.get("party") and not filters.get("parties"):
+        if len(party_bits) == 1:
+            filters.setdefault("party", party_bits[0])
+        else:
+            filters["parties"] = party_bits
 
     if bus:
         out["business_units"] = bus
@@ -164,6 +171,42 @@ def _coerce_vocab_from_user_text(
         if has_sku or "product" in rows or "party" in rows:
             cols = [c for c in cols if c != "month"]
 
+    # Channel words → client_type (never customer ILIKE)
+    filters = dict(out.get("filters") or {})
+    if not filters.get("client_type"):
+        party_raw = filters.get("party") or out.get("party_query")
+        parties = list(filters.get("parties") or [])
+        redirected = False
+        if party_raw:
+            ct = match_client_type_alias(str(party_raw))
+            if ct:
+                filters["client_type"] = ct
+                filters.pop("party", None)
+                out.pop("party_query", None)
+                redirected = True
+        if parties:
+            kept: list[str] = []
+            for p in parties:
+                ct = match_client_type_alias(str(p))
+                if ct and not filters.get("client_type"):
+                    filters["client_type"] = ct
+                    redirected = True
+                elif not ct:
+                    kept.append(str(p))
+            if kept:
+                filters["parties"] = kept
+            else:
+                filters.pop("parties", None)
+                redirected = True
+        if not redirected and not party_raw and not parties:
+            # "sales for metro" with no party field yet
+            ct = extract_client_type_from_text(user_text)
+            if ct:
+                filters["client_type"] = ct
+                redirected = True
+        if redirected:
+            out["filters"] = filters
+
     out["row_dimensions"] = rows
     out["metrics"] = metrics
     out["column_dimensions"] = cols
@@ -214,14 +257,17 @@ def _canon_filters(filters: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
-    """Inject exact party / silent party_ilike — never returns plan_errors."""
+    """Inject exact party / silent party_ilike — never returns plan_errors.
+
+    Channel aliases (metro, metro habib, LMT, chase up, …) are redirected to
+    ``client_type`` — never treated as customer-name ILIKE.
+    """
     out = dict(filters)
     queries: list[str] = []
     if out.get("parties"):
         queries.extend(str(p).strip() for p in out["parties"] if str(p).strip())
     party_raw = out.get("party") or spec.get("party_query")
     if party_raw and str(party_raw).strip():
-        # Avoid duplicating if already in parties
         pr = str(party_raw).strip()
         if pr not in queries:
             queries.insert(0, pr)
@@ -229,12 +275,33 @@ def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any])
     if not queries:
         return out
 
+    # Peel channel aliases → client_type
+    party_queries: list[str] = []
+    for q in queries:
+        ct = match_client_type_alias(q)
+        if ct:
+            if not out.get("client_type"):
+                out["client_type"] = ct
+            continue
+        party_queries.append(q)
+
+    if not party_queries:
+        # Pure channel ask (e.g. filters.party="metro habib")
+        out.pop("party", None)
+        out.pop("parties", None)
+        out.pop("party_ilike", None)
+        if spec.get("party_query") and match_client_type_alias(str(spec.get("party_query"))):
+            spec.pop("party_query", None)
+        return out
+
+    queries = party_queries
+    out.pop("parties", None)
+
     if len(queries) == 1:
         matched = resolve_party_filter(queries[0])
         if matched.get("party"):
             out["party"] = matched["party"]
             out.pop("party_ilike", None)
-            out.pop("parties", None)
         else:
             out.pop("party", None)
             out["party_ilike"] = list(matched.get("party_ilike") or queries)
@@ -249,7 +316,6 @@ def _resolve_party_filters_silent(filters: dict[str, Any], spec: dict[str, Any])
         out["parties"] = list(multi["parties"])
         out.pop("party_ilike", None)
     else:
-        # Mix of exact + ilike, or all ilike — use OR of both
         if multi.get("parties"):
             out["parties"] = list(multi["parties"])
         if multi.get("party_ilike"):

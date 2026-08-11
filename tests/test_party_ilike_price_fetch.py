@@ -262,7 +262,7 @@ def test_compare_two_parties_via_parties_filter() -> None:
         _env(tmp)
         try:
             _seed()
-            multi = resolve_party_filters(["al shaheer", "Metro Habib"])
+            multi = resolve_party_filters(["al shaheer", "Alpha Dist"])
             assert multi["ok"] is True
             assert multi.get("party_ilike") or multi.get("parties")
 
@@ -274,16 +274,69 @@ def test_compare_two_parties_via_parties_filter() -> None:
                     "target_month": "2026-07",
                     "context_handling": "none",
                     "filters": {
-                        "parties": ["al shaheer", "Metro Habib"],
+                        "parties": ["al shaheer", "Alpha Dist"],
                     },
                 },
-                user_text="compare al shaheer sales with Metro Habib",
+                user_text="compare al shaheer sales with Alpha Dist",
             )
             assert out["ok"] is True, out
             md = out.get("answer_markdown") or ""
             assert "SHAHEER" in md.upper()
-            assert "Metro" in md or "metro" in md.lower()
-            assert "Alpha" not in md
+            assert "Alpha" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_metro_habib_resolves_to_client_type_not_party() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            _seed()
+            # Even if the LLM wrongly puts metro in filters.party
+            out = execute_query_spec(
+                {
+                    "row_dimensions": ["business_unit"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "none",
+                    "filters": {"party": "metro habib"},
+                },
+                user_text="show me sales for metro habib",
+            )
+            assert out["ok"] is True, out
+            filt = (out.get("query_spec") or {}).get("filters") or {}
+            assert filt.get("client_type") == "METRO HABIB"
+            assert not filt.get("party")
+            assert not filt.get("party_ilike")
+            md = out.get("answer_markdown") or ""
+            assert "METRO HABIB" in md or "Client Type" in md
+            assert "SHAHEER" not in md.upper()
+
+            out2 = execute_query_spec(
+                {
+                    "row_dimensions": ["party"],
+                    "metrics": ["volume"],
+                    "period_type": "SPECIFIC_MONTH",
+                    "target_month": "2026-07",
+                    "context_handling": "none",
+                    "extracted_entities": ["metro"],
+                },
+                user_text="sales for metro",
+            )
+            assert out2["ok"] is True, out2
+            filt2 = (out2.get("query_spec") or {}).get("filters") or {}
+            assert filt2.get("client_type") == "METRO HABIB"
+            assert not filt2.get("party_ilike")
+            md2 = out2.get("answer_markdown") or ""
+            assert "METRO HABIB" in md2
+            assert "SHAHEER" not in md2.upper()
+            assert "Alpha" not in md2
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

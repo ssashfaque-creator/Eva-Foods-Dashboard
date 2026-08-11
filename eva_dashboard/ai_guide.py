@@ -85,14 +85,14 @@ def vocabulary_for_prompt() -> str:
         "- customer-wise price trends → row_dimensions=[\"party\"],",
         "  column_dimensions=[\"month\"], metrics=[\"avg_price\"].",
         "",
-        "10. PARTY / CUSTOMER NAMES (silent ILIKE — no retry loops)",
-        "- Put the spoken name in filters.party (e.g. \"al shaheer\") OR",
-        "  extracted_entities=[\"al shaheer\"].",
-        "- Compare two customers → filters.parties=[\"al shaheer\",\"Metro Habib\"]",
-        "  (or extracted_entities with both names) + row_dimensions=[\"party\"].",
-        "- Python applies SQL ILIKE '%name%' — do NOT ask the user to pick",
-        "  among Al Shaheer branches for analytics. \"who is X\" →",
-        "  operation=party_lookup (shows the match list).",
+        "10. CHANNEL vs CUSTOMER (STRICT)",
+        "- metro / metro habib / chase up / CSD / LMT / IMT / Imtiaz /",
+        "  distributors → filters.client_type (channel group). NEVER filters.party.",
+        "- Real customer names (al shaheer, Alpha Dist, …) → filters.party",
+        "  or extracted_entities; Python silent ILIKE (no clarify loops).",
+        "- Compare two customers → filters.parties=[\"al shaheer\",\"Alpha Dist\"]",
+        "  + row_dimensions=[\"party\"].",
+        "- \"who is X\" → operation=party_lookup (match list).",
         "",
         "11. PERFORMANCE METRICS",
         "- lowest/worst performing → metrics=[\"vs_ams\"], sort_order=asc,",
@@ -159,8 +159,11 @@ Examples:
 - \"product-wise sales\" → row_dimensions=["packing_category"] (NOT product)
 - \"al shaheer sales last 6 months\" → filters.party="al shaheer"
   (Python ILIKE — includes all Al Shaheer branches; no clarify loop)
-- \"compare al shaheer with Metro Habib\" →
-  filters.parties=["al shaheer","Metro Habib"], row_dimensions=["party"],
+- \"sales for metro\" / \"metro habib sales\" → filters.client_type="METRO HABIB"
+  (NOT filters.party — metro is a channel group)
+- \"LMT sales\" → filters.client_type="LMT"
+- \"compare al shaheer with Alpha Dist\" →
+  filters.parties=["al shaheer","Alpha Dist"], row_dimensions=["party"],
   metrics=["volume","ams"], column_dimensions=["month"]
 - \"who is al shaheer\" → operation=party_lookup, party_query="al shaheer"
 - After brand table: \"distributor-wise, lowest performing\" →

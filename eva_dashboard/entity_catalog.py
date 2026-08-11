@@ -11,9 +11,11 @@ from functools import lru_cache
 from typing import Any
 
 from eva_dashboard.client_language import (
+    CLIENT_TYPE_ALIASES,
     OIL_TYPE_ALIASES,
     PACKING_ALIASES,
     list_known_client_types,
+    match_client_type_alias,
 )
 from eva_dashboard.client_type_map import list_new_client_types
 from eva_dashboard.db import connect, init_db
@@ -205,6 +207,8 @@ def resolve_extracted_entities(entities: list[str] | None) -> dict[str, Any]:
         oil_by.setdefault(_norm(spoken), canon)
     for spoken, canon in PACKING_ALIASES.items():
         pack_by.setdefault(_norm(spoken), canon)
+    for spoken, canon in CLIENT_TYPE_ALIASES.items():
+        ct_by.setdefault(_norm(spoken), canon)
 
     bus: list[str] = []
     for raw in entities:
@@ -221,6 +225,14 @@ def resolve_extracted_entities(entities: list[str] | None) -> dict[str, Any]:
             if bu_by[key] not in bus:
                 bus.append(bu_by[key])
             continue
+        # Channels before oil/packing so "metro" ≠ a product/party guess
+        ct_alias = match_client_type_alias(raw)
+        if ct_alias and not out["client_type"]:
+            out["client_type"] = ct_alias
+            continue
+        if key in ct_by and not out["client_type"]:
+            out["client_type"] = ct_by[key]
+            continue
         if key in oil_by and not out["oil_type"]:
             out["oil_type"] = oil_by[key]
             continue
@@ -236,9 +248,6 @@ def resolve_extracted_entities(entities: list[str] | None) -> dict[str, Any]:
                 out["oil_type"] = o2
             if p2 and not out["packing_category"]:
                 out["packing_category"] = p2
-            continue
-        if key in ct_by and not out["client_type"]:
-            out["client_type"] = ct_by[key]
             continue
         if key in city_by and not out["city"]:
             out["city"] = city_by[key]

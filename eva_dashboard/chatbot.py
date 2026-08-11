@@ -268,8 +268,9 @@ def system_prompt() -> str:
     engine computes a dedicated table (not monthly trend). Do not invent math.
 11. UNBREAKABLE: \"SKU\"/\"SKU-wise\" → row_dimensions=[\"product\"].
     Spoken \"product\"/\"product-wise\" → row_dimensions=[\"packing_category\"].
-12. Party names: filters.party or extracted_entities / filters.parties —
-    Python silent ILIKE (no clarify loops). \"who is X\" → operation=party_lookup.
+12. Channels (metro/LMT/chase/IMT/Imtiaz) → filters.client_type — NEVER party.
+    Real customers → filters.party / parties (silent ILIKE). \"who is X\" →
+    operation=party_lookup.
 
 Joins: sales.party↔clients.client; sales.product↔category.product
 (BU/oil/packing). City=clients.city_filter; zone=SOUTH/CENTRAL/NORTH.

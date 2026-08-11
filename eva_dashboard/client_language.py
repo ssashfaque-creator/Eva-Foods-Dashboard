@@ -162,6 +162,34 @@ def list_known_client_types() -> list[str]:
     return sorted(names, key=lambda s: s.lower())
 
 
+def match_client_type_alias(value: str | None) -> str | None:
+    """Strict channel match — aliases / exact known types only (no fuzzy).
+
+    Use before party ILIKE so \"metro\" / \"metro habib\" / \"lmt\" /
+    \"chase up\" become ``filters.client_type``, not customer-name search.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    key = _norm(text)
+    if not key:
+        return None
+    if key in CLIENT_TYPE_ALIASES:
+        return CLIENT_TYPE_ALIASES[key]
+    # Exact source spelling from the ops mapping (METRO HABIB, NORTH LMT, …)
+    # Do NOT use canonical_raw_client_type — it passes unknown text through.
+    for src in CLIENT_TYPE_GROUP:
+        if _norm(src) == key:
+            return src
+    # Exact new group (IMT, LMT, Dealer, …)
+    for g in list_new_client_types():
+        if _norm(g) == key:
+            return g
+    return None
+
+
 def normalize_client_type(value: str | None) -> str | None:
     """Resolve spoken / raw client-type text for filtering.
 
