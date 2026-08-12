@@ -6424,6 +6424,8 @@ def chat_completion(
                 plan_debug={
                     "path": "react_agent",
                     "tool_trace": agent_out.get("tool_trace"),
+                    "route": agent_out.get("route"),
+                    "verify": agent_out.get("verify"),
                     "query_spec": legacy.get("query_spec"),
                     "memory": memory.to_dict(),
                 },
@@ -6439,6 +6441,8 @@ def chat_completion(
                 plan_debug={
                     "path": "react_agent",
                     "tool_trace": agent_out.get("tool_trace"),
+                    "route": agent_out.get("route"),
+                    "verify": agent_out.get("verify"),
                     "memory": memory.to_dict(),
                 },
             )

@@ -668,12 +668,15 @@ from typing import Callable
 REACT_SYSTEM_PROMPT = """You are Eva Foods AI Sales Analyst (v2 ReAct).
 Answer commercial questions accurately using tools. Never invent MT, rates, or AMS.
 
+A ROUTING block may be injected below — obey preferred/blocked tools.
+
 TOOL CHOICE:
 1. run_standard_analytics_pivot — standard volume matrices, AMS, vs AMS, AMS growth,
    brand/BU trends, party ranks, Price Fetch / avg rate when the ask matches
    normal commercial tables. Prefer this for volume/AMS pivots.
 2. execute_read_only_sql — novel asks: min/max price, who bought at a rate,
    same-date price dispersion, custom aggregations, discovery SQL.
+   NEVER invent AMS windows or Price Fetch (37.3246 / 0.915) in SQL.
 3. calculate_expression — ANY arithmetic (× 24.7 / 6, deltas, conversions).
    NEVER compute numbers in your head — call this tool.
 4. get_database_schema — before writing unfamiliar SQL, inspect DDL.
@@ -686,6 +689,7 @@ WORKFLOW:
 - Prefer sales.mt_qty for volume; join category on product; clients on party name.
 - Final reply: Markdown table(s) with the numbers, then ### Analysis (2–4 bullets).
 - If a tool errors, fix the query and retry — do not invent data.
+- If the ask is ambiguous, ask ONE clarifying question instead of guessing.
 """
 
 REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -803,6 +807,7 @@ def dispatch_react_tool(
     *,
     user_text: str = "",
     prior: dict[str, Any] | None = None,
+    route: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one ReAct tool call; returns a dict with markdown + ok."""
     from eva_dashboard.tools.calculator_tool import calculate_expression
@@ -810,8 +815,13 @@ def dispatch_react_tool(
         get_database_schema,
         lookup_entity_values,
     )
+    from eva_dashboard.tools.intent_router import tool_allowed
     from eva_dashboard.tools.legacy_tool import run_standard_analytics_pivot
     from eva_dashboard.tools.sql_tool import execute_read_only_sql
+
+    allowed, reason = tool_allowed(name, route)
+    if not allowed:
+        return {"ok": False, "error": reason, "markdown": f"Error: {reason}"}
 
     if name == "execute_read_only_sql":
         return execute_read_only_sql(str(args.get("sql_query") or ""))
@@ -858,9 +868,36 @@ def run_agent_loop(
 ) -> dict[str, Any]:
     """Multi-step ReAct execution loop with OpenAI native tool calling.
 
-    Returns ``{ok, answer, messages, last_legacy_result, tool_trace}``.
+    Returns ``{ok, answer, messages, last_legacy_result, tool_trace, route}``.
     """
+    from eva_dashboard.tools.answer_verifier import verify_agent_answer
+    from eva_dashboard.tools.intent_router import route_ask
+
+    route = route_ask(user_query, prior=prior)
+
+    # High-confidence clarify: skip tools, return the one question
+    if (
+        route.get("kind") == "clarify"
+        and float(route.get("confidence") or 0) >= 0.5
+        and route.get("clarify_question")
+    ):
+        q = str(route["clarify_question"])
+        return {
+            "ok": True,
+            "answer": q,
+            "messages": [
+                {"role": "system", "content": REACT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_query},
+                {"role": "assistant", "content": q},
+            ],
+            "last_legacy_result": None,
+            "tool_trace": [],
+            "route": route,
+        }
+
     system = REACT_SYSTEM_PROMPT
+    if route.get("prompt_block"):
+        system = system + "\n\n" + str(route["prompt_block"])
     if memory_block.strip():
         system = system + "\n\n" + memory_block.strip()
 
@@ -879,6 +916,8 @@ def run_agent_loop(
 
     tool_trace: list[dict[str, Any]] = []
     last_legacy: dict[str, Any] | None = None
+    verify_retries = 0
+    max_verify_retries = 2
 
     for turn in range(max(1, int(max_turns))):
         if on_status:
@@ -899,6 +938,7 @@ def run_agent_loop(
                 "messages": messages,
                 "last_legacy_result": last_legacy,
                 "tool_trace": tool_trace,
+                "route": route,
             }
 
         msg = response.choices[0].message
@@ -923,14 +963,34 @@ def run_agent_loop(
 
         if not tool_calls:
             answer = (msg.content or "").strip()
-            return {
-                "ok": True,
-                "answer": answer
-                or "I could not produce an answer. Please rephrase the question.",
-                "messages": messages,
-                "last_legacy_result": last_legacy,
-                "tool_trace": tool_trace,
-            }
+            check = verify_agent_answer(
+                user_query,
+                answer,
+                tool_trace=tool_trace,
+                route=route,
+            )
+            if check.get("ok") or verify_retries >= max_verify_retries:
+                return {
+                    "ok": bool(check.get("ok")),
+                    "answer": answer
+                    or "I could not produce an answer. Please rephrase the question.",
+                    "messages": messages,
+                    "last_legacy_result": last_legacy,
+                    "tool_trace": tool_trace,
+                    "route": route,
+                    "verify": check,
+                }
+            # Retry with verifier feedback
+            verify_retries += 1
+            if on_status:
+                on_status("Checking answer…")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": str(check.get("retry_hint") or "Please fix with tools."),
+                }
+            )
+            continue
 
         for tc in tool_calls:
             fn_name = tc.function.name
@@ -947,6 +1007,7 @@ def run_agent_loop(
                 args,
                 user_text=user_query,
                 prior=prior,
+                route=route,
             )
             tool_trace.append(
                 {
@@ -978,6 +1039,7 @@ def run_agent_loop(
         "messages": messages,
         "last_legacy_result": last_legacy,
         "tool_trace": tool_trace,
+        "route": route,
     }
 
 

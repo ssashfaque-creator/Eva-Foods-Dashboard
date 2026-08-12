@@ -13,8 +13,8 @@
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
-BRANCH="${EVA_UPDATE_BRANCH:-cursor/react-agent-tools-50eb}"
-MIN_VERSION="${EVA_MIN_VERSION:-1.4.0}"
+BRANCH="${EVA_UPDATE_BRANCH:-cursor/react-router-verify-50eb}"
+MIN_VERSION="${EVA_MIN_VERSION:-1.4.1}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 
 case "$TARGET" in

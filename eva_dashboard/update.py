@@ -20,7 +20,7 @@ import zipfile
 from pathlib import Path
 
 DEFAULT_REPO = "ssashfaque-creator/Eva-Foods-Dashboard"
-DEFAULT_BRANCH = "cursor/react-agent-tools-50eb"
+DEFAULT_BRANCH = "cursor/react-router-verify-50eb"
 # Refuse to treat these as the live install (legacy agent folders).
 LEGACY_PATH_MARKERS = (
     "sales-dashboard-pdf",
@@ -32,7 +32,7 @@ CANONICAL_DIRNAMES = (
     "Eva-Foods-Dashboard-new",
     "Eva-Foods-Dashboard",
 )
-MIN_VERSION = "1.4.0"
+MIN_VERSION = "1.4.1"
 BRANCH_MARKER = ".eva-install-branch"
 
 # Never overwrite these when applying an update
