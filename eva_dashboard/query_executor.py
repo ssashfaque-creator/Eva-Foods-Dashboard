@@ -1309,10 +1309,12 @@ def _coerce_vocab_from_user_text(
             list(out.get("metric_filters") or []), spoken_mfs
         )
         ams_cut = any(str(f.get("metric")) == "ams" for f in spoken_mfs)
-        if ams_cut and (
+        vol_cut = any(str(f.get("metric")) == "volume" for f in spoken_mfs)
+        if (ams_cut or vol_cut) and (
             re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
             or "party" in rows
             or prior
+            or vol_cut
         ):
             rows = ["party"]
             cols = [c for c in cols if c != "month"]
@@ -1323,29 +1325,54 @@ def _coerce_vocab_from_user_text(
                 out["metric"] = "ams_growth"
             elif "vs_ams" in metrics:
                 out["metric"] = "vs_ams"
+            elif vol_cut and not ams_cut:
+                out["metric"] = "volume"
             elif not out.get("metric"):
                 out["metric"] = "ams"
             if not metrics:
-                metrics = ["ams", "volume", "vs_ams"]
+                metrics = (
+                    ["volume", "ams"]
+                    if vol_cut and not ams_cut
+                    else ["ams", "volume", "vs_ams"]
+                )
             if prior and out.get("base") != "prior":
                 out["base"] = "prior"
                 out["state_action"] = out.get("state_action") or "modify"
             out["_clear_omitted"] = False
 
-    # "declined the most … vs AMS" → underperformers vs AMS
+    # "declined the most … vs AMS" / "least growth" / "smallest AMS gains"
     if re.search(
         r"\b(declined|dropped|fell|underperform|behind)\b.+\b(ams|expected)\b|"
         r"\bvs\.?\s*ams\b.+\b(declin|drop|worst|most)\b|"
-        r"\b(declined|dropped)\s+the\s+most\b",
+        r"\b(declined|dropped)\s+the\s+most\b|"
+        r"\b(least|smallest|lowest|worst)\s+"
+        r"(ams\s+)?(growth|gains?|increases?)\b|"
+        r"\bsmallest\s+ams\s+gains?\b|"
+        r"\bleast\s+growth\b",
         t,
     ):
         rows = ["party"]
         cols = []
         out["intent"] = "party_rank"
-        out["metric"] = "vs_ams"
-        out["declined_only"] = True
-        out["sort"] = "asc"
-        metrics = ["vs_ams", "volume", "ams"]
+        least_growth = bool(
+            re.search(
+                r"\b(least|smallest|lowest|worst)\s+"
+                r"(ams\s+)?(growth|gains?|increases?)\b|"
+                r"\bleast\s+growth\b|"
+                r"\bsmallest\s+ams\s+gains?\b",
+                t,
+            )
+        )
+        if least_growth:
+            out["metric"] = "ams_growth"
+            out["sort"] = "asc"
+            out["title_mode"] = "smallest_gains"
+            metrics = ["ams_growth", "ams", "volume"]
+        else:
+            out["metric"] = "vs_ams"
+            out["declined_only"] = True
+            out["sort"] = "asc"
+            metrics = ["vs_ams", "volume", "ams"]
         if re.search(r"\bdistributors?\b", t) and not filters.get("client_type"):
             filters["client_type"] = (
                 extract_client_type_from_text(user_text) or "Eva Distributors"
@@ -1966,13 +1993,45 @@ def execute_query_spec(
             or ""
         )
         result = lookup_party(str(q), limit=int((raw_spec or {}).get("limit") or 10))
+        matches = list(result.get("matches") or [])
         result["query_spec"] = {
             "operation": "party_lookup",
             "intent": "party_lookup",
             "party_query": result.get("query") or q,
+            "row_dimensions": ["party"],
+            "metrics": ["volume", "ams"],
+            "matches": matches,
         }
+        # Stamp matches so "show AMS for 1 and 2" resolves without re-fuzzy
+        result["party_spec"] = {
+            "kind": "party_lookup",
+            "matches": matches,
+            "filters": {},
+        }
+        result["table_spec"] = {
+            "filters": {},
+            "row_dimension": "party",
+            "row_dimensions": ["party"],
+            "column_dimensions": ["month"],
+            "metrics": ["volume", "ams"],
+            "matches": matches,
+            "kind": "party_lookup",
+        }
+        if len(matches) == 1 and float(matches[0].get("match_score") or 0) >= 0.72:
+            name = str(matches[0].get("client") or "").strip()
+            if name:
+                result["party"] = name
+                result["party_spec"]["filters"] = {"party": name}
+                result["table_spec"]["filters"] = {"party": name}
+        from eva_dashboard.query_spec import build_query_state
         from eva_dashboard.agent_loop import apply_verification
 
+        result["query_state"] = build_query_state(
+            query_spec=result.get("query_spec"),
+            table_spec=result.get("table_spec"),
+            party_spec=result.get("party_spec"),
+            result_mode="party_lookup",
+        )
         return apply_verification(result, user_text=user_text)
 
     spec = normalize_query_spec(raw_spec)

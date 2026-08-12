@@ -366,9 +366,26 @@ def _compose_tables_plus_analysis(
 def _wants_gpt_analysis(user_text: str, *, result_mode: str | None = None) -> bool:
     """Use a lean AI analysis turn after structured table tools.
 
-    Always True for normal data answers — canned tool bullets are not the product.
+    Skip for identity lookups / ordinal AMS picks — those are already complete
+    tables and a second OpenAI round only adds latency.
     """
-    del user_text, result_mode  # signature kept for callers
+    mode = (result_mode or "").strip().lower()
+    if mode in {"party_lookup", "party_pick", "party_not_found"}:
+        return False
+    t = (user_text or "").lower()
+    if re.search(r"\b(who\s+is|who'?s)\b", t) and not re.search(
+        r"\b(sales?|growth|doing|performance)\b", t
+    ):
+        return False
+    try:
+        from eva_dashboard.ordinal_parties import looks_ordinal_party_followup
+
+        if looks_ordinal_party_followup(t) and re.search(
+            r"\b(ams|volume|sales?|show)\b", t
+        ):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
     return True
 
 
@@ -6199,6 +6216,158 @@ def chat_completion(
                     plan_debug=plan_debug,
                 )
                 return md, _prune_session_messages(working)
+
+    # Fast path: "who is X" — skip OpenAI plan_query (lookup_party is enough)
+    if _looks_party_lookup(last_user):
+        if on_status:
+            on_status("Searching clients…")
+        try:
+            result = execute_query_spec(
+                {
+                    "operation": "party_lookup",
+                    "intent": "party_lookup",
+                    "context_handling": "none",
+                    "filters": {},
+                },
+                prior=None,
+                user_text=last_user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": str(exc)}
+        if isinstance(result, dict) and result.get("ok") and result.get(
+            "answer_markdown"
+        ):
+            md = str(result["answer_markdown"])
+            plan_debug = {
+                "path": "whois_fast_path",
+                "query_spec": result.get("query_spec"),
+                "memory": memory.to_dict(),
+            }
+            working.append({"role": "assistant", "content": md})
+            _attach_followup_meta(
+                working,
+                table_spec=result.get("table_spec"),
+                party_spec=result.get("party_spec"),
+                query_state=result.get("query_state"),
+                plan_debug=plan_debug,
+            )
+            return md, _prune_session_messages(working)
+
+    # Fast path: ordinal picks from prior who-is ("show AMS for 1 and 2")
+    if prior_ctx:
+        from eva_dashboard.ordinal_parties import (
+            looks_ordinal_party_followup,
+            resolve_ordinal_party_names,
+        )
+
+        if looks_ordinal_party_followup(last_user):
+            picked = resolve_ordinal_party_names(last_user, prior_ctx)
+            if picked:
+                if on_status:
+                    on_status("Loading selected clients…")
+                want_ams_only = bool(
+                    re.search(r"\bams\b", last_user, flags=re.I)
+                ) and not re.search(
+                    r"\b(month|trend|price|yoy|growth)\b", last_user, flags=re.I
+                )
+                # If prior matches already carry ams_3m and user only asked AMS,
+                # answer from the stamped list — no sales pivot.
+                prior_matches = list(prior_ctx.get("matches") or [])
+                if want_ams_only and prior_matches:
+                    by_name = {
+                        str(m.get("client") or m.get("party") or "").strip(): m
+                        for m in prior_matches
+                        if str(m.get("client") or m.get("party") or "").strip()
+                    }
+                    if all(n in by_name and by_name[n].get("ams_3m") is not None for n in picked):
+                        lines = [
+                            "AMS (3 months) for selected matches:\n",
+                            "| # | Client | Client Type | City | AMS (3m) |",
+                            "| --- | --- | --- | --- | --- |",
+                        ]
+                        for i, name in enumerate(picked, 1):
+                            m = by_name[name]
+                            ams = m.get("ams_3m")
+                            ams_s = (
+                                f"{float(ams):.3f}".rstrip("0").rstrip(".")
+                                if isinstance(ams, (int, float))
+                                else "—"
+                            )
+                            lines.append(
+                                f"| {i} | {name} | "
+                                f"{m.get('client_type') or '—'} | "
+                                f"{m.get('city_filter') or m.get('city') or '—'} | "
+                                f"{ams_s} |"
+                            )
+                        md = "\n".join(lines) + "\n"
+                        working.append({"role": "assistant", "content": md})
+                        _attach_followup_meta(
+                            working,
+                            table_spec=prior_table_guess,
+                            party_spec={
+                                "kind": "party_lookup",
+                                "matches": [by_name[n] for n in picked],
+                                "filters": {
+                                    "parties": picked
+                                    if len(picked) > 1
+                                    else None,
+                                    "party": picked[0]
+                                    if len(picked) == 1
+                                    else None,
+                                },
+                            },
+                            query_state=prior_state_guess,
+                            plan_debug={"path": "ordinal_ams_cache_fast_path"},
+                        )
+                        return md, _prune_session_messages(working)
+                plan = {
+                    "operation": "pivot",
+                    "intent": "sales_matrix",
+                    "row_dimensions": ["party"],
+                    "column_dimensions": ["month"],
+                    "metrics": ["volume", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "context_handling": "prior",
+                    "base": "prior",
+                    "state_action": "modify",
+                    "filters": (
+                        {"party": picked[0]}
+                        if len(picked) == 1
+                        else {"parties": picked}
+                    ),
+                    "clear_filters": ["city", "cities", "client_type", "client_types"],
+                }
+                try:
+                    result = execute_query_spec(
+                        plan,
+                        prior=prior_ctx,
+                        user_text=last_user,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result = {"ok": False, "error": str(exc)}
+                if isinstance(result, dict) and result.get("ok") and result.get(
+                    "answer_markdown"
+                ):
+                    md = str(result["answer_markdown"])
+                    working.append({"role": "assistant", "content": md})
+                    _attach_followup_meta(
+                        working,
+                        table_spec=result.get("table_spec")
+                        or result.get("query_spec"),
+                        party_spec=result.get("party_spec")
+                        or {
+                            "kind": "party_lookup",
+                            "matches": prior_ctx.get("matches"),
+                            "filters": plan["filters"],
+                        },
+                        query_state=result.get("query_state"),
+                        plan_debug={
+                            "path": "ordinal_fast_path",
+                            "query_spec": result.get("query_spec") or plan,
+                        },
+                    )
+                    return md, _prune_session_messages(working)
 
     for round_i in range(MAX_TOOL_ROUNDS):
         if on_status:

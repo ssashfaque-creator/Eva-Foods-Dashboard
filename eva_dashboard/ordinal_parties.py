@@ -66,17 +66,25 @@ def extract_ordinal_indices(user_text: str) -> list[int]:
     if m:
         for tok in re.findall(r"\d+", m.group(1)):
             _add(int(tok))
-    # Bare "1 and 2" near volume/show language (avoid dates)
+    # Bare "1 and 2" near volume/show/AMS language (avoid dates)
     if not found and re.search(
-        r"\b(show|volumes?|sales?|include|both|those)\b", t
+        r"\b(show|volumes?|sales?|ams|include|both|those)\b", t
     ):
         m = re.search(
-            r"\b(\d+|one|two|three)\s+(?:and|&)\s+(\d+|one|two|three)\b",
+            r"\b(?:for|numbers?|matches?|rows?)?\s*"
+            r"(\d+|one|two|three)\s+(?:and|&)\s+(\d+|one|two|three)\b",
             t,
         )
         if m:
             _add(_to_int(m.group(1)))
             _add(_to_int(m.group(2)))
+    # "show AMS for 1" / "ams for number 2"
+    if not found and re.search(r"\b(ams|volume|sales?|show)\b", t):
+        for m in re.finditer(
+            r"\b(?:for|number)\s+(\d+|one|two|three|four|five)\b",
+            t,
+        ):
+            _add(_to_int(m.group(1)))
 
     return found
 
