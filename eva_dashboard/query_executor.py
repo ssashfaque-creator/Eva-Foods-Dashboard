@@ -1316,6 +1316,23 @@ def _coerce_vocab_from_user_text(
     if explicit_clear and out.get("base") == "prior":
         out["base"] = "sales"
 
+    # Spoken brand (Eva / Maan) → Consumer + Bulk — don't keep a planner's
+    # single-BU truncation of a brand ask.
+    try:
+        from eva_dashboard.chatbot import _extract_business_units_from_text
+
+        spoken_bus = _extract_business_units_from_text(user_text)
+    except Exception:  # noqa: BLE001
+        spoken_bus = []
+    if spoken_bus:
+        cur_bus = [str(b) for b in (out.get("business_units") or []) if b]
+        # Upgrade when planner omitted BUs or kept a strict subset of the brand
+        if not cur_bus or set(cur_bus).issubset(set(spoken_bus)):
+            out["business_units"] = list(spoken_bus)
+            filters["business_units"] = list(spoken_bus)
+            if len(spoken_bus) != 1:
+                filters.pop("business_unit", None)
+
     out["filters"] = filters
     out["row_dimensions"] = rows
     out["metrics"] = metrics
@@ -1897,6 +1914,15 @@ def execute_query_spec(
 
     result: dict[str, Any]
 
+    # Named-month Volume vs AMS packs (BU/city/channel × AMS) must not fall into
+    # party ranking just because metrics include vs_ams.
+    named_month_vol_ams = (
+        str(spec.get("period_type") or "") in {"SPECIFIC_MONTH", "NAMED_MONTH"}
+        and "volume" in set(metrics)
+        and bool(row_dimensions)
+        and "party" not in row_dimensions
+    )
+
     # ---- Special non-pivot operations ----
     if operation == "party_list" or intent == "party_list":
         result = list_clients(
@@ -2005,8 +2031,12 @@ def execute_query_spec(
             "",
             prior_spec=None,
         )
-    elif intent == "party_rank" or (
-        set(metrics) & {"vs_ams", "ams_growth"} and "month" not in column_dimensions
+    elif not named_month_vol_ams and (
+        intent == "party_rank"
+        or (
+            set(metrics) & {"vs_ams", "ams_growth"}
+            and "month" not in column_dimensions
+        )
     ):
         group_by = grain.get("group_by") or (
             row_dimensions[0] if row_dimensions else "party"
@@ -2181,14 +2211,21 @@ def execute_query_spec(
                 time_grain=time_grain,
                 **party_kw,
             )
-    elif intent in {"sales_matrix", "sales_trend", "sales_analytical"} or (
-        set(metrics) & {"volume", "ams"}
-    ):
+    elif named_month_vol_ams or intent in {
+        "sales_matrix",
+        "sales_trend",
+        "sales_analytical",
+    } or (set(metrics) & {"volume", "ams"}):
         mode = {
             "sales_matrix": "matrix",
             "sales_trend": "trend",
             "sales_analytical": "analytical",
-        }.get(intent, "trend" if "month" in column_dimensions else "matrix")
+        }.get(
+            intent,
+            "trend"
+            if ("month" in column_dimensions or named_month_vol_ams)
+            else "matrix",
+        )
         columns = (
             column_dimensions[0]
             if column_dimensions

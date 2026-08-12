@@ -767,8 +767,11 @@ def _derive_intent_from_universal(
             "advanced": "advanced",
         }.get(operation, operation)
     mets = set(metrics)
+    # vs_ams on party rows (or unspecified grain) → rank. Named-month BU/city
+    # Volume vs AMS packs keep sales_* intent even when vs_ams is present.
     if mets & {"vs_ams", "ams_growth"} and "month" not in column_dimensions:
-        return "party_rank"
+        if "party" in row_dimensions or not row_dimensions:
+            return "party_rank"
     if "price_fetch" in mets or "avg_price" in mets:
         return "price"
     if "month" in column_dimensions:

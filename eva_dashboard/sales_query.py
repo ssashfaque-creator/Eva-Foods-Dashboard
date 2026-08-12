@@ -1876,8 +1876,30 @@ def _trend_table(
         if not period_frame.empty
         else {}
     )
+    # Same calendar month last year (for Sale YoY %)
+    yoy_info = _yoy_period_from(period)
+    prior_year_frame = _fetch_lines(
+        date_from=str(yoy_info["date_from"]),
+        date_to=str(yoy_info["date_to"]),
+        **_ams_fetch_filters(
+            city=city,
+            cities=cities,
+            business_unit=business_unit,
+            business_units=business_units,
+            oil_type=oil_type,
+            packing_category=packing_category,
+            client_type=client_type,
+            client_types=client_types,
+            party=party,
+        ),
+    )
+    prior_year = (
+        prior_year_frame.groupby(row_dim)["mt"].sum().to_dict()
+        if not prior_year_frame.empty and row_dim in prior_year_frame.columns
+        else {}
+    )
     keys = sorted(
-        set(volume) | set(ams),
+        set(volume) | set(ams) | set(prior_year),
         key=lambda k: (-float(volume.get(k, 0.0)), str(k)),
     )
     partial = bool(period.get("partial_month"))
@@ -1887,6 +1909,7 @@ def _trend_table(
     for key in keys:
         vol = float(volume.get(key, 0.0))
         ams_v = float(ams.get(key, 0.0))
+        prior_v = float(prior_year.get(key, 0.0))
         entry: dict[str, Any] = {
             row_dim: str(key),
             "volume_mt": round(vol, 3),
@@ -1910,6 +1933,8 @@ def _trend_table(
                 round(pct_change(vol, ams_v), 1) if ams_v else None
             )
             entry["note"] = "Full month — AMS is the expected sale"
+        entry["prior_year_mt"] = round(prior_v, 3)
+        entry["yoy_pct"] = _yoy_pct(vol, prior_v)
         rows.append(entry)
 
     columns = [row_dim, "volume_mt", "ams_mt"]
@@ -1917,6 +1942,7 @@ def _trend_table(
         columns.extend(["expected_mt", "pct_vs_expected"])
     else:
         columns.append("pct_vs_ams")
+    columns.extend(["prior_year_mt", "yoy_pct"])
 
     # Column totals footer
     tot: dict[str, Any] = {row_dim: "Total"}
@@ -1936,13 +1962,22 @@ def _trend_table(
             if tot["ams_mt"]
             else None
         )
+    tot["prior_year_mt"] = round(sum(float(r["prior_year_mt"]) for r in rows), 3)
+    tot["yoy_pct"] = _yoy_pct(float(tot["volume_mt"]), float(tot["prior_year_mt"]))
     rows.append(tot)
 
+    try:
+        prior_label = date.fromisoformat(str(yoy_info["date_from"])[:10]).strftime(
+            "%b %Y"
+        )
+    except Exception:  # noqa: BLE001
+        prior_label = "same month last year"
     return {
         "row_dimension": row_dim,
         "partial_month": partial,
         "days_elapsed": days_elapsed,
         "days_in_month": days_in_month,
+        "prior_year_label": prior_label,
         "ams_definition": (
             "AMS = average of the three full calendar months before this month, "
             f"same filters (city={city!r}, business_unit={business_unit!r}, "
@@ -1955,9 +1990,9 @@ def _trend_table(
             + (
                 "Expected (= days_elapsed/days_in_month × AMS), % vs Expected"
                 if partial
-                else "% vs AMS (no Expected column — AMS is expected for a full month)"
+                else "% vs AMS"
             )
-            + "; includes Total footer row."
+            + f", last year ({prior_label}), YoY %; includes Total footer row."
         ),
     }
 
@@ -2686,7 +2721,7 @@ def query_sales(
             "Expected | % vs Expected"
             if period_info.get("partial_month")
             else "% vs AMS"
-        )
+        ) + " | Last year | YoY %"
         result["tables"] = [
             {
                 "index": 1,
@@ -3125,6 +3160,10 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
     if not columns:
         return "_No trend data._\n"
     # Prefer friendly headers
+    prior_hdr = "Last year (MT)"
+    ply = str(trend.get("prior_year_label") or "").strip()
+    if ply:
+        prior_hdr = f"{ply} (MT)"
     label = {
         row_key: row_key.replace("_", " ").title(),
         "volume_mt": "Volume (MT)",
@@ -3132,6 +3171,8 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
         "expected_mt": "Expected (MT)",
         "pct_vs_expected": "% vs Expected",
         "pct_vs_ams": "% vs AMS",
+        "prior_year_mt": prior_hdr,
+        "yoy_pct": "YoY %",
     }
     header_cols = [label.get(c, c) for c in columns]
     header = "| " + " | ".join(_md_escape(c) for c in header_cols) + " |"
@@ -3144,14 +3185,22 @@ def _trend_to_markdown(trend: dict[str, Any]) -> str:
             if val is None:
                 cells.append("—")
             elif isinstance(val, float):
-                if c.startswith("pct_"):
+                if c.startswith("pct_") or c == "yoy_pct":
                     cells.append(f"{val:+.1f}%")
-                elif c.endswith("_mt") or c in {"volume_mt", "ams_mt", "expected_mt"}:
+                elif c.endswith("_mt") or c in {
+                    "volume_mt",
+                    "ams_mt",
+                    "expected_mt",
+                    "prior_year_mt",
+                }:
                     cells.append(mt_str(val))
                 else:
                     cells.append(mt_str(val) if abs(val) >= 1 or val == 0 else f"{val:.3f}")
             elif isinstance(val, int):
-                cells.append(str(val))
+                if c == "yoy_pct":
+                    cells.append(f"{val:+.1f}%")
+                else:
+                    cells.append(str(val))
             else:
                 cells.append(_md_escape(val))
         lines.append("| " + " | ".join(cells) + " |")
