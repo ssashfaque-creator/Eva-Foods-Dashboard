@@ -34,8 +34,10 @@ _MATH = re.compile(
     r"\*|×|÷|"
     r"convert|conversion|factor\s+of|"
     r"\d+(?:\.\d+)?\s*[x×*]\s*\d|"
-    r"divide\s+by|divided\s+by|/?\s*\d+(?:\.\d+)?"
-    r")\b",
+    r"divide\s+by|divided\s+by"
+    r")\b|"
+    # Require an explicit division slash (avoid matching bare years like "2025")
+    r"(?<![A-Za-z0-9])/\s*\d+(?:\.\d+)?\b",
     flags=re.I,
 )
 
@@ -147,8 +149,14 @@ def route_ask(user_text: str, *, prior: dict[str, Any] | None = None) -> dict[st
         kind = "standard"
         confidence = 0.9 if re.search(r"\b(ams|volume|price\s*fetch)\b", low) else 0.75
         preferred = ["run_standard_analytics_pivot"]
-        # Hard preference: don't invent AMS windows in raw SQL
-        if re.search(r"\b(ams|vs\.?\s*ams|price\s*fetch|cost\s*factor)\b", low):
+        # Hard preference: don't invent AMS windows / growth in raw SQL
+        if re.search(
+            r"\b("
+            r"ams|vs\.?\s*ams|price\s*fetch|cost\s*factor|"
+            r"grown|growth|declined|grown_only|declined_only"
+            r")\b",
+            low,
+        ):
             blocked = ["execute_read_only_sql"]
         rationale = "standard commercial pivot / rank / Price Fetch"
     elif math and standard:

@@ -1,0 +1,94 @@
+{
+  "version": "1.4.3",
+  "description": "Offline magic eval — route + playbook expectations for real commercial asks",
+  "cases": [
+    {
+      "id": "standard_bu_ams",
+      "user_text": "Show me volume and AMS by Business Unit for the last 6 months.",
+      "expect_kind": ["standard"],
+      "expect_playbooks": [],
+      "forbid_tools": ["execute_read_only_sql"]
+    },
+    {
+      "id": "lowest_pepsi_buyer",
+      "user_text": "What was the lowest rate Pepsi was sold at, and who was the buyer?",
+      "expect_kind": ["discovery"],
+      "expect_playbooks": ["lowest_rate_then_buyer"],
+      "expect_alias": "pepsi"
+    },
+    {
+      "id": "pepsi_math",
+      "user_text": "Take the Pepsi rate, multiply it by 24.7 and divide by 6.",
+      "expect_kind": ["math", "mixed"],
+      "expect_playbooks": ["rate_then_math"]
+    },
+    {
+      "id": "distributors_grown",
+      "user_text": "Which distributors have grown sales?",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["distributors_grown"],
+      "forbid_tools": ["execute_read_only_sql"]
+    },
+    {
+      "id": "distributors_declined",
+      "user_text": "Which distributors declined the most vs AMS?",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["distributors_declined"]
+    },
+    {
+      "id": "same_date_variance",
+      "user_text": "Which distributors have been sold at different prices on the same date?",
+      "expect_kind": ["discovery"],
+      "expect_playbooks": ["same_date_price_variance"]
+    },
+    {
+      "id": "clarify_bare_price",
+      "user_text": "what's the pepsi price",
+      "expect_kind": ["clarify"],
+      "expect_playbooks": []
+    },
+    {
+      "id": "top5_march",
+      "user_text": "who are the top 5 customers in march",
+      "expect_kind": ["standard", "discovery"],
+      "expect_playbooks": ["top_n_customers_month"]
+    },
+    {
+      "id": "volume_avg_price",
+      "user_text": "for Pepsi show monthly sales and average price",
+      "expect_kind": ["standard", "discovery", "mixed"],
+      "expect_playbooks": ["volume_and_avg_price"]
+    },
+    {
+      "id": "price_fetch",
+      "user_text": "what's the price fetch",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["price_fetch_followup"],
+      "forbid_tools": ["execute_read_only_sql"]
+    },
+    {
+      "id": "yoy_july",
+      "user_text": "compare distributor sales in July 2025 vs 2026",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["yoy_compare"]
+    },
+    {
+      "id": "exclude_ams",
+      "user_text": "exclude all customers with less than 10 ams",
+      "expect_kind": ["standard", "discovery", "mixed"],
+      "expect_playbooks": ["exclude_then_refresh"]
+    },
+    {
+      "id": "last_price",
+      "user_text": "what was the last price sold for canola stand up",
+      "expect_kind": ["standard", "discovery"],
+      "expect_playbooks": ["last_price_sold"]
+    },
+    {
+      "id": "highest_rate",
+      "user_text": "highest rate we sold and who paid it",
+      "expect_kind": ["discovery"],
+      "expect_playbooks": ["highest_rate_then_buyer"]
+    }
+  ]
+}

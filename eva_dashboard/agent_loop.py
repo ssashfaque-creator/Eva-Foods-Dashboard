@@ -875,9 +875,30 @@ def run_agent_loop(
     from eva_dashboard.ask_grounding import ground_ask_for_agent
     from eva_dashboard.playbooks import playbook_prompt_block
 
+    from eva_dashboard.personal_lexicon import (
+        learn_from_turn,
+        remember_clarify,
+        should_skip_clarify,
+    )
+
     route = route_ask(user_query, prior=prior)
     grounded = ground_ask_for_agent(user_query, prior=prior)
     playbook = playbook_prompt_block(user_query)
+
+    def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist lexicon/style learning after a usable turn."""
+        try:
+            learn_from_turn(
+                user_query,
+                route=route,
+                grounding=grounded,
+                tool_trace=list(payload.get("tool_trace") or []),
+                answer=str(payload.get("answer") or ""),
+                verify_ok=bool(payload.get("ok")),
+            )
+        except Exception:  # noqa: BLE001 — learning must never break chat
+            pass
+        return payload
 
     # High-confidence clarify: skip tools, return the one question
     if (
@@ -891,19 +912,45 @@ def run_agent_loop(
         )
     ):
         q = str(route["clarify_question"])
-        return {
-            "ok": True,
-            "answer": q,
-            "messages": [
-                {"role": "system", "content": REACT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_query},
-                {"role": "assistant", "content": q},
-            ],
-            "last_legacy_result": None,
-            "tool_trace": [],
-            "route": route,
-            "grounding": grounded,
-        }
+        if should_skip_clarify(user_query, q):
+            # Already asked — pick a default and continue with tools
+            route = {
+                **route,
+                "kind": "mixed",
+                "confidence": 0.55,
+                "preferred_tools": [
+                    "lookup_entity_values",
+                    "run_standard_analytics_pivot",
+                    "execute_read_only_sql",
+                ],
+                "blocked_tools": [],
+                "clarify_question": None,
+                "rationale": "clarify_skipped_recent — use a sensible default",
+                "prompt_block": (
+                    "=== ROUTING (authoritative) ===\n"
+                    "kind=mixed confidence=0.55 (clarify skipped — already asked).\n"
+                    "Do NOT ask another clarifying question. Default to last sold "
+                    "price if the price type is still ambiguous; state that "
+                    "assumption in one line, then fetch with tools."
+                ),
+            }
+        else:
+            remember_clarify(q, user_query)
+            return _finish(
+                {
+                    "ok": True,
+                    "answer": q,
+                    "messages": [
+                        {"role": "system", "content": REACT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_query},
+                        {"role": "assistant", "content": q},
+                    ],
+                    "last_legacy_result": None,
+                    "tool_trace": [],
+                    "route": route,
+                    "grounding": grounded,
+                }
+            )
 
     system = REACT_SYSTEM_PROMPT
     if route.get("prompt_block"):
@@ -945,16 +992,18 @@ def run_agent_loop(
                 temperature=0.1,
             )
         except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "error": str(exc),
-                "answer": f"Agent error talking to the model: {exc}",
-                "messages": messages,
-                "last_legacy_result": last_legacy,
-                "tool_trace": tool_trace,
-                "route": route,
-                "grounding": grounded,
-            }
+            return _finish(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "answer": f"Agent error talking to the model: {exc}",
+                    "messages": messages,
+                    "last_legacy_result": last_legacy,
+                    "tool_trace": tool_trace,
+                    "route": route,
+                    "grounding": grounded,
+                }
+            )
 
         msg = response.choices[0].message
         tool_calls = list(msg.tool_calls or [])
@@ -985,17 +1034,19 @@ def run_agent_loop(
                 route=route,
             )
             if check.get("ok") or verify_retries >= max_verify_retries:
-                return {
-                    "ok": bool(check.get("ok")),
-                    "answer": answer
-                    or "I could not produce an answer. Please rephrase the question.",
-                    "messages": messages,
-                    "last_legacy_result": last_legacy,
-                    "tool_trace": tool_trace,
-                    "route": route,
-                    "verify": check,
-                    "grounding": grounded,
-                }
+                return _finish(
+                    {
+                        "ok": bool(check.get("ok")),
+                        "answer": answer
+                        or "I could not produce an answer. Please rephrase the question.",
+                        "messages": messages,
+                        "last_legacy_result": last_legacy,
+                        "tool_trace": tool_trace,
+                        "route": route,
+                        "verify": check,
+                        "grounding": grounded,
+                    }
+                )
             # Retry with verifier feedback
             verify_retries += 1
             if on_status:
@@ -1045,19 +1096,21 @@ def run_agent_loop(
                 }
             )
 
-    return {
-        "ok": False,
-        "error": "max_turns",
-        "answer": (
-            "Agent reached maximum execution steps without concluding. "
-            "Please refine your query."
-        ),
-        "messages": messages,
-        "last_legacy_result": last_legacy,
-        "tool_trace": tool_trace,
-        "route": route,
-        "grounding": grounded,
-    }
+    return _finish(
+        {
+            "ok": False,
+            "error": "max_turns",
+            "answer": (
+                "Agent reached maximum execution steps without concluding. "
+                "Please refine your query."
+            ),
+            "messages": messages,
+            "last_legacy_result": last_legacy,
+            "tool_trace": tool_trace,
+            "route": route,
+            "grounding": grounded,
+        }
+    )
 
 
 def react_agent_enabled() -> bool:

@@ -1,13 +1,15 @@
-# ReAct Multi-Step Agent (v1.4.2)
+# ReAct Multi-Step Agent (v1.4.3)
 
 Eva Chat answers open-ended commercial questions via:
 
 1. **Router** — `standard` / `discovery` / `math` / `clarify` / `mixed`
-2. **Personal lexicon** — learns nicknames (`pepsi` → party) + sticky prefs
+2. **Personal lexicon** — learns nicknames (`pepsi` → party), sticky prefs, reply style
 3. **Ask grounding** — resolves parties before tools run
-4. **Playbooks** — multi-hop recipes (lowest→buyer, rate→math, same-date variance)
+4. **Playbooks** — multi-hop recipes (lowest→buyer, rate→math, YoY, exclude, last price, …)
 5. **Tools** — legacy pivots / guarded SQL / calculator
 6. **Verifier** — retries bad answers (up to 2×)
+7. **Clarify budget** — skips re-asking the same price ambiguity; defaults instead
+8. **Golden eval** — `python -m eva_dashboard.eval_harness` (offline route + playbook score)
 
 ## Feature flag
 

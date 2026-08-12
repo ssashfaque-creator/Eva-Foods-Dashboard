@@ -56,10 +56,20 @@ def test_playbooks_match_magic_asks() -> None:
     assert any(p["id"] == "rate_then_math" for p in math)
     grown = match_playbooks("which distributors have grown sales")
     assert any(p["id"] == "distributors_grown" for p in grown)
+    declined = match_playbooks(
+        "Which distributors declined the most vs AMS?"
+    )
+    assert any(p["id"] == "distributors_declined" for p in declined)
     disp = match_playbooks(
         "which distributors were sold at different prices on the same date"
     )
     assert any(p["id"] == "same_date_price_variance" for p in disp)
+    assert any(
+        p["id"] == "yoy_compare"
+        for p in match_playbooks(
+            "compare distributor sales in July 2025 vs 2026"
+        )
+    )
     block = playbook_prompt_block(
         "lowest rate for pepsi and multiply by 24.7"
     )
