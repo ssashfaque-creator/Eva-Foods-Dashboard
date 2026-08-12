@@ -94,13 +94,12 @@ Copy the HTTPS URL it prints, e.g. `https://random-words.trycloudflare.com`.
 
 ## 4. Deploy the chat UI to Vercel (exact clicks)
 
-> Deploy from branch `cursor/ai-chatbot-data-testing-ed65` until this PR is merged to `main`.
-> Or merge PR #8 first, then deploy from `main`.
+> Deploy from **`main`** (this branch includes `mobile-chat/` and the Mac bridge).
 
 ### Option A — Vercel website (recommended)
 
 1. Open [https://vercel.com/new](https://vercel.com/new) and sign in with **GitHub**.
-2. Import **`ssashfaque-creator/Eva-Foods-Dashboard`**.
+2. Import **`ssashfaque-creator/Eva-Foods-Dashboard`** (Production branch: **`main`**).
 3. Before Deploy, open **Configure Project**:
    - **Framework Preset:** Next.js
    - **Root Directory:** click **Edit** → select **`mobile-chat`** → Continue  
