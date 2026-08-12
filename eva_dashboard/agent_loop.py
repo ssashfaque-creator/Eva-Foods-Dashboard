@@ -655,3 +655,333 @@ def build_mixed_compare_subplans(
             }
         )
     return plans
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Multi-step ReAct agent (OpenAI native tool calling)
+# ---------------------------------------------------------------------------
+
+import json
+import os
+from typing import Callable
+
+REACT_SYSTEM_PROMPT = """You are Eva Foods AI Sales Analyst (v2 ReAct).
+Answer commercial questions accurately using tools. Never invent MT, rates, or AMS.
+
+TOOL CHOICE:
+1. run_standard_analytics_pivot — standard volume matrices, AMS, vs AMS, AMS growth,
+   brand/BU trends, party ranks, Price Fetch / avg rate when the ask matches
+   normal commercial tables. Prefer this for volume/AMS pivots.
+2. execute_read_only_sql — novel asks: min/max price, who bought at a rate,
+   same-date price dispersion, custom aggregations, discovery SQL.
+3. calculate_expression — ANY arithmetic (× 24.7 / 6, deltas, conversions).
+   NEVER compute numbers in your head — call this tool.
+4. get_database_schema — before writing unfamiliar SQL, inspect DDL.
+5. lookup_entity_values — resolve exact party/product/client_type strings first.
+
+WORKFLOW:
+- You may call multiple tools across turns (multi-hop).
+- For "lowest price then who bought it": SQL for MIN(rate) → SQL/filter parties.
+- For "Pepsi price × 24.7 / 6": lookup entity → SQL rate → calculate_expression.
+- Prefer sales.mt_qty for volume; join category on product; clients on party name.
+- Final reply: Markdown table(s) with the numbers, then ### Analysis (2–4 bullets).
+- If a tool errors, fix the query and retry — do not invent data.
+"""
+
+REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_read_only_sql",
+            "description": (
+                "Execute a read-only SELECT/WITH SQL query on eva.db for "
+                "custom/novel questions (min/max, dispersion, ad-hoc)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql_query": {
+                        "type": "string",
+                        "description": "A single SELECT or WITH query.",
+                    }
+                },
+                "required": ["sql_query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_expression",
+            "description": "Evaluate a mathematical expression with Python arithmetic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "e.g. '(1500 * 24.7) / 6'",
+                    }
+                },
+                "required": ["expression"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_database_schema",
+            "description": "Get DDL table schemas to construct correct SQL.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_entity_values",
+            "description": "Search distinct values (party, product, client type, …).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "sales|clients|category|factor_costs|…",
+                    },
+                    "column_name": {
+                        "type": "string",
+                        "description": "e.g. party, client, product, type",
+                    },
+                    "search_term": {"type": "string"},
+                },
+                "required": ["table_name", "column_name", "search_term"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_standard_analytics_pivot",
+            "description": (
+                "Run standard Eva commercial analytics (Volume, AMS, party ranks, "
+                "Price Fetch) via deterministic Python engines."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spec_dict": {
+                        "type": "object",
+                        "description": (
+                            "QuerySpec: row_dimensions, column_dimensions, metrics, "
+                            "period_type, months_back, target_month, filters, "
+                            "business_units, limit, sort, operation, …"
+                        ),
+                    },
+                    "user_text": {
+                        "type": "string",
+                        "description": "Original user question (helps spoken filters).",
+                    },
+                },
+                "required": ["spec_dict"],
+            },
+        },
+    },
+]
+
+
+def _tool_payload_text(payload: dict[str, Any] | str) -> str:
+    if isinstance(payload, str):
+        return payload
+    if payload.get("markdown"):
+        return str(payload["markdown"])
+    if payload.get("answer_markdown"):
+        return str(payload["answer_markdown"])
+    return json.dumps(payload, default=str)[:80_000]
+
+
+def dispatch_react_tool(
+    name: str,
+    args: dict[str, Any],
+    *,
+    user_text: str = "",
+    prior: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute one ReAct tool call; returns a dict with markdown + ok."""
+    from eva_dashboard.tools.calculator_tool import calculate_expression
+    from eva_dashboard.tools.discovery_tool import (
+        get_database_schema,
+        lookup_entity_values,
+    )
+    from eva_dashboard.tools.legacy_tool import run_standard_analytics_pivot
+    from eva_dashboard.tools.sql_tool import execute_read_only_sql
+
+    if name == "execute_read_only_sql":
+        return execute_read_only_sql(str(args.get("sql_query") or ""))
+    if name == "calculate_expression":
+        return calculate_expression(str(args.get("expression") or ""))
+    if name == "get_database_schema":
+        return get_database_schema()
+    if name == "lookup_entity_values":
+        return lookup_entity_values(
+            str(args.get("table_name") or ""),
+            str(args.get("column_name") or ""),
+            str(args.get("search_term") or ""),
+        )
+    if name == "run_standard_analytics_pivot":
+        spec = args.get("spec_dict") or args.get("query_spec") or {}
+        if not isinstance(spec, dict):
+            return {
+                "ok": False,
+                "error": "spec_dict must be an object",
+                "markdown": "Legacy Engine Error: spec_dict must be an object",
+            }
+        return run_standard_analytics_pivot(
+            spec,
+            user_text=str(args.get("user_text") or user_text or ""),
+            prior=prior,
+        )
+    return {
+        "ok": False,
+        "error": f"Unknown tool {name}",
+        "markdown": f"Error: Unknown tool {name}",
+    }
+
+
+def run_agent_loop(
+    user_query: str,
+    *,
+    client: Any,
+    model: str = "gpt-4o-mini",
+    history: list[dict[str, Any]] | None = None,
+    memory_block: str = "",
+    prior: dict[str, Any] | None = None,
+    max_turns: int = 8,
+    on_status: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Multi-step ReAct execution loop with OpenAI native tool calling.
+
+    Returns ``{ok, answer, messages, last_legacy_result, tool_trace}``.
+    """
+    system = REACT_SYSTEM_PROMPT
+    if memory_block.strip():
+        system = system + "\n\n" + memory_block.strip()
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    # Prior user/assistant turns (no system / tool clutter)
+    for m in history or []:
+        role = str(m.get("role") or "")
+        if role in {"user", "assistant"} and m.get("content"):
+            # Skip empty assistant stubs that only had tool_calls
+            if role == "assistant" and m.get("tool_calls") and not str(
+                m.get("content") or ""
+            ).strip():
+                continue
+            messages.append({"role": role, "content": str(m["content"])})
+    messages.append({"role": "user", "content": user_query})
+
+    tool_trace: list[dict[str, Any]] = []
+    last_legacy: dict[str, Any] | None = None
+
+    for turn in range(max(1, int(max_turns))):
+        if on_status:
+            on_status("Thinking…" if turn == 0 else "Using tools…")
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=REACT_TOOLS_SCHEMA,
+                tool_choice="auto",
+                temperature=0.1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": str(exc),
+                "answer": f"Agent error talking to the model: {exc}",
+                "messages": messages,
+                "last_legacy_result": last_legacy,
+                "tool_trace": tool_trace,
+            }
+
+        msg = response.choices[0].message
+        tool_calls = list(msg.tool_calls or [])
+        assistant_entry: dict[str, Any] = {
+            "role": "assistant",
+            "content": msg.content or "",
+        }
+        if tool_calls:
+            assistant_entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "{}",
+                    },
+                }
+                for tc in tool_calls
+            ]
+        messages.append(assistant_entry)
+
+        if not tool_calls:
+            answer = (msg.content or "").strip()
+            return {
+                "ok": True,
+                "answer": answer
+                or "I could not produce an answer. Please rephrase the question.",
+                "messages": messages,
+                "last_legacy_result": last_legacy,
+                "tool_trace": tool_trace,
+            }
+
+        for tc in tool_calls:
+            fn_name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            if on_status:
+                on_status(f"Running {fn_name}…")
+            payload = dispatch_react_tool(
+                fn_name,
+                args,
+                user_text=user_query,
+                prior=prior,
+            )
+            tool_trace.append(
+                {
+                    "tool": fn_name,
+                    "args": args,
+                    "ok": bool(payload.get("ok")),
+                    "preview": str(payload.get("markdown") or "")[:500],
+                }
+            )
+            if fn_name == "run_standard_analytics_pivot" and isinstance(
+                payload.get("result"), dict
+            ):
+                last_legacy = payload["result"]
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": _tool_payload_text(payload)[:100_000],
+                }
+            )
+
+    return {
+        "ok": False,
+        "error": "max_turns",
+        "answer": (
+            "Agent reached maximum execution steps without concluding. "
+            "Please refine your query."
+        ),
+        "messages": messages,
+        "last_legacy_result": last_legacy,
+        "tool_trace": tool_trace,
+    }
+
+
+def react_agent_enabled() -> bool:
+    """Feature flag — default ON for v1.4 ReAct path."""
+    raw = os.environ.get("EVA_REACT_AGENT", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}

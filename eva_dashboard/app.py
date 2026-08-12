@@ -567,7 +567,9 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.info(
-        f"**Engine v{__version__}** — MemoryContext + state_action, Golden RAG, "
+        f"**Engine v{__version__}** — ReAct agent (SQL + math + legacy pivots), "
+        f"MemoryContext, Golden RAG, "
+
         f"self-correction, Show Plan. App file: `{Path(__file__).resolve()}`"
     )
     from eva_dashboard.update import wrong_install_reason

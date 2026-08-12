@@ -247,12 +247,18 @@ def system_prompt() -> str:
     from eva_dashboard.spoken_constraints import polarity_brief_for_prompt
 
     polarity = polarity_brief_for_prompt()
-    return f"""You are the Eva Foods AI Sales Analyst. Answer ONLY from the live SQLite database by translating asks into structured ``plan_query`` tool calls.
+    return f"""You are the Eva Foods AI Sales Analyst (v2 ReAct). Answer ONLY from the live SQLite database.
+
+When the ReAct agent path is active, use tools: run_standard_analytics_pivot
+(Volume/AMS/ranks/Price Fetch), execute_read_only_sql (novel min/max /
+who-at-rate), calculate_expression (any math), get_database_schema /
+lookup_entity_values (before custom SQL). Multi-hop is encouraged.
 
 {live}
 
-# HOW YOU WORK (v1.3 Agentic Semantic Layer — Memory + Self-Correction)
-1. Pivot via plan_query: row_dimensions, column_dimensions, metrics, filters,
+# HOW YOU WORK (QuerySpec engines still power standard pivots)
+1. Pivot via plan_query / run_standard_analytics_pivot: row_dimensions,
+   column_dimensions, metrics, filters,
    excludes (when dropping values). Required: rows + metrics + period_type +
    context_handling (prefer also state_action=keep|modify|clear).
 2. YOU own structure (grain/metrics/period/compare/state_action). Python owns
@@ -280,8 +286,9 @@ def system_prompt() -> str:
 10. Channels → filters.client_type. Customers → filters.party only when INCLUDE.
     who is X → party_lookup. Profile → party_profile.
 11. COMPARE: compared things = rows; shared scope = filters. Growth → ams_growth.
-12. Analytics only via plan_query. Escape: get_schema, get_sales_overview,
-    run_sql, resolve_product_language, report_snapshot, list_unmapped_products.
+12. Prefer standard pivots for AMS/volume; use SQL tools for discovery asks.
+    Escape: get_schema, get_sales_overview, run_sql, resolve_product_language,
+    report_snapshot, list_unmapped_products.
 13. INVESTIGATION: empty/plan_errors/feedback → re-plan before Analysis. Mixed
     party-vs-channel → two plan_query calls.
 14. GOLDEN_QUERY_EXAMPLES are few-shot templates — mirror structure, adapt
@@ -6370,6 +6377,72 @@ def chat_completion(
                         },
                     )
                     return md, _prune_session_messages(working)
+
+    # --- v2 ReAct multi-step agent (SQL + calculator + legacy engines) ---
+    from eva_dashboard.agent_loop import react_agent_enabled, run_agent_loop
+
+    if react_agent_enabled():
+        if on_status:
+            on_status("Analyzing with ReAct agent…")
+        # Keep recent user/assistant turns for follow-ups (exclude tool spam)
+        hist: list[dict[str, Any]] = []
+        for m in history:
+            role = str(m.get("role") or "")
+            if role in {"user", "assistant"} and str(m.get("content") or "").strip():
+                hist.append({"role": role, "content": str(m["content"])})
+        # Drop the current user turn — run_agent_loop appends user_query
+        if hist and hist[-1].get("role") == "user":
+            hist = hist[:-1]
+        agent_out = run_agent_loop(
+            last_user,
+            client=client,
+            model=model,
+            history=hist[-12:],
+            memory_block=context_blob,
+            prior=prior_ctx,
+            max_turns=8,
+            on_status=on_status,
+        )
+        answer = str(agent_out.get("answer") or "").strip()
+        legacy = agent_out.get("last_legacy_result")
+        if isinstance(legacy, dict):
+            working.append({"role": "assistant", "content": answer})
+            _attach_followup_meta(
+                working,
+                table_spec=legacy.get("table_spec")
+                or legacy.get("query_spec")
+                or forced_prior_spec
+                or prior_table_guess,
+                price_spec=legacy.get("price_spec")
+                or forced_prior_price_spec
+                or prior_price_guess,
+                party_spec=legacy.get("party_spec")
+                or forced_prior_party_spec
+                or prior_party_guess,
+                query_state=legacy.get("query_state") or prior_state_guess,
+                export_snapshot=legacy.get("export_snapshot"),
+                plan_debug={
+                    "path": "react_agent",
+                    "tool_trace": agent_out.get("tool_trace"),
+                    "query_spec": legacy.get("query_spec"),
+                    "memory": memory.to_dict(),
+                },
+            )
+        else:
+            working.append({"role": "assistant", "content": answer})
+            _attach_followup_meta(
+                working,
+                table_spec=forced_prior_spec or prior_table_guess,
+                price_spec=forced_prior_price_spec or prior_price_guess,
+                party_spec=forced_prior_party_spec or prior_party_guess,
+                query_state=prior_state_guess,
+                plan_debug={
+                    "path": "react_agent",
+                    "tool_trace": agent_out.get("tool_trace"),
+                    "memory": memory.to_dict(),
+                },
+            )
+        return answer, _prune_session_messages(working)
 
     for round_i in range(MAX_TOOL_ROUNDS):
         if on_status:

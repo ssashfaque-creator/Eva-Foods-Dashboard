@@ -5,15 +5,16 @@
 # Preserves data/ and .venv/ when refreshing an existing install.
 #
 # One-liner (does NOT depend on whatever stale eva-dashboard is on PATH):
-#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/main/scripts/update.sh" | bash
+#   # or branch: .../cursor/react-agent-tools-50eb/scripts/update.sh | bash
 #
 # Then launch with the FULL PATH printed at the end.
 
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
-BRANCH="${EVA_UPDATE_BRANCH:-cursor/phase1-single-planner-50eb}"
-MIN_VERSION="${EVA_MIN_VERSION:-1.3.8}"
+BRANCH="${EVA_UPDATE_BRANCH:-cursor/react-agent-tools-50eb}"
+MIN_VERSION="${EVA_MIN_VERSION:-1.4.0}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 
 case "$TARGET" in
