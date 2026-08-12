@@ -165,6 +165,20 @@ def apply_metric_synonyms_to_spec(
         rows = list(out.get("row_dimensions") or [])
         if "product" not in rows:
             out["row_dimensions"] = (rows + ["product"]) if rows else ["product"]
+    # Spoken "price fetch" must not stay on sticky avg_price month grids
+    if "price_fetch" in inferred or re.search(
+        r"\bprice\s*fetch\b", text.lower()
+    ):
+        if "price_fetch" not in metrics:
+            metrics.append("price_fetch")
+        metrics = [m for m in metrics if m != "avg_price"]
+        flags = dict(out.get("price_flags") or {})
+        flags["include_price_fetch"] = True
+        out["price_flags"] = flags
+        # Price Fetch is not a month crosstab of avg rate
+        cols = list(out.get("column_dimensions") or [])
+        if "month" in cols and not re.search(r"\bmonth", text.lower()):
+            out["column_dimensions"] = [c for c in cols if c != "month"]
     if metrics:
         out["metrics"] = metrics
 

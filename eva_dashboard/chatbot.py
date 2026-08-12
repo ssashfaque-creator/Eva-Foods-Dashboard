@@ -412,6 +412,8 @@ _ANALYSIS_ONLY_SYSTEM = (
     "restating the top row alone.\n"
     "- Tie the insight to the user's question when possible.\n"
     "- Use only numbers visible in the tool tables or Key facts.\n"
+    "- When citing MoM / month-to-month change, use adjacent months only "
+    "(e.g. Jul→Aug), never the first→last span labeled as a single step.\n"
     "- If the table is empty / no matching entities, say that in one line — "
     "do NOT invent leaders or volumes.\n"
     "- Skip filler and obvious restatements of every row."

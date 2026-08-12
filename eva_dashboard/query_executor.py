@@ -1240,6 +1240,26 @@ def _coerce_vocab_from_user_text(
     top_n = _extract_top_n(user_text)
     if top_n and (out.get("limit") in (None, 0) or int(out.get("limit") or 0) > top_n):
         out["limit"] = top_n
+    # Top-N customer asks on a named month → Volume vs AMS trend (not a month grid)
+    if (
+        top_n
+        and re.search(r"\b(customers?|parties|distributors?|clients?)\b", t)
+        and (
+            out.get("period_type") in {"SPECIFIC_MONTH", "NAMED_MONTH"}
+            or re.search(
+                r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+                r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+                r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+                t,
+            )
+        )
+        and "party" in (rows or ["party"])
+    ):
+        rows = ["party"]
+        cols = [c for c in cols if c != "month"]
+        if not (set(metrics) & {"volume", "ams", "vs_ams"}):
+            metrics = ["volume", "ams", "vs_ams"]
+        out["intent"] = out.get("intent") or "sales_trend"
 
     # Spoken geography zone ("from the North", "in Central")
     spoken_zone = extract_zone_from_text(user_text)
@@ -2614,6 +2634,7 @@ def execute_query_spec(
             active_only=bool(filters.get("active_only")),
             prior_spec=None,
             limit=int(spec.get("limit") or 0) or None,
+            metric_filters=list(spec.get("metric_filters") or []) or None,
             **party_kw,
         )
     else:

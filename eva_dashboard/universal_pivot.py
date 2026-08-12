@@ -59,7 +59,7 @@ def _fetch_priced_lines(
     party_ilike: list[str] | None = None,
     active_only: bool = False,
 ) -> pd.DataFrame:
-    """Volume-dim lines merged with rate / amount columns."""
+    """Volume-dim lines with rate / amount columns (no row-multiplying merge)."""
     base = _fetch_lines(
         date_from=date_from,
         date_to=date_to,
@@ -79,17 +79,27 @@ def _fetch_priced_lines(
         return base
 
     init_db()
+    # Aggregate priced fields by date/party/product so a many-to-many merge
+    # cannot inflate MT (Pepsi volume bug).
     sql = """
     SELECT
       s.date,
       s.product,
       s.party,
-      s.rate,
-      s.qty,
-      s.mes_qty,
-      s.incl_gst_fed_amount
+      SUM(COALESCE(s.rate, 0) * CASE
+            WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
+            ELSE COALESCE(s.mes_qty, s.qty, 0)
+          END)
+        / NULLIF(SUM(CASE
+            WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
+            ELSE COALESCE(s.mes_qty, s.qty, 0)
+          END), 0) AS rate,
+      SUM(COALESCE(s.qty, 0)) AS qty,
+      SUM(COALESCE(s.mes_qty, 0)) AS mes_qty,
+      SUM(COALESCE(s.incl_gst_fed_amount, 0)) AS incl_gst_fed_amount
     FROM sales s
     WHERE s.date >= ? AND s.date <= ?
+    GROUP BY s.date, s.product, s.party
     """
     with connect() as conn:
         priced = pd.read_sql_query(sql, conn, params=[date_from, date_to])
@@ -104,8 +114,26 @@ def _fetch_priced_lines(
     keys = ["date", "party", "product"]
     base = base.copy()
     for k in keys:
-        base[k] = base[k].astype(str)
-        priced[k] = priced[k].astype(str)
+        # Keep blank/null party keys (pandas groupby drops NaN by default)
+        base[k] = (
+            base[k]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "", "None": "", "<NA>": ""})
+        )
+        priced[k] = (
+            priced[k]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "", "None": "", "<NA>": ""})
+        )
+    # Aggregate base MT first so duplicate line keys cannot double-count
+    meta_cols = [c for c in base.columns if c not in keys + ["mt"]]
+    agg = {c: "first" for c in meta_cols}
+    agg["mt"] = "sum"
+    base = base.groupby(keys, as_index=False, dropna=False).agg(agg)
     return base.merge(
         priced[keys + ["rate", "qty", "mes_qty", "incl_gst_fed_amount"]],
         on=keys,

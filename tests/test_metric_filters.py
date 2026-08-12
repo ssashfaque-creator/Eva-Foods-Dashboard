@@ -22,6 +22,15 @@ def test_parse_ams_more_than() -> None:
     assert got == [{"metric": "ams", "op": "gt", "value": 10.0}]
 
 
+def test_parse_exclude_less_than_ams_inverts() -> None:
+    assert parse_metric_filters("exclude all customers with less than 10 ams") == [
+        {"metric": "ams", "op": "gte", "value": 10.0}
+    ]
+    assert parse_metric_filters("more than 10 ams") == [
+        {"metric": "ams", "op": "gt", "value": 10.0}
+    ]
+
+
 def test_parse_growth_and_volume() -> None:
     assert parse_metric_filters("growth more than 30%") == [
         {"metric": "ams_growth", "op": "gt", "value": 30.0}

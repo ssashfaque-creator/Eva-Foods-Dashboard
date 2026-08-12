@@ -154,6 +154,19 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
             flags=re.IGNORECASE,
         ):
             continue
+        # Metric thresholds are not party names
+        # ("all customers with less than 10 ams")
+        if re.search(
+            r"\b(ams|volume|growth|yoy|average\s+monthly)\b",
+            raw,
+            flags=re.IGNORECASE,
+        ) and re.search(
+            r"\b(less\s+than|more\s+than|greater\s+than|below|above|under|"
+            r"over|at\s+least|at\s+most|>|<|>=|<=)\b",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            continue
         if raw and raw not in phrases:
             phrases.append(raw)
     # "but exclude X" / "again but without X"
@@ -309,6 +322,27 @@ def strip_include_conflicts(
     return out
 
 
+def _scrub_metric_threshold_party_excludes(
+    excludes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Drop LLM party_like excludes that are really AMS/volume thresholds."""
+    from eva_dashboard.metric_filters import looks_like_metric_threshold_phrase
+
+    out: dict[str, Any] = {}
+    for dim, vals in (excludes or {}).items():
+        if dim in {"party", "party_like", "parties"}:
+            kept = [
+                v
+                for v in (vals or [])
+                if not looks_like_metric_threshold_phrase(str(v or ""))
+            ]
+            if kept:
+                out[dim] = kept
+        else:
+            out[dim] = list(vals or [])
+    return out
+
+
 def apply_spoken_constraints(
     spec: dict[str, Any],
     *,
@@ -347,7 +381,10 @@ def apply_spoken_constraints(
             if v not in bucket:
                 bucket.append(v)
         excludes[dim] = bucket
+    # Never treat "all customers with less than 10 ams" as a party name
+    excludes = _scrub_metric_threshold_party_excludes(excludes)
     if not excludes:
+        out.pop("excludes", None)
         return out
     out["excludes"] = excludes
 
@@ -380,5 +417,7 @@ Ex: "Eva Lahore sales but exclude al shaheer" →
   filters:{city:Lahore}, business_units:[Eva Consumer,Eva Bulk],
   excludes:{party_like:[al shaheer]}  (NOT filters.party).
 Ex: "without donations" → excludes:{client_type:[DONATIONS]}.
+"exclude customers with less than 10 AMS" → metric_filters:[{ams,gte,10}]
+  (NOT excludes.party_like). Python owns metric cuts from the user sentence.
 Python enforces polarity from the user sentence if the plan inverts it.
 """.strip()

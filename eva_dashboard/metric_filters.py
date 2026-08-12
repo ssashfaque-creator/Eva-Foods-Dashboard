@@ -97,7 +97,10 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
     )
     pattern = re.compile(
         rf"(?:(?:customers?|parties?|rows?|accounts?)\s+with\s+)?"
-        rf"(?:(?:only\s+show|show\s+only|keep\s+only|filter\s+to)\s+)?"
+        rf"(?:(?:only\s+show|show\s+only|keep\s+only|filter\s+to|"
+        rf"exclude|excluding|without|drop|remove|except)\s+)?"
+        rf"(?:(?:all\s+)?(?:customers?|parties?|rows?|accounts?)\s+"
+        rf"(?:with|having)\s+)?"
         rf"(?P<metric>{metric_alt})"
         rf"\s*(?P<op>{op_alt})"
         rf"\s*(?P<value>-?\d+(?:\.\d+)?)\s*(?P<pct>%|percent|pct)?",
@@ -111,18 +114,51 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if not op:
             continue
         value = float(m.group("value"))
-        # Bare "growth more than 30" is a percent cut
-        if metric == "ams_growth" or m.group("pct"):
-            if metric in {"ams_growth", "vs_ams", "yoy"} or m.group("pct"):
-                if metric == "volume" and m.group("pct"):
-                    pass  # unlikely
-                elif metric in {"ams_growth", "vs_ams", "yoy"} or (
-                    m.group("pct") and metric != "ams"
-                ):
-                    pass
         entry = {"metric": metric, "op": op, "value": value}
         if entry not in found:
             found.append(entry)
+
+    # Reversed: "less than 10 ams" / "more than 20 volume"
+    rev = re.compile(
+        rf"(?:(?:customers?|parties?|rows?)\s+with\s+)?"
+        rf"(?P<op>{op_alt})"
+        rf"\s*(?P<value>-?\d+(?:\.\d+)?)\s*(?P<pct>%|percent|pct)?\s*"
+        rf"(?P<metric>{metric_alt})",
+        flags=re.I,
+    )
+    for m in rev.finditer(t):
+        metric = _resolve_metric_name(m.group("metric"))
+        if not metric:
+            continue
+        op = _OPS.get(m.group("op").lower().strip())
+        if not op:
+            continue
+        value = float(m.group("value"))
+        entry = {"metric": metric, "op": op, "value": value}
+        if entry not in found:
+            found.append(entry)
+
+    # "exclude … less than 10 ams" → keep rows with AMS >= 10 (invert the cut)
+    if re.search(
+        r"\b(exclude|excluding|without|drop|remove|except|filter\s+out)\b",
+        t,
+    ) and re.search(r"\b(less\s+than|below|under|at\s+most|or\s+less|<=|<)\b", t):
+        inverted: list[dict[str, Any]] = []
+        flip = {"lt": "gte", "lte": "gt"}
+        for entry in found:
+            op = str(entry.get("op") or "")
+            if op in flip:
+                inverted.append(
+                    {
+                        "metric": entry["metric"],
+                        "op": flip[op],
+                        "value": entry["value"],
+                    }
+                )
+            else:
+                inverted.append(entry)
+        if inverted:
+            found = inverted
 
     # "grew more than 30%" / "dropped more than 20%" — default AMS growth,
     # but honor explicit yoy/mom in the same sentence.
@@ -149,6 +185,37 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if entry not in found:
             found.append(entry)
     return found
+
+
+def looks_like_metric_threshold_phrase(text: str) -> bool:
+    """True when a fragment is an AMS/volume cut, not a customer name."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if not re.search(
+        r"\b(ams|volume|growth|yoy|mom|average\s+monthly)\b",
+        raw,
+        flags=re.I,
+    ):
+        return False
+    if not re.search(
+        r"\b(less\s+than|more\s+than|greater\s+than|below|above|under|"
+        r"over|at\s+least|at\s+most|>|<|>=|<=)\b",
+        raw,
+        flags=re.I,
+    ):
+        return False
+    return bool(parse_metric_filters(raw))
+
+
+def looks_metric_threshold_exclude(user_text: str) -> bool:
+    """True when 'exclude … less than 10 ams' is a metric cut, not a party name."""
+    return looks_like_metric_threshold_phrase(user_text) and bool(
+        re.search(
+            r"\b(exclude|excluding|without|drop|remove|except|filter\s+out)\b",
+            (user_text or "").lower(),
+        )
+    )
 
 
 def merge_metric_filters(

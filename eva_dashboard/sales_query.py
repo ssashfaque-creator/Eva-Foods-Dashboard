@@ -1936,6 +1936,9 @@ def _trend_table(
     client_type: str | None = None,
     client_types: list[str] | None = None,
     party: str | None = None,
+    limit: int | None = None,
+    metric_filters: list[dict[str, Any]] | None = None,
+    keep_zero_volume: bool = False,
 ) -> dict[str, Any]:
     as_of = date.fromisoformat(period["date_to"])
     ams = _ams_by_row(
@@ -1978,8 +1981,14 @@ def _trend_table(
         if not prior_year_frame.empty and row_dim in prior_year_frame.columns
         else {}
     )
+    # Default: only parties with volume in the asked period (no AMS-only
+    # zero-sale rows). Lost-party asks can keep zeros via keep_zero_volume.
+    if keep_zero_volume:
+        key_set = set(volume) | set(ams) | set(prior_year)
+    else:
+        key_set = {k for k, v in volume.items() if float(v or 0) > 0}
     keys = sorted(
-        set(volume) | set(ams) | set(prior_year),
+        key_set,
         key=lambda k: (-float(volume.get(k, 0.0)), str(k)),
     )
     partial = bool(period.get("partial_month"))
@@ -2017,6 +2026,16 @@ def _trend_table(
         entry["yoy_pct"] = _yoy_pct(vol, prior_v)
         rows.append(entry)
 
+    if metric_filters:
+        from eva_dashboard.metric_filters import apply_metric_filters
+
+        rows = apply_metric_filters(rows, metric_filters)
+
+    truncated = False
+    if limit and int(limit) > 0 and len(rows) > int(limit):
+        rows = rows[: int(limit)]
+        truncated = True
+
     columns = [row_dim, "volume_mt", "ams_mt"]
     if partial:
         columns.extend(["expected_mt", "pct_vs_expected"])
@@ -2052,6 +2071,25 @@ def _trend_table(
         )
     except Exception:  # noqa: BLE001
         prior_label = "same month last year"
+    hint_bits = [
+        "Trend table: Volume (MT), AMS, "
+        + (
+            "Expected (= days_elapsed/days_in_month × AMS), % vs Expected"
+            if partial
+            else "% vs AMS"
+        )
+        + f", last year ({prior_label}), YoY %; zero-sale rows omitted"
+        + ("" if keep_zero_volume else "")
+        + "; includes Total footer row."
+    ]
+    if truncated and limit:
+        hint_bits.append(f"Showing top {int(limit)} by volume.")
+    if metric_filters:
+        from eva_dashboard.metric_filters import metric_filters_blurb
+
+        cut = metric_filters_blurb(metric_filters)
+        if cut:
+            hint_bits.append(cut)
     return {
         "row_dimension": row_dim,
         "partial_month": partial,
@@ -2065,15 +2103,9 @@ def _trend_table(
         ),
         "columns": columns,
         "rows": rows,
-        "markdown_hint": (
-            "Trend table: Volume (MT), AMS, "
-            + (
-                "Expected (= days_elapsed/days_in_month × AMS), % vs Expected"
-                if partial
-                else "% vs AMS"
-            )
-            + f", last year ({prior_label}), YoY %; includes Total footer row."
-        ),
+        "truncated": truncated,
+        "limit": int(limit) if truncated and limit else None,
+        "markdown_hint": " ".join(hint_bits),
     }
 
 
@@ -2293,6 +2325,7 @@ def query_sales(
     compare: str | None = None,
     active_only: bool = False,
     limit: int | None = None,
+    metric_filters: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -2624,6 +2657,43 @@ def query_sales(
     else:
         primary = _build_pivot(frame, row_dim, col, row_groups=groups or None)
 
+    # AMS / volume thresholds on party month grids (after AMS enrich)
+    if metric_filters and row_dim == "party" and primary:
+        from eva_dashboard.metric_filters import apply_metric_filters
+
+        body = [
+            r for r in (primary.get("rows") or [])
+            if str(r.get("row_kind") or "") != "total"
+        ]
+        # Alias AMS column → ams_mt for the shared filter helper
+        for r in body:
+            if "ams_mt" not in r and r.get(AMS_3_COL) is not None:
+                r["ams_mt"] = r.get(AMS_3_COL)
+            if "volume_mt" not in r and r.get("Total") is not None:
+                r["volume_mt"] = r.get("Total")
+        kept = apply_metric_filters(body, metric_filters)
+        for r in kept:
+            r.pop("ams_mt", None)
+            r.pop("volume_mt", None)
+        if len(kept) != len(body):
+            columns = list(primary.get("columns") or [])
+            col_tot: dict[str, float] = {str(c): 0.0 for c in columns}
+            for entry in kept:
+                for c in columns:
+                    try:
+                        col_tot[str(c)] = float(col_tot[str(c)]) + float(
+                            entry.get(str(c)) or 0
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            col_tot = {k: mt_round(v) for k, v in col_tot.items()}
+            new_footer: dict[str, Any] = {row_dim: "Total", "row_kind": "total"}
+            new_footer.update(col_tot)
+            primary = dict(primary)
+            primary["rows"] = kept + [new_footer]
+            primary["column_totals"] = col_tot
+            primary["grand_total_mt"] = float(col_tot.get("Total") or 0)
+
     # Spoken "top 5" / limit — keep highest-volume rows; footer shows shown total.
     if limit and int(limit) > 0 and row_dim in {"party", "city", "product"}:
         primary = _limit_matrix_rows(primary, int(limit), row_key=row_dim)
@@ -2692,6 +2762,7 @@ def query_sales(
         "row_dimension": row_dim,
         "column_dimension": col,
         "excludes": ex_map or None,
+        "metric_filters": list(metric_filters or []) or None,
         "matrix": primary,
         "table_spec": table_spec,
     }
@@ -2799,6 +2870,8 @@ def query_sales(
             client_type=ctype,
             client_types=ctypes_f,
             party=party_f,
+            limit=limit,
+            metric_filters=list(metric_filters or []) or None,
         )
         result["mode"] = "trend"
         result["trend"] = trend
@@ -2831,6 +2904,8 @@ def query_sales(
             client_type=ctype,
             client_types=ctypes_f,
             party=party_f,
+            limit=limit,
+            metric_filters=list(metric_filters or []) or None,
         )
         result["mode"] = "analytical"
         result["city_matrix"] = city_matrix
@@ -3535,6 +3610,12 @@ def render_sales_markdown(result: dict[str, Any]) -> str:
         result.get("business_units"),
         (result.get("table_spec") or {}).get("excludes") or result.get("excludes"),
     )
+    if result.get("metric_filters"):
+        from eva_dashboard.metric_filters import metric_filters_blurb
+
+        cut = metric_filters_blurb(result.get("metric_filters"))
+        if cut:
+            blurb = f"{blurb} · {cut}"
     parts = [f"Sales for {blurb} (MT).\n"]
 
     if result.get("mode") == "yoy":
