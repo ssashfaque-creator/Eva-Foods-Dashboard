@@ -1180,7 +1180,7 @@ _ROW_HEADER_LABELS = {
     "city": "City",
     "zone": "Zone",
     "client_type": "Client Type",
-    "party": "Distributor",
+    "party": "Customer",
 }
 
 
@@ -4830,7 +4830,7 @@ def query_price_fetch_table(
             )
 
     dim_labels = {
-        "party": "Party",
+        "party": "Customer",
         "product": "SKU",
         "packing_category": "Packing",
         "oil_type": "Oil Type",

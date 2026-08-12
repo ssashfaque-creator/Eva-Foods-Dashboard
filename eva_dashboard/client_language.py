@@ -488,6 +488,25 @@ def _sales_stats_for_parties(
     if not clean:
         return {}
     placeholders = ",".join("?" for _ in clean)
+    # Anchor AMS window to live max sales date
+    max_row = conn.execute("SELECT MAX(date) AS d FROM sales").fetchone()
+    max_date = str((max_row["d"] if max_row else None) or "")[:10]
+    ams_from = None
+    if max_date and len(max_date) >= 7:
+        try:
+            from datetime import date as _date
+
+            y, m, _ = (int(x) for x in max_date.split("-")[:3])
+            # Trailing 3 calendar months ending on max_date's month
+            end = _date(y, m, 1)
+            start_m = m - 2
+            start_y = y
+            while start_m <= 0:
+                start_m += 12
+                start_y -= 1
+            ams_from = f"{start_y:04d}-{start_m:02d}-01"
+        except (TypeError, ValueError):
+            ams_from = None
     rows = conn.execute(
         f"""
         SELECT s.party,
@@ -499,6 +518,13 @@ def _sales_stats_for_parties(
                ROUND(SUM(
                  CASE WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty ELSE 0 END
                ), 3) AS mt_total,
+               ROUND(SUM(
+                 CASE
+                   WHEN ? IS NOT NULL AND s.date >= ? AND s.date <= ?
+                        AND COALESCE(s.mt_qty, 0) <> 0
+                   THEN s.mt_qty ELSE 0
+                 END
+               ) / 3.0, 3) AS ams_3m,
                COUNT(*) AS sales_lines,
                MIN(s.date) AS first_sale,
                MAX(s.date) AS last_sale
@@ -509,7 +535,7 @@ def _sales_stats_for_parties(
         WHERE lower(trim(s.party)) IN ({placeholders})
         GROUP BY s.party
         """,
-        [n.lower() for n in clean],
+        [ams_from, ams_from, max_date or ams_from] + [n.lower() for n in clean],
     ).fetchall()
     out: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -518,6 +544,7 @@ def _sales_stats_for_parties(
             continue
         out[name.lower()] = {
             "mt_total": float(row["mt_total"] or 0),
+            "ams_3m": float(row["ams_3m"] or 0) if ams_from else None,
             "sales_lines": int(row["sales_lines"] or 0),
             "first_sale": row["first_sale"],
             "last_sale": row["last_sale"],
@@ -651,6 +678,7 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             if not bit:
                 continue
             entry["mt_total"] = bit["mt_total"]
+            entry["ams_3m"] = bit.get("ams_3m")
             entry["sales_lines"] = bit["sales_lines"]
             entry["first_sale"] = bit["first_sale"]
             entry["last_sale"] = bit["last_sale"]
@@ -665,9 +693,24 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             if not entry.get("city"):
                 entry["city"] = bit.get("city")
 
+    try:
+        from eva_dashboard.geo import zone_for_city as _zone_for_city
+    except Exception:  # noqa: BLE001
+        _zone_for_city = None  # type: ignore[assignment]
+    for entry in candidates.values():
+        if entry.get("zone"):
+            continue
+        if _zone_for_city:
+            z = _zone_for_city(entry.get("city_filter") or entry.get("city"))
+            if z:
+                entry["zone"] = z
+
     ranked = sorted(
         candidates.values(),
-        key=lambda r: (-float(r["match_score"]), -float(r.get("mt_total") or 0)),
+        key=lambda r: (
+            -float(r["match_score"]),
+            -float(r.get("ams_3m") or r.get("mt_total") or 0),
+        ),
     )[: max(1, min(int(limit or 10), 25))]
 
     strong = [r for r in ranked if float(r["match_score"]) >= 0.72]
@@ -682,19 +725,29 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
             entry["match_score"] = round(float(score), 3)
             show.append(entry)
 
+    for i, r in enumerate(show, 1):
+        r["ordinal"] = i
+
     lines = [
         f"Client search for **{cleaned}** — {len(show)} close match(es):\n",
-        "| Client | Client Type | City-Filter | City | MT (all time) | Score |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| # | Client | Client Type | Zone | City-Filter | City | AMS (3m) | Score |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in show:
+        ams = r.get("ams_3m")
+        if isinstance(ams, (int, float)):
+            ams_s = f"{float(ams):.3f}".rstrip("0").rstrip(".")
+        else:
+            ams_s = "—"
         lines.append(
-            "| {client} | {ctype} | {cf} | {city} | {mt} | {score} |".format(
+            "| {n} | {client} | {ctype} | {zone} | {cf} | {city} | {ams} | {score} |".format(
+                n=r.get("ordinal"),
                 client=str(r.get("client") or "").replace("|", "/"),
                 ctype=str(r.get("client_type") or "—").replace("|", "/"),
+                zone=str(r.get("zone") or "—").replace("|", "/"),
                 cf=str(r.get("city_filter") or "—").replace("|", "/"),
                 city=str(r.get("city") or "—").replace("|", "/"),
-                mt=r.get("mt_total") if r.get("mt_total") is not None else "—",
+                ams=ams_s,
                 score=r.get("match_score"),
             )
         )
@@ -707,7 +760,14 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
     elif all(float(r.get("match_score") or 0) < 0.45 for r in show):
         lines.insert(
             1,
-            "_No strong match — did you mean one of these? Reply with the exact name._\n",
+            "_No strong match — did you mean one of these? Reply with the exact "
+            "name or say `first 2` / `#1 and #2`._\n",
+        )
+    else:
+        lines.append("")
+        lines.append(
+            "_Tip: follow up with `first 2` or `#1 and #2` to pull volumes for "
+            "those matches (without unrelated city/channel filters)._"
         )
 
     return {
@@ -720,8 +780,8 @@ def lookup_party(query: str, *, limit: int = 10) -> dict[str, Any]:
         "answer_markdown": "\n".join(lines) + "\n",
         "response_instructions": (
             "REQUIRED: Reply with `answer_markdown` verbatim (or expand match details "
-            "without inventing clients). Report client name, client type, city, etc. "
-            "If several matches, ask the user to pick the exact name. "
+            "without inventing clients). Report client name, client type, zone, AMS. "
+            "If several matches, ask the user to pick by number (`first 2`) or exact name. "
             "Do NOT call plan_query again for the same who-is ask."
         ),
     }

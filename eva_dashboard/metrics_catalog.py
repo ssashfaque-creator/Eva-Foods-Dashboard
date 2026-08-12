@@ -207,6 +207,20 @@ def apply_metric_synonyms_to_spec(
     # (so "last price … all SKUs … all channels" keeps product AND adds client_type).
     rows = list(out.get("row_dimensions") or [])
     dims = resolve_dimensions_from_text(text)
+    # Exclude-only asks must not inject party grain from "al shaheer" tokens
+    t_l = (text or "").lower()
+    exclude_ask = bool(
+        re.search(r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out)\b", t_l)
+    )
+    explicit_party = bool(
+        re.search(
+            r"\b(customer|party|distributor)[- ]?wise\b|"
+            r"\bby\s+(customers?|parties|distributors?)\b",
+            t_l,
+        )
+    )
+    if exclude_ask and not explicit_party:
+        dims = [d for d in dims if d != "party"]
     outer_merge = {"city", "zone", "client_type", "party", "business_unit"}
     for d in dims:
         if d == "month":

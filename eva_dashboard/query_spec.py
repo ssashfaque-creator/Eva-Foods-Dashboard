@@ -517,6 +517,11 @@ def build_query_state(
                 or (party_spec or {}).get("months_back")
             ),
             "excludes": qs.get("excludes") or (table_spec or {}).get("excludes"),
+            "matches": (
+                (party_spec or {}).get("matches")
+                or (table_spec or {}).get("matches")
+                or qs.get("matches")
+            ),
         }
     )
     if not state:
@@ -569,6 +574,7 @@ def prior_context_from_query_state(
             "period": state.get("period"),
             "excludes": state.get("excludes"),
             "operation": state.get("operation"),
+            "matches": state.get("matches"),
         }
     )
 
@@ -600,6 +606,7 @@ def prior_context_payload(
                 "period_phrase": party_spec.get("period_phrase"),
                 "period": party_spec.get("period"),
                 "business_units": list(party_spec.get("business_units") or []) or None,
+                "matches": party_spec.get("matches"),
             }
         )
     if table_spec:
@@ -623,6 +630,7 @@ def prior_context_payload(
                 "period": table_spec.get("period"),
                 "compare": table_spec.get("compare"),
                 "excludes": table_spec.get("excludes"),
+                "matches": table_spec.get("matches"),
             }
         )
     if price_spec:

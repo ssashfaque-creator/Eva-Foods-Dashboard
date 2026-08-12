@@ -1947,6 +1947,12 @@ _STRUCT_DIM_PHRASES: list[tuple[str, str]] = [
     ("months", "month"),
     ("month", "month"),
     ("bu", "business_unit"),
+    ("customers", "party"),
+    ("customer", "party"),
+    ("parties", "party"),
+    ("party", "party"),
+    ("distributors", "party"),
+    ("distributor", "party"),
 ]
 
 
@@ -2167,11 +2173,29 @@ def resolve_remove_request(
     dim_name = _phrase_as_struct_dim(phrase)
     pf = dict(prior_spec.get("filters") or {})
 
+    # Explicit "… layer" language → structural grain drop even when that dim
+    # is not currently active (fall back to business_unit).
+    layer_ask = bool(re.search(r"\blayers?\b", text or "", flags=re.I))
+    hide_customers = bool(
+        re.search(
+            r"\b("
+            r"don'?t\s+show\s+(the\s+)?(customers?|parties|distributors?)|"
+            r"include\s+distributors?\s+but\s+don'?t\s+show\s+customers?"
+            r")\b",
+            text or "",
+            flags=re.I,
+        )
+    )
+
     # --- Structural layer removal ---
-    if dim_name and dim_name in set(struct["row_groups"]) | {
+    active_dims = set(struct["row_groups"]) | {
         struct["row_dimension"],
         struct["column_dimension"],
-    }:
+    }
+    if dim_name and (
+        dim_name in active_dims
+        or ((layer_ask or hide_customers) and dim_name == "party")
+    ):
         out: dict[str, Any] = {
             "mode": "remove_layer",
             "dimension": dim_name,
@@ -2184,7 +2208,9 @@ def resolve_remove_request(
         }
         if dim_name in out["row_groups"]:
             out["row_groups"] = [g for g in out["row_groups"] if g != dim_name]
-        elif dim_name == struct["row_dimension"]:
+        elif dim_name == struct["row_dimension"] or (
+            dim_name == "party" and dim_name not in active_dims
+        ):
             # Drop leaf row dim → fall back under remaining groups or auto grain
             if out["row_groups"]:
                 # Promote last group to leaf if we only had groups+leaf

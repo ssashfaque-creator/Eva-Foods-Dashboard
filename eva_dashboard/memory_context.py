@@ -39,6 +39,7 @@ class MemoryContext:
     months_back: int | None = None
     excludes: dict[str, Any] = field(default_factory=dict)
     operation: str | None = None
+    matches: list[dict[str, Any]] = field(default_factory=list)
     source: str = "none"
     last_user_text: str = ""
 
@@ -90,6 +91,7 @@ class MemoryContext:
             "excludes": dict(self.excludes) or None,
             "operation": self.operation,
             "intent_hint": self.operation,
+            "matches": list(self.matches) or None,
         }
 
     def to_prompt_block(self) -> str:
@@ -182,6 +184,11 @@ class MemoryContext:
                 or ""
             ).strip()
             or None,
+            matches=[
+                m
+                for m in (prior.get("matches") or [])
+                if isinstance(m, dict)
+            ],
             source=str(prior.get("source") or "prior"),
             last_user_text=last_user_text or "",
         )

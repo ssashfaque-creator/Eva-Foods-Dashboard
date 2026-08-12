@@ -13,7 +13,7 @@ set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
 BRANCH="${EVA_UPDATE_BRANCH:-cursor/phase1-single-planner-50eb}"
-MIN_VERSION="${EVA_MIN_VERSION:-1.3.2}"
+MIN_VERSION="${EVA_MIN_VERSION:-1.3.3}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 
 case "$TARGET" in

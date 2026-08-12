@@ -421,8 +421,12 @@ _WISE_PATTERNS: list[tuple[str, str]] = [
         "packing_category",
     ),
     (
-        r"\b(party[- ]?wise|distributor[- ]?wise|by\s+part(y|ies)|"
-        r"by\s+distributors?)\b",
+        r"\b(party[- ]?wise|distributor[- ]?wise|customer[- ]?wise|"
+        r"by\s+part(y|ies)|by\s+distributors?|by\s+customers?|"
+        r"customer\s+break(?:up|down)?|party\s+break(?:up|down)?|"
+        r"break(?:up|down)?\s+customer[- ]?wise|"
+        r"break(?:up|down)?\s+(by\s+)?customers?"
+        r")\b",
         "party",
     ),
 ]
@@ -471,6 +475,36 @@ def _spoken_wise_dimension(user_text: str) -> str | None:
         if leaf in dims:
             return leaf
     return dims[0]
+
+
+def _looks_drop_party_grain(user_text: str) -> bool:
+    """True when the user wants customers off the table (grain), not channel exclude.
+
+    Examples: 'remove the distributor layer', 'don't show customers',
+    'overall by business unit I don't need customer names',
+    'include distributors but don't show customers in the table'.
+    """
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"remove\s+(the\s+)?(distributor|customer|party)\s+layer|"
+            r"drop\s+(the\s+)?(distributor|customer|party)\s+layer|"
+            r"don'?t\s+(need|show|want)\s+(the\s+)?(individual\s+)?"
+            r"(customer|party|distributor)\s*names?|"
+            r"don'?t\s+show\s+(the\s+)?(customers?|parties|distributors?)"
+            r"(\s+in\s+(the\s+)?table)?|"
+            r"without\s+(showing\s+)?(individual\s+)?"
+            r"(customer|party|distributor)\s+names?|"
+            r"no\s+(customer|party|distributor)\s+(names?|column|layer|break)|"
+            r"overall\s+by\s+business\s+unit|"
+            r"include\s+distributors?\s+but\s+don'?t\s+show\s+customers?"
+            r")\b",
+            t,
+        )
+    )
 
 
 def _looks_yoy_compare(user_text: str) -> bool:
@@ -550,6 +584,82 @@ def _coerce_vocab_from_user_text(
     )
     nest_leaf_dims = {"packing_category", "product", "business_unit", "oil_type"}
     outer_dims = {"city", "zone", "client_type", "party", "business_unit"}
+
+    # --- Drop party/customer grain (not channel exclude) ---
+    # "remove distributor layer" / "don't show customers" / "overall by BU"
+    if _looks_drop_party_grain(user_text):
+        base_rows = list(prior_rows) if prior_rows else list(rows)
+        rows = [r for r in base_rows if r != "party"]
+        if not rows:
+            rows = ["business_unit"]
+        # Do not turn this into Eva Distributors exclude
+        if prior:
+            if out.get("base") != "prior":
+                out["base"] = "prior"
+                out["state_action"] = out.get("state_action") or "modify"
+            out["_clear_omitted"] = False
+            # Inherit metrics/cols from prior when omitted
+            if not metrics and prior.get("metrics"):
+                metrics = list(prior.get("metrics") or [])
+            prior_cols = list(
+                prior.get("column_dimensions")
+                or (
+                    [prior.get("column_dimension")]
+                    if prior.get("column_dimension")
+                    else []
+                )
+            )
+            if not cols and prior_cols:
+                cols = [c for c in prior_cols if c]
+
+    # --- Ordinal picks from prior who-is matches ("first 2", "#1 and #2") ---
+    from eva_dashboard.ordinal_parties import (
+        looks_ordinal_party_followup,
+        resolve_ordinal_party_names,
+    )
+
+    if prior and looks_ordinal_party_followup(user_text):
+        picked = resolve_ordinal_party_names(user_text, prior)
+        if not picked and re.search(r"\bboth\b", t):
+            # "both" / "those matches" → first two when available
+            from eva_dashboard.ordinal_parties import matches_from_prior
+
+            ms = matches_from_prior(prior)
+            picked = [
+                str(m.get("client") or m.get("party") or "").strip()
+                for m in ms[:2]
+                if str(m.get("client") or m.get("party") or "").strip()
+            ]
+        if picked:
+            filters.pop("party", None)
+            filters.pop("party_ilike", None)
+            if len(picked) == 1:
+                filters["party"] = picked[0]
+                filters.pop("parties", None)
+            else:
+                filters["parties"] = picked
+            rows = ["party"]
+            # Who-is follow-ups must not keep unrelated sticky city/channel
+            # from a previous Imtiaz/price turn unless the user restated them.
+            spoken_city = extract_cities_from_text(user_text)
+            spoken_ch = extract_all_client_types_from_text(user_text)
+            if not spoken_city:
+                filters.pop("city", None)
+                filters.pop("cities", None)
+                if "city" not in clear:
+                    clear.append("city")
+            if not spoken_ch:
+                filters.pop("client_type", None)
+                filters.pop("client_types", None)
+                if "client_type" not in clear:
+                    clear.append("client_type")
+            out["base"] = "prior"
+            out["state_action"] = "modify"
+            out["_clear_omitted"] = False
+            if not metrics:
+                metrics = ["volume", "ams"]
+            if "month" not in cols:
+                cols = ["month"]
 
     # --- Multi-wise in one ask: "all SKUs … for all channels" → Channel × SKU ---
     # Do this before single-leaf nest logic so a mistaken party×SKU plan cannot win.
@@ -816,6 +926,15 @@ def _coerce_vocab_from_user_text(
                 cols = ["month"]
                 metrics = metrics or ["volume", "ams"]
 
+        # Grain-only follow-ups (customer-wise / city-wise / …) must keep prior
+        # filters (city, Eva BUs, …) — promote base=prior when prior exists.
+        if prior and leaf and out.get("base") != "prior":
+            out["base"] = "prior"
+            out["state_action"] = out.get("state_action") or "modify"
+            if out.get("_clear_omitted"):
+                out["_clear_omitted"] = False
+                out["clear"] = list(out.get("clear") or clear or [])
+
     # Pure cost-factor asks stay on factor_costs (do not force Price Fetch metric)
     if not _is_factor_only_ask(t, metrics=metrics, flags=out.get("price_flags")) and re.search(
         r"price\s*fetch|oil\s*price\s*fetched|apply\s+the\s+cost\s+factor|"
@@ -872,7 +991,7 @@ def _coerce_vocab_from_user_text(
 
     # --- Remove / exclude values (same-sentence OR follow-up) ---
     # "show Lahore Eva sales but exclude al shaheer" must EXCLUDE, never filter TO.
-    if re.search(r"\b(remove|exclude|without|drop|hide|filter\s+out)\b", t):
+    if re.search(r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\b", t):
         spoken_ex = _resolve_spoken_excludes(user_text)
         if spoken_ex:
             excludes = dict(out.get("excludes") or {})
@@ -890,17 +1009,17 @@ def _coerce_vocab_from_user_text(
                         bucket.append(v)
                 excludes[dim] = bucket
             out["excludes"] = excludes
-            # Keep prior table shape ONLY for short exclude follow-ups
-            # ("exclude al shaheer"), not full restated asks
-            # ("show me Eva sales in lahore but exclude al shaheer").
-            exclude_followup = not re.search(
-                r"\b("
-                r"show|give\s+me|sales|volume|month\s*-?\s*wise|"
-                r"last\s+\d+|ytd|mtd|this\s+month"
-                r")\b",
-                t,
+            # Keep prior table shape whenever prior had a grain, unless the user
+            # explicitly asked customer/party-wise. Exclude alone must not flip
+            # BU×month → party×month ("excluding al shaheer").
+            explicit_party_grain = "party" in wise_dims or bool(
+                re.search(
+                    r"\b(customer|party|distributor)[- ]?wise\b|"
+                    r"\bby\s+(customers?|parties|distributors?)\b",
+                    t,
+                )
             )
-            if prior and prior_rows and exclude_followup:
+            if prior and prior_rows and not explicit_party_grain:
                 rows = list(prior_rows)
                 prior_cols = list(
                     prior.get("column_dimensions")
@@ -917,6 +1036,7 @@ def _coerce_vocab_from_user_text(
                     metrics = prior_mets
                 if out.get("base") != "prior":
                     out["base"] = "prior"
+                    out["state_action"] = out.get("state_action") or "modify"
                 out["_clear_omitted"] = False
             # Strip INCLUDE party filters that collide with excludes
             stripped = _strip_conflicting_party_includes(
@@ -1628,23 +1748,38 @@ def execute_query_spec(
             ents = list(spec.get("extracted_entities") or [])
             q = ents[0] if ents else ""
         result = lookup_party(str(q), limit=int(spec.get("limit") or 10))
-        # Single strong match → stamp sticky party for follow-ups
+        # Stamp matches for ordinal follow-ups ("first 2", "#1 and #2")
         matches = list(result.get("matches") or [])
+        result["party_spec"] = {
+            "kind": "party_lookup",
+            "matches": matches,
+            "filters": {},
+        }
+        # Single strong match → also stamp sticky party for follow-ups
         if len(matches) == 1 and float(matches[0].get("match_score") or 0) >= 0.72:
             name = str(matches[0].get("client") or "").strip()
             if name:
                 result["party"] = name
-                result["party_spec"] = {
-                    "kind": "party_lookup",
-                    "filters": {"party": name},
-                }
+                result["party_spec"]["filters"] = {"party": name}
                 result["table_spec"] = {
                     "filters": {"party": name},
                     "row_dimension": "party",
                     "row_dimensions": ["party"],
                     "column_dimensions": ["month"],
                     "metrics": ["volume", "ams"],
+                    "matches": matches,
                 }
+        elif matches:
+            # Multi-match: keep matches on table_spec so memory can resolve ordinals
+            result["table_spec"] = {
+                "filters": {},
+                "row_dimension": "party",
+                "row_dimensions": ["party"],
+                "column_dimensions": ["month"],
+                "metrics": ["volume", "ams"],
+                "matches": matches,
+                "kind": "party_lookup",
+            }
     elif operation == "party_profile" or intent == "party_profile":
         q = (
             spec.get("party_query")

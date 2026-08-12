@@ -68,6 +68,99 @@
       }
     },
     {
+      "id": "eva-sales-lahore",
+      "user_text": "show me Eva sales in lahore",
+      "tags": ["lahore", "eva", "trend"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"]
+      }
+    },
+    {
+      "id": "customer-wise-keep-filters",
+      "user_text": "show me a breakup customer wise",
+      "tags": ["party", "followup", "customer"],
+      "plan": {
+        "state_action": "modify",
+        "context_handling": "prior",
+        "clear_filters": [],
+        "row_dimensions": ["party"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {}
+      },
+      "prior": {
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+        "row_dimensions": ["business_unit"]
+      },
+      "notes": "Keep city + Eva BUs; party grain only."
+    },
+    {
+      "id": "exclude-shaheer-keep-bu-grain",
+      "user_text": "show me Eva sales in lahore excluding al shaheer",
+      "tags": ["exclude", "lahore", "eva"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+        "excludes": {"party_like": ["al shaheer"]}
+      },
+      "notes": "Exclude must not flip grain to party."
+    },
+    {
+      "id": "imtiaz-last-price-sku-pf",
+      "user_text": "what's the last price we sold to Imtiaz for all sku with the price fetch",
+      "tags": ["last_price", "imtiaz", "sku", "price_fetch"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit", "product"],
+        "column_dimensions": [],
+        "metrics": ["last_price", "price_fetch"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"client_type": "Imtiaz Store"}
+      }
+    },
+    {
+      "id": "drop-party-layer",
+      "user_text": "include distributors but don't show customers in the table",
+      "tags": ["layer", "party", "followup"],
+      "plan": {
+        "state_action": "modify",
+        "context_handling": "prior",
+        "clear_filters": [],
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {}
+      },
+      "prior": {
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+        "row_dimensions": ["business_unit", "party"]
+      },
+      "notes": "Drop party grain; do NOT exclude Eva Distributors channel."
+    },
+    {
       "id": "eva-bu-lahore-keep-city",
       "user_text": "how are Eva consumer and Eva bulk sales in lahore",
       "tags": ["lahore", "business_unit", "followup", "city"],
