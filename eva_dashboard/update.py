@@ -32,7 +32,7 @@ CANONICAL_DIRNAMES = (
     "Eva-Foods-Dashboard-new",
     "Eva-Foods-Dashboard",
 )
-MIN_VERSION = "1.2.5"
+MIN_VERSION = "1.2.6"
 BRANCH_MARKER = ".eva-install-branch"
 
 # Never overwrite these when applying an update

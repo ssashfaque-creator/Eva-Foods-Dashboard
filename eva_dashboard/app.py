@@ -567,8 +567,8 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.info(
-        f"**Engine v{__version__}** — who-is fuzzy match, exclude ID preview, "
-        f"AMS/YoY/MoM filters. App file: `{Path(__file__).resolve()}`"
+        f"**Engine v{__version__}** — fast exclude follow-ups (no planner wait), "
+        f"who-is + AMS/YoY/MoM filters. App file: `{Path(__file__).resolve()}`"
     )
     _ver = str(__version__)
     _path = str(Path(__file__).resolve()).lower()

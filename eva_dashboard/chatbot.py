@@ -2115,7 +2115,8 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
     if pack:
         return ("packing_category", pack)
 
-    # Exact / fuzzy party name from clients master (free-text exclude)
+    # Party exclude: exact master hit, else party_like fragment.
+    # Never run fuzzy full-client scans here — that hung "remove X from this".
     try:
         from eva_dashboard.sales_query import _clients_lookup, _norm_party_key
 
@@ -2123,35 +2124,13 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
         meta = _clients_lookup().get(needle)
         if meta and meta.get("client"):
             return ("party", str(meta["client"]))
-        # Fuzzy: substring / token overlap against master
-        # (e.g. "al shaheer" → AL SHAHEER CORPORATION LIMITED)
-        from eva_dashboard.party_match import list_party_matches, resolve_party_filter
-
-        resolved = resolve_party_filter(raw, limit=8)
-        if resolved.get("party"):
-            return ("party", str(resolved["party"]))
-        matches = list(resolved.get("matches") or list_party_matches(raw, limit=8))
-        if len(matches) == 1:
-            return ("party", matches[0])
-        if matches:
-            qn = needle
-            tight = [
-                m
-                for m in matches
-                if qn in _norm_party_key(m) or _norm_party_key(m) in qn
-            ]
-            if len(tight) == 1:
-                return ("party", tight[0])
-            # Family / multi-branch → fragment exclude (LIKE %al shaheer%)
-            return ("party_like", raw.strip())
-        # Unknown spoken name — still exclude via fragment so the table
-        # grain stays and matching parties drop out of the data.
         if len(needle) >= 3 and not re.search(
             r"\b(sales?|volume|data|wise|month|ams)\b", key
         ):
             return ("party_like", raw.strip())
     except Exception:  # noqa: BLE001
-        pass
+        if len(str(raw).strip()) >= 3:
+            return ("party_like", str(raw).strip())
     return None
 
 
@@ -5344,6 +5323,102 @@ def _looks_sales_matrix(text: str) -> bool:
     return any(k in t for k in sales_keys)
 
 
+def _looks_short_exclude_followup(text: str) -> bool:
+    """True for short 'remove/exclude X from this table' follow-ups.
+
+    These must not wait on an OpenAI plan_query round — prior table_spec is enough.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if not re.search(
+        r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\b",
+        t,
+    ):
+        return False
+    # Explicit follow-up wording
+    if re.search(
+        r"\bfrom\s+(this|the)\s+(data|table|view|result|grid|matrix)\b",
+        t,
+    ):
+        return True
+    # Bare "exclude al shaheer" / "remove metro" — not a restated full ask
+    if re.search(
+        r"\b(show|give|how are|how is|what (?:were|was|are|is)|"
+        r"sales in|last\s+\d+\s+months)\b",
+        t,
+    ):
+        return False
+    # Must have something after the verb
+    return bool(
+        re.search(
+            r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\s+\S+",
+            t,
+        )
+    )
+
+
+def _plan_from_prior_for_exclude(
+    prior_ctx: dict[str, Any],
+    user_text: str,
+) -> dict[str, Any] | None:
+    """Build a complete QuerySpec from prior + spoken excludes (no LLM)."""
+    from eva_dashboard.spoken_constraints import resolve_exclude_map
+
+    excludes = resolve_exclude_map(user_text)
+    if not excludes:
+        return None
+    rows = [r for r in list(prior_ctx.get("row_dimensions") or []) if r]
+    if not rows and prior_ctx.get("row_dimension"):
+        groups = [g for g in list(prior_ctx.get("row_groups") or []) if g]
+        rows = groups + [prior_ctx["row_dimension"]]
+    cols = [c for c in list(prior_ctx.get("column_dimensions") or []) if c]
+    if not cols and prior_ctx.get("column_dimension"):
+        cols = [prior_ctx["column_dimension"]]
+    metrics = [m for m in list(prior_ctx.get("metrics") or []) if m] or [
+        "volume",
+        "ams",
+    ]
+    mb = prior_ctx.get("months_back")
+    period = prior_ctx.get("period") if isinstance(prior_ctx.get("period"), dict) else {}
+    phrase = prior_ctx.get("period_phrase") or period.get("label") or period.get("phrase")
+    if mb or (phrase and re.search(r"last\s+\d+\s+months", str(phrase), re.I)):
+        period_type = "LAST_N_MONTHS"
+        mb = int(mb or 6)
+        if "month" not in cols:
+            cols = ["month"] + [c for c in cols if c != "month"]
+    elif period.get("date_from") and period.get("date_to"):
+        period_type = "CUSTOM_DATE"
+    else:
+        period_type = "LAST_N_MONTHS"
+        mb = int(mb or 6)
+        if "month" not in cols:
+            cols = ["month"]
+    filters = dict(prior_ctx.get("filters") or {})
+    # Exclude follow-up must not keep a sticky INCLUDE of the same party
+    for key in ("party", "parties", "party_ilike"):
+        filters.pop(key, None)
+    plan: dict[str, Any] = {
+        "operation": "pivot",
+        "intent": prior_ctx.get("intent_hint") or "sales_matrix",
+        "row_dimensions": rows or ["business_unit"],
+        "column_dimensions": cols,
+        "metrics": metrics,
+        "period_type": period_type,
+        "months_back": mb,
+        "context_handling": "prior",
+        "base": "prior",
+        "filters": filters,
+        "business_units": list(prior_ctx.get("business_units") or []) or None,
+        "excludes": excludes,
+    }
+    if period:
+        plan["period"] = period
+    if phrase:
+        plan["period_phrase"] = phrase
+    return plan
+
+
 def _looks_factual(text: str) -> bool:
     t = (text or "").lower()
     keys = (
@@ -5965,6 +6040,38 @@ def chat_completion(
         if m.get("role") == "user" and m.get("content"):
             last_user = str(m["content"])
             break
+
+    # Fast path: "remove/exclude X from this data" — skip OpenAI plan_query wait
+    if prior_ctx and _looks_short_exclude_followup(last_user):
+        plan = _plan_from_prior_for_exclude(prior_ctx, last_user)
+        if plan:
+            if on_status:
+                on_status("Applying exclude to current table…")
+            try:
+                result = execute_query_spec(
+                    plan,
+                    prior=prior_ctx,
+                    user_text=last_user,
+                )
+            except Exception as exc:  # noqa: BLE001
+                result = {"ok": False, "error": str(exc)}
+            if isinstance(result, dict) and result.get("ok") and result.get(
+                "answer_markdown"
+            ):
+                md = str(result["answer_markdown"])
+                working.append({"role": "assistant", "content": md})
+                _attach_followup_meta(
+                    working,
+                    table_spec=result.get("table_spec")
+                    or result.get("query_spec")
+                    or forced_prior_spec
+                    or prior_table_guess,
+                    price_spec=forced_prior_price_spec or prior_price_guess,
+                    party_spec=forced_prior_party_spec or prior_party_guess,
+                    query_state=result.get("query_state") or prior_state_guess,
+                    export_snapshot=result.get("export_snapshot"),
+                )
+                return md, _prune_session_messages(working)
 
     for round_i in range(MAX_TOOL_ROUNDS):
         if on_status:

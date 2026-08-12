@@ -101,8 +101,17 @@ def family_display_label(query: str, matches: list[str]) -> str:
     return "Customer family (all branches)"
 
 
-def list_party_matches(query: str | None, *, limit: int = 8) -> list[str]:
-    """Return canonical party names matching ``query`` (exact first, then ILIKE)."""
+def list_party_matches(
+    query: str | None,
+    *,
+    limit: int = 8,
+    fuzzy: bool = False,
+) -> list[str]:
+    """Return canonical party names matching ``query`` (exact first, then ILIKE).
+
+    ``fuzzy=True`` enables who-is-style SequenceMatcher fallback (slower).
+    Exclude follow-ups must keep ``fuzzy=False`` (default).
+    """
     q = (query or "").strip()
     if not q:
         return []
@@ -163,12 +172,12 @@ def list_party_matches(query: str | None, *, limit: int = 8) -> list[str]:
                 seen.add(key)
                 matches.append(name)
 
-        # Fuzzy fallback when LIKE misses typos ("al shaher" → Al Shaheer…)
-        if not matches:
+        # Optional fuzzy fallback (who-is only — never for exclude path)
+        if not matches and fuzzy:
             from eva_dashboard.client_language import lookup_party
 
-            fuzzy = lookup_party(q, limit=limit)
-            for m in fuzzy.get("matches") or []:
+            fuzzy_hits = lookup_party(q, limit=limit)
+            for m in fuzzy_hits.get("matches") or []:
                 name = str(m.get("client") or "").strip()
                 key = name.lower()
                 if name and key not in seen and float(m.get("match_score") or 0) >= 0.45:

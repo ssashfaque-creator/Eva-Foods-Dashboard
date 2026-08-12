@@ -105,7 +105,6 @@ def _build_party_polarity_preview(
     Shown *before* the main result so fuzzy names like "al shaheer" are
     confirmed against the live clients/sales master.
     """
-    from eva_dashboard.client_language import lookup_party
     from eva_dashboard.party_match import list_party_matches
     from eva_dashboard.sales_query import resolve_period
 
@@ -116,23 +115,8 @@ def _build_party_polarity_preview(
     matched: list[dict[str, Any]] = []
     seen: set[str] = set()
     for needle in clean:
-        names = list_party_matches(needle, limit=8)
-        if not names:
-            fuzzy = lookup_party(needle, limit=5)
-            for m in fuzzy.get("matches") or []:
-                name = str(m.get("client") or "").strip()
-                if name and name.lower() not in seen:
-                    seen.add(name.lower())
-                    matched.append(
-                        {
-                            "party": name,
-                            "client_type": m.get("client_type"),
-                            "city": m.get("city_filter") or m.get("city"),
-                            "needle": needle,
-                            "score": m.get("match_score"),
-                        }
-                    )
-            continue
+        # Exact/LIKE only — never fuzzy full scan in the exclude preview path
+        names = list_party_matches(needle, limit=8, fuzzy=False)
         for name in names:
             if name.lower() in seen:
                 continue
@@ -140,6 +124,18 @@ def _build_party_polarity_preview(
             matched.append(
                 {
                     "party": name,
+                    "client_type": None,
+                    "city": None,
+                    "needle": needle,
+                    "score": None,
+                }
+            )
+        # No LIKE hits — still show the spoken needle so the user sees intent
+        if not names and needle.lower() not in seen:
+            seen.add(needle.lower())
+            matched.append(
+                {
+                    "party": needle,
                     "client_type": None,
                     "city": None,
                     "needle": needle,
@@ -161,20 +157,22 @@ def _build_party_polarity_preview(
     d0 = period_info.get("date_from") if period_info.get("ok") is not False else None
     d1 = period_info.get("date_to") if period_info.get("ok") is not False else None
 
-    # Volume for matched parties under current scope (before exclude)
+    # Volume for matched parties under current scope (before exclude).
+    # Use LIKE on needles so multi-branch families (al shaheer…) stay fast.
     vol_by: dict[str, float] = {}
     if d0 and d1:
         try:
             from eva_dashboard.db import connect, init_db
 
             init_db()
-            names = [m["party"] for m in matched]
-            placeholders = ",".join("?" for _ in names)
-            params: list[Any] = [d0, d1, *[n.lower() for n in names]]
+            like_bits = " OR ".join(
+                ["lower(s.party) LIKE ?" for _ in clean]
+            )
+            params: list[Any] = [d0, d1, *[f"%{n.lower()}%" for n in clean]]
             where = [
                 "s.date >= ?",
                 "s.date <= ?",
-                f"lower(trim(s.party)) IN ({placeholders})",
+                f"({like_bits})",
             ]
             city = filters.get("city")
             if city:
@@ -182,14 +180,30 @@ def _build_party_polarity_preview(
                     "lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))"
                 )
                 params.append(city)
-            bu = filters.get("business_unit") or (
-                bus[0] if bus and len(bus) == 1 else None
-            )
-            if bu:
+            units = [
+                u
+                for u in (
+                    list(bus or [])
+                    or list(filters.get("business_units") or [])
+                    or (
+                        [filters["business_unit"]]
+                        if filters.get("business_unit")
+                        else []
+                    )
+                )
+                if u
+            ]
+            if len(units) == 1:
                 where.append(
                     "lower(trim(COALESCE(c.category_1, ''))) = lower(trim(?))"
                 )
-                params.append(bu)
+                params.append(units[0])
+            elif len(units) > 1:
+                ph = ",".join("?" for _ in units)
+                where.append(
+                    f"lower(trim(COALESCE(c.category_1, ''))) IN ({ph})"
+                )
+                params.extend(u.lower().strip() for u in units)
             sql = f"""
                 SELECT s.party,
                        ROUND(SUM(CASE WHEN COALESCE(s.mt_qty,0)<>0
@@ -201,10 +215,29 @@ def _build_party_polarity_preview(
                   ON lower(trim(c.product)) = lower(trim(s.product))
                 WHERE {' AND '.join(where)}
                 GROUP BY s.party
+                ORDER BY mt DESC
+                LIMIT 25
             """
             with connect() as conn:
-                for row in conn.execute(sql, params).fetchall():
-                    vol_by[str(row["party"]).lower()] = float(row["mt"] or 0)
+                found_rows = conn.execute(sql, params).fetchall()
+            if found_rows:
+                matched = []
+                seen = set()
+                for row in found_rows:
+                    name = str(row["party"] or "").strip()
+                    if not name or name.lower() in seen:
+                        continue
+                    seen.add(name.lower())
+                    vol_by[name.lower()] = float(row["mt"] or 0)
+                    matched.append(
+                        {
+                            "party": name,
+                            "client_type": None,
+                            "city": None,
+                            "needle": clean[0],
+                            "score": None,
+                        }
+                    )
         except Exception:  # noqa: BLE001
             vol_by = {}
 

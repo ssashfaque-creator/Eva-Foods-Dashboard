@@ -120,6 +120,33 @@ def test_execute_who_is_short_circuits() -> None:
                 os.environ["EVA_DATA_DIR"] = previous
 
 
+def test_exclude_strips_from_this_data_tail() -> None:
+    from eva_dashboard.spoken_constraints import extract_exclude_phrases
+    from eva_dashboard.chatbot import (
+        _looks_short_exclude_followup,
+        _plan_from_prior_for_exclude,
+    )
+
+    assert extract_exclude_phrases("remove al shaheer from this data") == [
+        "al shaheer"
+    ]
+    assert _looks_short_exclude_followup("remove al shaheer from this data")
+    plan = _plan_from_prior_for_exclude(
+        {
+            "filters": {"city": "Lahore"},
+            "business_units": ["Eva Consumer", "Eva Bulk"],
+            "row_dimensions": ["business_unit"],
+            "column_dimensions": ["month"],
+            "metrics": ["volume", "ams"],
+            "months_back": 6,
+        },
+        "remove al shaheer from this data",
+    )
+    assert plan is not None
+    assert (plan.get("excludes") or {}).get("party_like") == ["al shaheer"]
+    assert plan.get("base") == "prior"
+
+
 def test_exclude_shows_identification_preview() -> None:
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:

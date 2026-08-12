@@ -50,8 +50,15 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
         flags=re.IGNORECASE,
     ):
         raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
+        # Strip follow-up tails: "al shaheer from this data/table"
         raw = re.sub(
-            r"\s+(items?|rows?|sales?|volumes?|data|from\s+this|again)\s*$",
+            r"\s+from\s+(this|the)\s+(data|table|view|result|grid|matrix)\s*$",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        ).strip()
+        raw = re.sub(
+            r"\s+(items?|rows?|sales?|volumes?|data|again)\s*$",
             "",
             raw,
             flags=re.IGNORECASE,
