@@ -1,25 +1,19 @@
-# ReAct Multi-Step Agent (v1.4.1)
+# ReAct Multi-Step Agent (v1.4.2)
 
-Eva Chat answers open-ended commercial questions via a multi-step ReAct loop
-with **routing + SQL guardrails + answer verification**.
+Eva Chat answers open-ended commercial questions via:
 
-## Pipeline
-
-1. **Router** (`intent_router.route_ask`) — `standard` | `discovery` | `math` | `clarify` | `mixed`
-2. **Act** — tools (legacy pivot / SQL / calculator / discovery)
-3. **Verify** (`answer_verifier.verify_agent_answer`) — retry up to 2× if the reply misses the ask
-
-| Tool | Use |
-|------|-----|
-| `run_standard_analytics_pivot` | Volume / AMS / ranks / Price Fetch (engines) |
-| `execute_read_only_sql` | Novel SELECT (min/max, who-at-rate); AMS/PF formulas **blocked** |
-| `calculate_expression` | Sandboxed math |
-| `get_database_schema` / `lookup_entity_values` | Schema + entity discovery |
+1. **Router** — `standard` / `discovery` / `math` / `clarify` / `mixed`
+2. **Personal lexicon** — learns nicknames (`pepsi` → party) + sticky prefs
+3. **Ask grounding** — resolves parties before tools run
+4. **Playbooks** — multi-hop recipes (lowest→buyer, rate→math, same-date variance)
+5. **Tools** — legacy pivots / guarded SQL / calculator
+6. **Verifier** — retries bad answers (up to 2×)
 
 ## Feature flag
 
-- **On by default:** `EVA_REACT_AGENT=1`
-- Disable: `EVA_REACT_AGENT=0` (legacy single `plan_query` loop)
+`EVA_REACT_AGENT=1` (default). Set `0` for legacy single `plan_query` loop.
+
+Lexicon file: `{data-dir}/personal_lexicon.json`
 
 ## Mac
 

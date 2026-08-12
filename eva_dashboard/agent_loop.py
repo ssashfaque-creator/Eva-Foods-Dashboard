@@ -872,14 +872,23 @@ def run_agent_loop(
     """
     from eva_dashboard.tools.answer_verifier import verify_agent_answer
     from eva_dashboard.tools.intent_router import route_ask
+    from eva_dashboard.ask_grounding import ground_ask_for_agent
+    from eva_dashboard.playbooks import playbook_prompt_block
 
     route = route_ask(user_query, prior=prior)
+    grounded = ground_ask_for_agent(user_query, prior=prior)
+    playbook = playbook_prompt_block(user_query)
 
     # High-confidence clarify: skip tools, return the one question
     if (
         route.get("kind") == "clarify"
         and float(route.get("confidence") or 0) >= 0.5
         and route.get("clarify_question")
+        # Don't clarify if we already grounded a unique party + price qualifier path
+        and not (
+            grounded.get("party_hits")
+            and re.search(r"\b(avg|average|last|lowest|fetch|rate)\b", user_query, flags=re.I)
+        )
     ):
         q = str(route["clarify_question"])
         return {
@@ -893,11 +902,16 @@ def run_agent_loop(
             "last_legacy_result": None,
             "tool_trace": [],
             "route": route,
+            "grounding": grounded,
         }
 
     system = REACT_SYSTEM_PROMPT
     if route.get("prompt_block"):
         system = system + "\n\n" + str(route["prompt_block"])
+    if playbook:
+        system = system + "\n\n" + playbook
+    if grounded.get("prompt_block"):
+        system = system + "\n\n" + str(grounded["prompt_block"])
     if memory_block.strip():
         system = system + "\n\n" + memory_block.strip()
 
@@ -939,6 +953,7 @@ def run_agent_loop(
                 "last_legacy_result": last_legacy,
                 "tool_trace": tool_trace,
                 "route": route,
+                "grounding": grounded,
             }
 
         msg = response.choices[0].message
@@ -979,6 +994,7 @@ def run_agent_loop(
                     "tool_trace": tool_trace,
                     "route": route,
                     "verify": check,
+                    "grounding": grounded,
                 }
             # Retry with verifier feedback
             verify_retries += 1
@@ -1040,6 +1056,7 @@ def run_agent_loop(
         "last_legacy_result": last_legacy,
         "tool_trace": tool_trace,
         "route": route,
+        "grounding": grounded,
     }
 
 

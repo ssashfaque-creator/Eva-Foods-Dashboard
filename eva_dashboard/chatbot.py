@@ -6426,6 +6426,14 @@ def chat_completion(
                     "tool_trace": agent_out.get("tool_trace"),
                     "route": agent_out.get("route"),
                     "verify": agent_out.get("verify"),
+                    "grounding": {
+                        "party_hits": (agent_out.get("grounding") or {}).get(
+                            "party_hits"
+                        ),
+                        "expansions": (agent_out.get("grounding") or {}).get(
+                            "expansions"
+                        ),
+                    },
                     "query_spec": legacy.get("query_spec"),
                     "memory": memory.to_dict(),
                 },
@@ -6443,6 +6451,14 @@ def chat_completion(
                     "tool_trace": agent_out.get("tool_trace"),
                     "route": agent_out.get("route"),
                     "verify": agent_out.get("verify"),
+                    "grounding": {
+                        "party_hits": (agent_out.get("grounding") or {}).get(
+                            "party_hits"
+                        ),
+                        "expansions": (agent_out.get("grounding") or {}).get(
+                            "expansions"
+                        ),
+                    },
                     "memory": memory.to_dict(),
                 },
             )
