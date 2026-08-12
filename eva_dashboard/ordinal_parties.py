@@ -128,8 +128,10 @@ def looks_ordinal_party_followup(user_text: str) -> bool:
         return True
     return bool(
         re.search(
-            r"\b(both|those|these)\s+(matches?|customers?|parties|ones)\b|"
-            r"\bthe\s+(matches?|ones)\s+(you\s+)?identified\b",
+            r"\b(both|those|these)\s+(matches?|customers?|parties|ones|al\s+\w+)\b|"
+            r"\bthe\s+(matches?|ones|customers?)\s+(you\s+)?identified\b|"
+            r"\bboth\s+.+\s+customers?\b|"
+            r"\binclude\s+both\b",
             t,
         )
     )

@@ -210,6 +210,71 @@ def test_ordinal_followup_clears_unrelated_channel_city():
     assert not filters.get("client_type")
 
 
+def test_turn10_remove_filters_and_both_ordinal():
+    """CSV turn 10: clear city/channel filters + first two who-is matches."""
+    from eva_dashboard.spoken_constraints import (
+        extract_clear_filter_keys,
+        resolve_exclude_map,
+    )
+
+    q = (
+        "remove the city and client type filter and include both AL Bari "
+        "customers the first two you identified"
+    )
+    assert extract_clear_filter_keys(q) == ["city", "client_type"]
+    assert resolve_exclude_map(q) == {}
+
+    prior = {
+        "filters": {"city": "Lahore", "client_type": "Imtiaz Store"},
+        "matches": [
+            {"client": "AL Bari Traders (Old City)", "ordinal": 1},
+            {"client": "AL Bari Traders (DHA/Clifton)", "ordinal": 2},
+            {"client": "Al Qadri", "ordinal": 3},
+        ],
+        "row_dimensions": ["party"],
+        "metrics": ["volume", "ams"],
+    }
+    out = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["city"],
+            "metrics": ["volume"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+            "filters": {"city": "Lahore", "client_type": "Imtiaz Store"},
+            "context_handling": "prior",
+        },
+        q,
+        prior=prior,
+    )
+    filters = out.get("filters") or {}
+    assert filters.get("parties") == [
+        "AL Bari Traders (Old City)",
+        "AL Bari Traders (DHA/Clifton)",
+    ]
+    assert not filters.get("city")
+    assert not filters.get("client_type")
+    assert not out.get("excludes")
+
+
+def test_customer_then_packing_nest_order():
+    out = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["packing_category"],
+            "metrics": ["volume"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+        },
+        "show me sales customer wise packing wise",
+        prior={
+            "filters": {"city": "Lahore"},
+            "row_dimensions": ["business_unit"],
+            "business_units": ["Eva Consumer"],
+        },
+    )
+    assert out.get("row_dimensions") == ["party", "packing_category"]
+    assert out.get("base") == "prior"
+
+
 def test_who_is_table_has_ams_zone_ordinal():
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)

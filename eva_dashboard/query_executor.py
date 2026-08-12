@@ -612,13 +612,40 @@ def _coerce_vocab_from_user_text(
             if not cols and prior_cols:
                 cols = [c for c in prior_cols if c]
 
+    # --- Explicit "remove the city / client type filter" → clear_filters ---
+    from eva_dashboard.spoken_constraints import extract_clear_filter_keys
+
+    clear_keys = extract_clear_filter_keys(user_text)
+    if clear_keys:
+        for key in clear_keys:
+            if key == "business_units":
+                out["business_units"] = []
+                filters.pop("business_unit", None)
+                filters.pop("business_units", None)
+            elif key == "party":
+                for pk in ("party", "parties", "party_ilike"):
+                    filters.pop(pk, None)
+            else:
+                filters.pop(key, None)
+                if key == "city":
+                    filters.pop("cities", None)
+                if key == "client_type":
+                    filters.pop("client_types", None)
+            if key not in clear:
+                clear.append(key)
+        if prior and out.get("base") != "prior":
+            out["base"] = "prior"
+            out["state_action"] = out.get("state_action") or "modify"
+        out["_clear_omitted"] = False
+
     # --- Ordinal picks from prior who-is matches ("first 2", "#1 and #2") ---
     from eva_dashboard.ordinal_parties import (
         looks_ordinal_party_followup,
         resolve_ordinal_party_names,
     )
 
-    if prior and looks_ordinal_party_followup(user_text):
+    ordinal_followup = bool(prior and looks_ordinal_party_followup(user_text))
+    if ordinal_followup:
         picked = resolve_ordinal_party_names(user_text, prior)
         if not picked and re.search(r"\bboth\b", t):
             # "both" / "those matches" → first two when available
@@ -656,6 +683,8 @@ def _coerce_vocab_from_user_text(
             out["base"] = "prior"
             out["state_action"] = "modify"
             out["_clear_omitted"] = False
+            # Ordinal picks must not be wiped by mis-parsed "remove … filter" excludes
+            out["excludes"] = {}
             if not metrics:
                 metrics = ["volume", "ams"]
             if "month" not in cols:
@@ -791,8 +820,12 @@ def _coerce_vocab_from_user_text(
                 r for r in current_outers if r != "client_type"
             ]
 
-        if leaf in nest_leaf_dims and (prior_outers or current_outers):
-            outers = prior_outers or current_outers
+        if leaf in nest_leaf_dims and (prior_outers or current_outers or "party" in wise_dims):
+            # Spoken customer/party-wise wins as outer over a sticky prior BU
+            if "party" in wise_dims and leaf != "party":
+                outers = ["party"]
+            else:
+                outers = prior_outers or current_outers
             # If a dim is already a sticky singleton filter (party from profile,
             # single city/channel lock), keep it as a filter — do not also nest
             # it as an outer row grain (SKU-wise under one customer → product only).
@@ -991,7 +1024,15 @@ def _coerce_vocab_from_user_text(
 
     # --- Remove / exclude values (same-sentence OR follow-up) ---
     # "show Lahore Eva sales but exclude al shaheer" must EXCLUDE, never filter TO.
-    if re.search(r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\b", t):
+    # Skip when this turn is an ordinal who-is pick + clear-filter ask — those
+    # must not invent party_like excludes from "remove the city filter…".
+    if (
+        not ordinal_followup
+        and re.search(
+            r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\b",
+            t,
+        )
+    ):
         spoken_ex = _resolve_spoken_excludes(user_text)
         if spoken_ex:
             excludes = dict(out.get("excludes") or {})

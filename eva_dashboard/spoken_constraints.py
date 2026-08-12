@@ -28,9 +28,55 @@ _EXCLUDE_VERBS = (
     r"except|excepting|but\s+not)"
 )
 
+# Dim keys users clear by name ("remove the city filter")
+_CLEAR_FILTER_ALIASES: dict[str, str] = {
+    "city": "city",
+    "cities": "city",
+    "client type": "client_type",
+    "client types": "client_type",
+    "channel": "client_type",
+    "channels": "client_type",
+    "zone": "zone",
+    "zones": "zone",
+    "party": "party",
+    "parties": "party",
+    "customer": "party",
+    "customers": "party",
+    "business unit": "business_units",
+    "business units": "business_units",
+    "bu": "business_units",
+}
+
 
 def _norm(text: str) -> str:
     return " ".join(str(text or "").strip().lower().replace("-", " ").split())
+
+
+def extract_clear_filter_keys(user_text: str) -> list[str]:
+    """Parse 'remove/clear the city and client type filter(s)' → filter keys.
+
+    These are MEMORY clears, not party excludes.
+    """
+    t = (user_text or "").strip()
+    if not t:
+        return []
+    keys: list[str] = []
+    for m in re.finditer(
+        r"\b(?:remove|clear|drop|delete|unset)\s+"
+        r"(?:the\s+)?(.+?)\s+filters?\b",
+        t,
+        flags=re.IGNORECASE,
+    ):
+        chunk = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
+        # Split "city and client type" / "city, zone"
+        parts = re.split(r"\s*(?:,|/|and|&)\s*", chunk, flags=re.IGNORECASE)
+        for part in parts:
+            p = _norm(part)
+            p = re.sub(r"^(the|a|an)\s+", "", p).strip()
+            mapped = _CLEAR_FILTER_ALIASES.get(p)
+            if mapped and mapped not in keys:
+                keys.append(mapped)
+    return keys
 
 
 def extract_exclude_phrases(user_text: str) -> list[str]:
@@ -38,15 +84,25 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
     t = (user_text or "").strip()
     if not t:
         return []
+    # Strip clear-filter clauses so "remove the city filter and include…"
+    # is not treated as excluding a party named "city".
+    scrubbed = re.sub(
+        r"\b(?:remove|clear|drop|delete|unset)\s+"
+        r"(?:the\s+)?.+?\s+filters?\b",
+        " ",
+        t,
+        flags=re.IGNORECASE,
+    )
     phrases: list[str] = []
     # "... exclude X" / "without X" / "except X"
     for m in re.finditer(
         rf"\b{_EXCLUDE_VERBS}\s+"
         r"(?:the\s+)?(.+?)(?="
         rf"\s+(?:and|,|;)\s+{_EXCLUDE_VERBS}\b|"
+        r"\s+and\s+include\b|"
         r"\s+but\s+(?!not\b|exclude|excluding|remove|except)|"
         r"$)",
-        t,
+        scrubbed,
         flags=re.IGNORECASE,
     ):
         raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
@@ -63,15 +119,24 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
             raw,
             flags=re.IGNORECASE,
         ).strip()
+        # Ignore leftover filter-clear fragments / include tails
+        if re.search(
+            r"\b(filter|include|identified|first\s+\d+|both)\b",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            continue
         if raw and raw not in phrases:
             phrases.append(raw)
     # "but exclude X" / "again but without X"
     for m in re.finditer(
         rf"\bbut\s+(?:please\s+)?{_EXCLUDE_VERBS}\s+(.+)$",
-        t,
+        scrubbed,
         flags=re.IGNORECASE,
     ):
         raw = re.sub(r"\s+", " ", m.group(1)).strip(" .,!?;:")
+        if re.search(r"\b(filter|include|identified)\b", raw, flags=re.IGNORECASE):
+            continue
         if raw and raw not in phrases:
             phrases.append(raw)
     return phrases
