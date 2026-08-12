@@ -68,9 +68,26 @@
       }
     },
     {
-      "id": "city-clear-national",
+      "id": "eva-bu-lahore-keep-city",
+      "user_text": "how are Eva consumer and Eva bulk sales in lahore",
+      "tags": ["lahore", "business_unit", "followup", "city"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"]
+      },
+      "notes": "Never clear_filters city when user still says in Lahore."
+    },
+    {
+      "id": "lahore-to-national",
       "user_text": "now show national / all Pakistan",
-      "tags": ["clear", "city", "followup"],
+      "tags": ["clear", "city", "national"],
       "plan": {
         "state_action": "modify",
         "context_handling": "prior",

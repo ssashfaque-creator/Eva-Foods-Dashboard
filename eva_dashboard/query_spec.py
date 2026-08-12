@@ -11,6 +11,7 @@ to self-correct.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -1076,6 +1077,7 @@ def validate_query_spec(
     spec: dict[str, Any],
     *,
     prior: dict[str, Any] | None = None,
+    user_text: str = "",
 ) -> list[str]:
     """Return human-readable plan errors for the LLM (empty = ok)."""
     errors: list[str] = []
@@ -1132,6 +1134,8 @@ def validate_query_spec(
                 "one city. For 'other cities' / national, clear_filters:[\"city\"] "
                 "and omit filters.city."
             )
+    # Spoken city still in the ask must not be cleared / dropped
+    errors.extend(_validate_spoken_city_vs_clear(spec, user_text=user_text))
     pt = spec.get("period_type")
     if pt == "LAST_N_MONTHS":
         mb = spec.get("months_back") or (spec.get("grain") or {}).get("months_back")
@@ -1187,6 +1191,92 @@ def validate_query_spec(
     if spec.get("business_units"):
         enum_filters["business_units"] = list(spec.get("business_units") or [])
     errors.extend(validate_categorical_filters(enum_filters))
+    return errors
+
+
+def _looks_national_city_drop(user_text: str) -> bool:
+    """True when the user asked to drop city scope (national / other cities)."""
+    t = (user_text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"national(?:ly)?|nationwide|all\s+pakistan|across\s+pakistan|"
+            r"other\s+cities|rest\s+of\s+(the\s+)?cities|country[- ]?wide|"
+            r"pakistan[- ]?wide|all\s+cities"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _validate_spoken_city_vs_clear(
+    spec: dict[str, Any],
+    *,
+    user_text: str = "",
+) -> list[str]:
+    """Catch plans that drop city while the user still named one.
+
+    Does not silently re-inject filters — returns plan_errors so the LLM
+    self-corrects (e.g. clear_filters:['city'] on '... in Lahore').
+    """
+    if not (user_text or "").strip():
+        return []
+    if _looks_national_city_drop(user_text):
+        return []
+    try:
+        from eva_dashboard.party_analytics import extract_cities_from_text
+    except Exception:
+        return []
+    spoken = extract_cities_from_text(user_text)
+    if not spoken:
+        return []
+    filters = dict(spec.get("filters") or {})
+    clear = {str(c).strip().lower() for c in (spec.get("clear") or [])}
+    row_dims = [str(r) for r in (spec.get("row_dimensions") or [])]
+    filt_city = str(filters.get("city") or "").strip()
+    filt_cities = [
+        str(c).strip()
+        for c in (filters.get("cities") or [])
+        if str(c).strip()
+    ]
+    errors: list[str] = []
+
+    if len(spoken) == 1:
+        city = spoken[0]
+        city_l = city.lower()
+        kept = filt_city.lower() == city_l or any(
+            c.lower() == city_l for c in filt_cities
+        )
+        if "city" in clear and not kept:
+            errors.append(
+                f"clear_filters includes 'city' but the user still said "
+                f"'{city}'. Do NOT clear city — set filters.city='{city}' "
+                "and remove 'city' from clear_filters (use [] if keeping "
+                "other prior filters). Only clear city when the user asks "
+                "for national / all Pakistan / other cities without naming "
+                "that city."
+            )
+        elif not kept and "city" not in row_dims:
+            errors.append(
+                f"User said '{city}' but filters.city is missing. "
+                f"Set filters.city='{city}' (and state_action='clear' for a "
+                "fresh complete ask, or 'modify' with clear_filters=[])."
+            )
+    elif len(spoken) >= 2:
+        # Compare / multi-city: expect cities list or city as a row grain
+        if not filt_cities and "city" not in row_dims and not filt_city:
+            errors.append(
+                "User named multiple cities "
+                f"({', '.join(spoken)}) but neither filters.cities nor "
+                "row_dimensions=['city'] is set. Prefer filters.cities="
+                f"{spoken} with row_dimensions including 'city'."
+            )
+        if "city" in clear and not filt_cities and not filt_city:
+            errors.append(
+                "clear_filters includes 'city' while the user still named "
+                f"cities ({', '.join(spoken)}). Keep city scope via "
+                "filters.cities or row_dimensions=['city']; do not clear."
+            )
     return errors
 
 

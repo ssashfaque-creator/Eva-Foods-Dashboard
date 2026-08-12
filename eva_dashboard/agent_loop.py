@@ -351,6 +351,12 @@ def _suggest_fixes_from_errors(
             "Set state_action='modify' (or context_handling='prior') and emit "
             "clear_filters explicitly (use [] if keeping every prior filter)."
         )
+    if "still said" in blob and "city" in blob:
+        fixes.append(
+            "User still named the city — remove 'city' from clear_filters and "
+            "set filters.city to that city. Prefer state_action='clear' for a "
+            "complete ask that restates city + brands."
+        )
     if "empty" in blob or "no rows" in blob or "no pivot" in blob:
         fixes.append(
             "Widen period to LAST_N_MONTHS/6, clear a sticky city/party via "

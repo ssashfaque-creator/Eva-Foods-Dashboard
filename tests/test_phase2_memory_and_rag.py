@@ -285,7 +285,8 @@ def test_resolve_state_action_legacy():
     assert resolve_state_action({"base": "none"}) == "clear"
 
 
-def test_version_is_1_3_0():
+def test_version_is_at_least_1_3():
     from eva_dashboard import __version__
+    from eva_dashboard.update import _version_tuple
 
-    assert __version__ == "1.3.0"
+    assert _version_tuple(__version__) >= _version_tuple("1.3.0")

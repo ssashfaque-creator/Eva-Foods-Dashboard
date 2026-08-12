@@ -265,6 +265,9 @@ def system_prompt() -> str:
 5. Memory: read MEMORY_CONTEXT JSON. Follow-ups → state_action='keep' or
    'modify' + clear_filters. Fresh complete ask → state_action='clear'.
    Keep filters.party on customer follow-ups unless user excludes that party.
+   If the user still names a city (e.g. 'in Lahore'), KEEP filters.city —
+   never put that city in clear_filters. clear city only for national /
+   all Pakistan / other cities asks.
 6. TREND DEFAULT: no period → LAST_N_MONTHS/6, rows=business_unit, cols=month,
    metrics=volume+ams. Named customer → rows=party.
    Average price → avg_price. Last/latest sold price + sale date → last_price

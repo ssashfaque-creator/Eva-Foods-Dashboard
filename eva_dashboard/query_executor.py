@@ -1535,7 +1535,7 @@ def execute_query_spec(
     # METRO HABIB, lmt → LMT) pass the client_type enum check.
     spec["filters"] = _canon_filters(spec.get("filters") or {})
 
-    errors = validate_query_spec(spec, prior=prior)
+    errors = validate_query_spec(spec, prior=prior, user_text=user_text)
     if errors:
         return {
             "ok": False,
