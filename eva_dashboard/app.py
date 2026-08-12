@@ -567,18 +567,16 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.info(
-        f"**Engine v{__version__}** — fast exclude follow-ups (no planner wait), "
-        f"who-is + AMS/YoY/MoM filters. App file: `{Path(__file__).resolve()}`"
+        f"**Engine v{__version__}** — MemoryContext + state_action, Golden RAG, "
+        f"self-correction, Show Plan. App file: `{Path(__file__).resolve()}`"
     )
-    _ver = str(__version__)
-    _path = str(Path(__file__).resolve()).lower()
-    if (
-        not _ver.startswith("1.2")
-        or "sales-dashboard-pdf" in _path
-        or "ai-chatbot-data-testing" in _path
-    ):
+    from eva_dashboard.update import wrong_install_reason
+
+    _app = Path(__file__).resolve()
+    _bad = wrong_install_reason(_app, str(__version__))
+    if _bad:
         st.error(
-            f"Wrong install (v{_ver}). Stop the app (Ctrl+C), then run:\n\n"
+            f"Wrong install ({_bad}). Stop the app (Ctrl+C), then run:\n\n"
             "`curl -fsSL \"https://raw.githubusercontent.com/ssashfaque-creator/"
             "Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh\" | bash`\n\n"
             "Then launch with the full path printed at the end "

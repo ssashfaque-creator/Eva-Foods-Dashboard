@@ -16,6 +16,7 @@ from eva_dashboard.update import (
     canonical_home,
     find_install_root,
     run_update,
+    wrong_install_reason,
     zip_url,
     _extract_repo_root,
     _version_tuple,
@@ -125,6 +126,23 @@ def test_assert_launch_path_ok_accepts_current(tmp_path: Path) -> None:
     app = root / "app.py"
     app.write_text("#")
     assert_launch_path_ok(app, MIN_VERSION)
+    assert wrong_install_reason(app, MIN_VERSION) is None
+    assert wrong_install_reason(app, "1.3.0") is None
+    assert wrong_install_reason(app, "9.9.9") is None
+
+
+def test_wrong_install_reason_flags_old_and_legacy(tmp_path: Path) -> None:
+    good = tmp_path / "Eva-Foods-Dashboard-new" / "eva_dashboard"
+    good.mkdir(parents=True)
+    good_app = good / "app.py"
+    good_app.write_text("#")
+    assert wrong_install_reason(good_app, "1.0.0") is not None
+
+    legacy = tmp_path / "sales-dashboard-pdf-8203" / "eva_dashboard"
+    legacy.mkdir(parents=True)
+    legacy_app = legacy / "app.py"
+    legacy_app.write_text("#")
+    assert wrong_install_reason(legacy_app, "1.3.0") is not None
 
 
 def test_version_tuple_orders() -> None:

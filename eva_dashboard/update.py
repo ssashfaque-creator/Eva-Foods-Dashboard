@@ -348,11 +348,23 @@ def run_update(
     }
 
 
+def wrong_install_reason(app_file: Path, version: str) -> str | None:
+    """Return a short reason string if this install should not be used, else None."""
+    root = app_file.resolve().parent.parent
+    if _is_legacy_path(root):
+        return (
+            f"legacy path ({root}) — version on this process: {version}"
+        )
+    if _version_tuple(version) < _version_tuple(MIN_VERSION):
+        return f"v{version} is too old (need >={MIN_VERSION})"
+    return None
+
+
 def assert_launch_path_ok(app_file: Path, version: str) -> None:
     """Raise RuntimeError if this process is the stale legacy install."""
     root = app_file.resolve().parent.parent
+    home = canonical_home()
     if _is_legacy_path(root):
-        home = canonical_home()
         raise RuntimeError(
             "You are launching the OLD install:\n"
             f"  {root}\n"
@@ -363,7 +375,6 @@ def assert_launch_path_ok(app_file: Path, version: str) -> None:
             "--data-dir ~/Documents/EvaFoodsData\n"
         )
     if _version_tuple(version) < _version_tuple(MIN_VERSION):
-        home = canonical_home()
         raise RuntimeError(
             f"Eva Foods v{version} is too old (need >={MIN_VERSION}).\n"
             f'  eva-dashboard update --dir "{home}"\n'
