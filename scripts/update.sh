@@ -13,7 +13,7 @@
 set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
-BRANCH="${EVA_UPDATE_BRANCH:-cursor/react-magic-lexicon-50eb}"
+BRANCH="${EVA_UPDATE_BRANCH:-main}"
 MIN_VERSION="${EVA_MIN_VERSION:-1.4.3}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 

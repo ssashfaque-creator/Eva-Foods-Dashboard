@@ -18,11 +18,11 @@ python3 --version
 
 2. **Install / update (recommended — no git)**
 
-This always lands in `~/Eva-Foods-Dashboard-new` on branch `cursor/phase1-single-planner-50eb`.
+This always lands in `~/Eva-Foods-Dashboard-new` from branch `main`.
 It does **not** use whatever stale `eva-dashboard` may still be on your PATH.
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh" | bash
+curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashboard/main/scripts/update.sh" | bash
 ```
 
 3. **Launch with the FULL PATH** (critical)
@@ -34,7 +34,7 @@ curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashb
 Your browser should open to `http://localhost:8501`.  
 Leave the Terminal window open while you use the app. Stop with `Ctrl+C`.
 
-Chat banner must show **v1.2.2+** and a path containing `Eva-Foods-Dashboard-new`.
+Chat banner must show **v1.4.3+** and a path containing `Eva-Foods-Dashboard-new`.
 If you still see `sales-dashboard-pdf-8203` or **v1.0.0**, you launched the wrong binary — use the full path above.
 
 Optional:

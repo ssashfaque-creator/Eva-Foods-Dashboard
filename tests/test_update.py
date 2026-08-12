@@ -28,9 +28,8 @@ def test_zip_url_uses_defaults() -> None:
     assert url.endswith("/owner/repo/archive/refs/heads/my-branch.zip")
 
 
-def test_default_branch_is_cursor_feature() -> None:
-    assert DEFAULT_BRANCH.startswith("cursor/")
-    assert DEFAULT_BRANCH.endswith("-50eb")
+def test_default_branch_is_main() -> None:
+    assert DEFAULT_BRANCH == "main"
     assert "sales-dashboard-pdf" not in DEFAULT_BRANCH
 
 

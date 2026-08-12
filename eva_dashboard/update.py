@@ -20,7 +20,7 @@ import zipfile
 from pathlib import Path
 
 DEFAULT_REPO = "ssashfaque-creator/Eva-Foods-Dashboard"
-DEFAULT_BRANCH = "cursor/react-magic-eval-50eb"
+DEFAULT_BRANCH = "main"
 # Refuse to treat these as the live install (legacy agent folders).
 LEGACY_PATH_MARKERS = (
     "sales-dashboard-pdf",
