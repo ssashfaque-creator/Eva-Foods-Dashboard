@@ -127,8 +127,9 @@ def test_assert_launch_path_ok_accepts_current(tmp_path: Path) -> None:
     app.write_text("#")
     assert_launch_path_ok(app, MIN_VERSION)
     assert wrong_install_reason(app, MIN_VERSION) is None
-    assert wrong_install_reason(app, "1.3.0") is None
     assert wrong_install_reason(app, "9.9.9") is None
+    # Exactly at floor is ok; one patch below is not
+    assert wrong_install_reason(app, "1.3.0") is not None
 
 
 def test_wrong_install_reason_flags_old_and_legacy(tmp_path: Path) -> None:
