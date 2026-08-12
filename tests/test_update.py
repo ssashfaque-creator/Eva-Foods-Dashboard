@@ -28,8 +28,9 @@ def test_zip_url_uses_defaults() -> None:
     assert url.endswith("/owner/repo/archive/refs/heads/my-branch.zip")
 
 
-def test_default_branch_is_phase1() -> None:
-    assert "phase1-single-planner" in DEFAULT_BRANCH
+def test_default_branch_is_cursor_feature() -> None:
+    assert DEFAULT_BRANCH.startswith("cursor/")
+    assert DEFAULT_BRANCH.endswith("-50eb")
     assert "sales-dashboard-pdf" not in DEFAULT_BRANCH
 
 
