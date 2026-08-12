@@ -344,10 +344,18 @@ def test_exclude_al_shaheer_same_sentence_not_include_filter() -> None:
             filters = (out.get("query_spec") or {}).get("filters") or {}
             excludes = (out.get("query_spec") or {}).get("excludes") or {}
             assert not filters.get("party"), filters
-            assert "AL SHAHEER CORPORATION LIMITED" in (excludes.get("party") or [])
+            # Exact resolved party OR party_like needle (fast exclude path)
+            party_ex = list(excludes.get("party") or [])
+            like_ex = [
+                str(x).lower() for x in (excludes.get("party_like") or [])
+            ]
+            assert (
+                "AL SHAHEER CORPORATION LIMITED" in party_ex
+                or any("shaheer" in x for x in like_ex)
+            ), excludes
             md = out.get("answer_markdown") or ""
-            assert "excl. party" in md.lower()
-            assert "AL SHAHEER CORPORATION LIMITED" in md
+            assert "excl. party" in md.lower() or "exclude" in md.lower()
+            assert "shaheer" in md.lower() or "AL SHAHEER" in md
             # Must not be "only al shaheer" — Other Dist volume remains
             assert "200" in md or "250" in md or "Eva Consumer" in md
         finally:

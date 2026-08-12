@@ -56,6 +56,7 @@ from eva_dashboard.seasonality import expected_month_close
 DEFAULT_MODEL = "gpt-4o-mini"
 MAX_SQL_ROWS = 200
 MAX_TOOL_ROUNDS = 6  # Plan → verify → optional investigation follow-up plans
+MAX_CORRECTION_ATTEMPTS = 3  # Self-heal ValidationError / empty / SQL via feedback
 # Hard cap so a stalled OpenAI call cannot sit for the SDK default (10 minutes).
 OPENAI_TIMEOUT_S = 45.0
 MAX_API_HISTORY_MESSAGES = 12  # recent user/assistant turns only
@@ -250,15 +251,19 @@ def system_prompt() -> str:
 
 {live}
 
-# HOW YOU WORK (v1.2 polarity-aware planner)
+# HOW YOU WORK (v1.3 Agentic Semantic Layer — Memory + Self-Correction)
 1. Pivot via plan_query: row_dimensions, column_dimensions, metrics, filters,
    excludes (when dropping values). Required: rows + metrics + period_type +
-   context_handling.
-2. YOU own structure (grain/metrics/period/compare). Python owns FILTER
-   POLARITY (INCLUDE vs EXCLUDE) from the user sentence — see below.
-3. plan_errors → fix and retry. Never invent numbers.
+   context_handling (prefer also state_action=keep|modify|clear).
+2. YOU own structure (grain/metrics/period/compare/state_action). Python owns
+   FILTER POLARITY (INCLUDE vs EXCLUDE) from the user sentence — see below.
+3. Self-correction: if the tool returns feedback.kind != ok (or plan_errors),
+   revise QuerySpec using feedback.errors + suggested_fixes. Never invent
+   numbers. Do NOT show System Error / feedback text to the user — retry
+   invisibly (up to 3 corrections).
 4. Paste answer_markdown, then ### Analysis (2–4 bullets).
-5. Follow-ups: context_handling='prior' + clear_filters. Fresh → 'none'.
+5. Memory: read MEMORY_CONTEXT JSON. Follow-ups → state_action='keep' or
+   'modify' + clear_filters. Fresh complete ask → state_action='clear'.
    Keep filters.party on customer follow-ups unless user excludes that party.
 6. TREND DEFAULT: no period → LAST_N_MONTHS/6, rows=business_unit, cols=month,
    metrics=volume+ams. Named customer → rows=party.
@@ -274,8 +279,10 @@ def system_prompt() -> str:
 11. COMPARE: compared things = rows; shared scope = filters. Growth → ams_growth.
 12. Analytics only via plan_query. Escape: get_schema, get_sales_overview,
     run_sql, resolve_product_language, report_snapshot, list_unmapped_products.
-13. INVESTIGATION: empty/plan_errors → re-plan before Analysis. Mixed
+13. INVESTIGATION: empty/plan_errors/feedback → re-plan before Analysis. Mixed
     party-vs-channel → two plan_query calls.
+14. GOLDEN_QUERY_EXAMPLES are few-shot templates — mirror structure, adapt
+    filters to THIS user ask (never copy example party names blindly).
 
 {polarity}
 
@@ -5406,6 +5413,7 @@ def _plan_from_prior_for_exclude(
         "metrics": metrics,
         "period_type": period_type,
         "months_back": mb,
+        "state_action": "modify",
         "context_handling": "prior",
         "base": "prior",
         "filters": filters,
@@ -5523,6 +5531,7 @@ def _attach_followup_meta(
     party_spec: dict[str, Any] | None = None,
     query_state: dict[str, Any] | None = None,
     export_snapshot: dict[str, Any] | None = None,
+    plan_debug: dict[str, Any] | None = None,
 ) -> None:
     """Stamp the last assistant turn so the Reply button can pin prior filters."""
     for m in reversed(messages):
@@ -5538,6 +5547,8 @@ def _attach_followup_meta(
                 meta["query_state"] = query_state
             if export_snapshot:
                 meta["export"] = export_snapshot
+            if plan_debug:
+                meta["plan_debug"] = plan_debug
             if meta:
                 m["_eva_followup"] = meta
             return
@@ -5917,9 +5928,10 @@ def plan_query_redirect_result(name: str) -> dict[str, Any]:
         ),
         "plan_errors": [
             f"Do not call `{name}`. Emit row_dimensions, metrics, "
-            "period_type, and context_handling via plan_query.",
-            "Follow-ups: context_handling='prior' + clear_filters "
-            "(use [] to keep all prior filters, including party).",
+            "period_type, and state_action (or context_handling) via plan_query.",
+            "Follow-ups: state_action='keep'|'modify' + clear_filters "
+            "(use [] to keep all prior filters, including party). "
+            "Fresh ask → state_action='clear'.",
             "Named customers → filters.party / extracted_entities; "
             "price → metrics=['avg_price'] or ['price_fetch']; "
             "% of AMS → metrics=['vs_ams']; "
@@ -5986,6 +5998,10 @@ def chat_completion(
         prior_context_from_query_state,
         prior_context_payload,
     )
+    from eva_dashboard.memory_context import MemoryContext
+    from eva_dashboard.golden_rag import format_goldens_for_prompt
+    from eva_dashboard.semantic_grounding import ground_entities_for_prompt
+    from eva_dashboard.agent_loop import build_correction_feedback
 
     # Drop any prior system message and inject a fresh live briefing + catalog.
     history = [m for m in messages if m.get("role") != "system"]
@@ -6026,20 +6042,33 @@ def chat_completion(
             price_spec=prior_price_guess,
         )
 
-    working.insert(
-        1,
-        {
-            "role": "system",
-            "content": prior_context_for_prompt(prior_ctx),
-        },
-    )
-    export_snapshot_acc: dict[str, Any] | None = None
-
     last_user = ""
     for m in reversed(history):
         if m.get("role") == "user" and m.get("content"):
             last_user = str(m["content"])
             break
+
+    memory = MemoryContext.from_prior_dict(prior_ctx, last_user_text=last_user)
+    memory_block = memory.to_prompt_block()
+    # Keep prior_context_for_prompt available for tests / compat (same content)
+    _ = prior_context_for_prompt(prior_ctx)
+    golden_block = format_goldens_for_prompt(last_user, k=3)
+    grounded = ground_entities_for_prompt(last_user)
+    context_blob = memory_block + "\n\n" + golden_block
+    if grounded:
+        context_blob = grounded + "\n" + context_blob
+
+    working.insert(
+        1,
+        {
+            "role": "system",
+            "content": context_blob,
+        },
+    )
+    export_snapshot_acc: dict[str, Any] | None = None
+    last_plan_debug: dict[str, Any] | None = None
+    correction_attempt = 0
+    seen_error_signatures: set[str] = set()
 
     # Fast path: "remove/exclude X from this data" — skip OpenAI plan_query wait
     if prior_ctx and _looks_short_exclude_followup(last_user):
@@ -6059,6 +6088,13 @@ def chat_completion(
                 "answer_markdown"
             ):
                 md = str(result["answer_markdown"])
+                plan_debug = {
+                    "path": "exclude_fast_path",
+                    "query_spec": result.get("query_spec") or plan,
+                    "state_action": "modify",
+                    "memory": memory.to_dict(),
+                    "sql": result.get("sql"),
+                }
                 working.append({"role": "assistant", "content": md})
                 _attach_followup_meta(
                     working,
@@ -6070,6 +6106,7 @@ def chat_completion(
                     party_spec=forced_prior_party_spec or prior_party_guess,
                     query_state=result.get("query_state") or prior_state_guess,
                     export_snapshot=result.get("export_snapshot"),
+                    plan_debug=plan_debug,
                 )
                 return md, _prune_session_messages(working)
 
@@ -6168,6 +6205,7 @@ def chat_completion(
                 party_spec=forced_prior_party_spec or _last_party_spec(working),
                 query_state=forced_query_state or _last_query_state(working),
                 export_snapshot=export_snapshot_acc,
+                plan_debug=last_plan_debug,
             )
             return text, _prune_session_messages(working)
 
@@ -6196,26 +6234,88 @@ def chat_completion(
                         on_status("Running planned query…")
                     # Semantic Planner: LLM owns the plan. Do NOT silently
                     # replace it with heuristics. Incomplete plans return
-                    # plan_errors so the model can self-correct.
+                    # plan_errors / feedback so the model can self-correct.
                     if not args:
                         result = {
                             "ok": False,
                             "error": "Empty plan_query arguments.",
                             "plan_errors": [
                                 "Emit row_dimensions, metrics, period_type, "
-                                "context_handling (Universal Pivot)."
+                                "state_action (or context_handling)."
                             ],
                             "response_instructions": (
                                 "REQUIRED: Call plan_query again with a "
                                 "complete QuerySpec."
                             ),
                         }
+                        result["feedback"] = build_correction_feedback(
+                            result,
+                            attempt=correction_attempt + 1,
+                            max_attempts=MAX_CORRECTION_ATTEMPTS,
+                        )
                     else:
                         result = execute_query_spec(
                             args,
                             prior=prior_ctx,
                             user_text=last_user,
                         )
+                        if isinstance(result, dict) and "feedback" not in result:
+                            result["feedback"] = build_correction_feedback(
+                                result,
+                                attempt=correction_attempt + 1,
+                                max_attempts=MAX_CORRECTION_ATTEMPTS,
+                            )
+                    # Observability payload for Show Plan UI
+                    if isinstance(result, dict):
+                        last_plan_debug = {
+                            "path": "plan_query",
+                            "raw_args": args,
+                            "query_spec": result.get("query_spec") or args,
+                            "state_action": (
+                                (result.get("query_spec") or args or {}).get(
+                                    "state_action"
+                                )
+                                or (args or {}).get("state_action")
+                                or (args or {}).get("context_handling")
+                            ),
+                            "memory": memory.to_dict(),
+                            "plan_errors": result.get("plan_errors"),
+                            "feedback": result.get("feedback"),
+                            "sql": result.get("sql"),
+                            "ok": result.get("ok"),
+                            "mode": result.get("mode"),
+                        }
+                        fb = result.get("feedback") or {}
+                        if fb.get("kind") and fb.get("kind") != "ok":
+                            correction_attempt += 1
+                            sig = "|".join(
+                                str(e) for e in (fb.get("errors") or [])[:3]
+                            )
+                            if sig and sig in seen_error_signatures:
+                                # Same failure twice — nudge harder
+                                result = dict(result)
+                                result["response_instructions"] = (
+                                    (result.get("response_instructions") or "")
+                                    + "\nCRITICAL: You repeated the same failing "
+                                    "plan. Change state_action / filters / "
+                                    "dimensions using suggested_fixes — do not "
+                                    "resubmit the identical QuerySpec."
+                                ).strip()
+                            elif sig:
+                                seen_error_signatures.add(sig)
+                            if correction_attempt >= MAX_CORRECTION_ATTEMPTS:
+                                result = dict(result)
+                                result["response_instructions"] = (
+                                    "Self-correction limit reached. Explain the "
+                                    "data gap briefly using any partial result; "
+                                    "do not invent numbers. Ask the user to "
+                                    "rephrase if needed."
+                                )
+                            elif on_status:
+                                on_status(
+                                    f"Correcting plan "
+                                    f"({correction_attempt}/{MAX_CORRECTION_ATTEMPTS})…"
+                                )
                     # Surface as the executed intent for analysis routing
                     name = {
                         "sales_matrix": "query_sales",
@@ -6245,8 +6345,8 @@ def chat_completion(
                     )
                     name = "lookup_party"
                 elif should_redirect_to_plan_query(name, user_text=last_user):
-                    # Phase 1: single planner — no legacy _dispatch_tool path
-                    # for analytics (regex rewrite dual-path removed from chat).
+                    # Phase 1/2: single planner — analytics never use legacy
+                    # _dispatch_tool (unify all UX through plan_query).
                     result = plan_query_redirect_result(name)
                 else:
                     # Escape hatches only: schema/SQL/overview/product resolve /
@@ -6430,6 +6530,9 @@ def chat_completion(
                         "row_dimension": result.get("row_dimension"),
                         "column_dimension": result.get("column_dimension"),
                         "table_spec": result.get("table_spec"),
+                        "query_state": result.get("query_state"),
+                        "query_spec": result.get("query_spec"),
+                        "feedback": result.get("feedback"),
                         "required_table_count": result.get("required_table_count"),
                         "answer_markdown": md_for_model,
                         "response_instructions": instructions,
@@ -6446,6 +6549,9 @@ def chat_completion(
                         "price_fetch": result.get("price_fetch"),
                         "include_price_fetch": result.get("include_price_fetch"),
                         "price_spec": result.get("price_spec"),
+                        "query_state": result.get("query_state"),
+                        "query_spec": result.get("query_spec"),
+                        "feedback": result.get("feedback"),
                         "answer_markdown": md_for_model,
                         "response_instructions": instructions,
                     }
@@ -6462,6 +6568,9 @@ def chat_completion(
                         "parties": result.get("parties"),
                         "count": result.get("count"),
                         "party_spec": result.get("party_spec"),
+                        "query_state": result.get("query_state"),
+                        "query_spec": result.get("query_spec"),
+                        "feedback": result.get("feedback"),
                         "answer_markdown": md_for_model,
                         "response_instructions": instructions,
                     }
@@ -6489,6 +6598,7 @@ def chat_completion(
                 or forced_query_state
                 or _last_query_state(working),
                 export_snapshot=last_export_snapshot,
+                plan_debug=last_plan_debug,
             )
             # Fast path: simple show-me → return tool markdown immediately
             # (OpenAI already chose the tool; skip a second narrative round.)

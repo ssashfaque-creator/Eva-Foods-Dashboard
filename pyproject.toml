@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eva-dashboard"
-version = "1.2.6"
+version = "1.3.0"
 description = "Eva Foods dashboard app for sales/cost/client Excel uploads and PDF reports"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,4 +30,9 @@ where = ["."]
 include = ["eva_dashboard*"]
 
 [tool.setuptools.package-data]
-eva_dashboard = ["data_catalog.md", "metrics_catalog.json", "client_type_groups.json"]
+eva_dashboard = [
+  "data_catalog.md",
+  "metrics_catalog.json",
+  "client_type_groups.json",
+  "golden_queries.json",
+]

@@ -1181,9 +1181,11 @@ def _stick_party_scope_from_prior(
 ) -> dict[str, Any]:
     """Keep prior customer filters on metric follow-ups / explicit prior base.
 
-    Even when the model forgets ``context_handling='prior'``, short asks like
-    \"what's the price\" / \"% of AMS\" / \"last purchase\" after a named-party
-    answer should not lose the customer scope.
+    When the LLM sets ``state_action`` explicitly:
+    - clear → never soft-stick
+    - keep / modify → stick only via normal prior merge (base already prior)
+    Soft heuristic stick (force base=prior) only runs for legacy plans that
+    omit state_action, so we stop guessing against the model's intent.
     """
     out = dict(spec)
     # Never re-stick a party the user just asked to exclude/remove.
@@ -1193,6 +1195,12 @@ def _stick_party_scope_from_prior(
     if _party_exclude_needles(out.get("excludes")):
         # Spec already carries party excludes — don't restore include scope
         return out
+
+    action = str(out.get("state_action") or "").strip().lower()
+    explicit = bool(out.get("_state_action_explicit"))
+    if explicit and action == "clear":
+        return out
+
     scope = _prior_party_scope(prior)
     if not scope:
         return out
@@ -1210,7 +1218,16 @@ def _stick_party_scope_from_prior(
         return out
     if any(filters.get(k) not in (None, "", []) for k in PARTY_SCOPE_KEYS):
         return out
-    stick = out.get("base") == "prior" or _looks_party_metric_followup(user_text)
+
+    # Explicit keep/modify with base=prior: inherit party scope if omitted
+    if out.get("base") == "prior":
+        stick = True
+    elif explicit:
+        # Model said clear already handled; keep without base shouldn't happen
+        stick = False
+    else:
+        # Legacy soft stick only when state_action was not declared
+        stick = _looks_party_metric_followup(user_text)
     if not stick:
         return out
     for key, val in scope.items():
@@ -1219,8 +1236,11 @@ def _stick_party_scope_from_prior(
     if not out.get("party_query") and filters.get("party"):
         out["party_query"] = filters["party"]
     # Promote to prior merge semantics so period/BU inherit when model omitted them
-    if out.get("base") != "prior" and _looks_party_metric_followup(user_text):
+    if out.get("base") != "prior" and not explicit and _looks_party_metric_followup(
+        user_text
+    ):
         out["base"] = "prior"
+        out["state_action"] = "keep"
         # clear_filters was omitted — treat as keep-all for this soft stick
         if out.get("_clear_omitted"):
             out["_clear_omitted"] = False

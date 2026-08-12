@@ -1,0 +1,170 @@
+{
+  "version": "1.0",
+  "description": "Packaged Golden Queries for RAG few-shot planning. NL → correct QuerySpec pairs. Do not store raw sales rows.",
+  "queries": [
+    {
+      "id": "trend-default",
+      "user_text": "show me sales",
+      "tags": ["trend", "default"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6
+      }
+    },
+    {
+      "id": "channel-sku-last-price",
+      "user_text": "last price for all SKUs for all channels",
+      "tags": ["last_price", "channel", "sku"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["client_type", "product"],
+        "column_dimensions": [],
+        "metrics": ["last_price"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6
+      }
+    },
+    {
+      "id": "ams-threshold",
+      "user_text": "parties with AMS more than 10 in Lahore last 6 months",
+      "tags": ["metric_filters", "ams", "party"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["party"],
+        "metrics": ["ams", "volume"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+        "metric_filters": [{"metric": "ams", "op": "gt", "value": 10}]
+      }
+    },
+    {
+      "id": "exclude-followup",
+      "user_text": "remove al shaheer from this data",
+      "tags": ["exclude", "followup"],
+      "plan": {
+        "state_action": "modify",
+        "context_handling": "prior",
+        "clear_filters": [],
+        "row_dimensions": ["party"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "excludes": {"party_like": ["al shaheer"]}
+      },
+      "prior": {
+        "filters": {"city": "Lahore"},
+        "row_dimensions": ["party"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"]
+      }
+    },
+    {
+      "id": "city-clear-national",
+      "user_text": "now show national / all Pakistan",
+      "tags": ["clear", "city", "followup"],
+      "plan": {
+        "state_action": "modify",
+        "context_handling": "prior",
+        "clear_filters": ["city"],
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {}
+      },
+      "prior": {
+        "filters": {"city": "Lahore"},
+        "row_dimensions": ["business_unit"]
+      }
+    },
+    {
+      "id": "party-keep-price",
+      "user_text": "what's the price?",
+      "tags": ["keep", "price", "followup"],
+      "plan": {
+        "state_action": "keep",
+        "context_handling": "prior",
+        "clear_filters": [],
+        "row_dimensions": ["product"],
+        "metrics": ["avg_price"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "filters": {}
+      },
+      "prior": {
+        "filters": {"party": "Alpha Dist"},
+        "party_scope": {"party": "Alpha Dist"}
+      }
+    },
+    {
+      "id": "who-is",
+      "user_text": "who is Alpha Dist?",
+      "tags": ["party_lookup", "identity"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "operation": "party_lookup",
+        "row_dimensions": ["party"],
+        "metrics": ["volume"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "party_query": "Alpha Dist",
+        "filters": {"party": "Alpha Dist"}
+      }
+    },
+    {
+      "id": "imtiaz-lahore-july",
+      "user_text": "Imtiaz sales in Lahore for July",
+      "tags": ["channel", "city", "month"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["packing_category"],
+        "metrics": ["volume", "ams"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-07",
+        "filters": {"client_type": "Imtiaz Store", "city": "Lahore"}
+      }
+    },
+    {
+      "id": "yoy-growth",
+      "user_text": "year over year growth by channel",
+      "tags": ["yoy", "channel", "growth"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["client_type"],
+        "metrics": ["ams", "ams_growth"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 12,
+        "compare": "yoy"
+      }
+    },
+    {
+      "id": "distributors-vs-ams",
+      "user_text": "lowest performing distributors vs AMS",
+      "tags": ["party", "vs_ams", "rank"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "operation": "party_rank",
+        "row_dimensions": ["party"],
+        "metrics": ["vs_ams", "volume"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"client_type": "Eva Distributors"},
+        "sort_order": "asc"
+      }
+    }
+  ]
+}

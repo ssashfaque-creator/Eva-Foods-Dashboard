@@ -734,6 +734,14 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
             _chat_markdown(display)
             if role == "assistant" and content.strip():
                 follow = msg.get("_eva_followup") or {}
+                plan_debug = follow.get("plan_debug")
+                if plan_debug:
+                    with st.expander("Show plan (QuerySpec + debug)", expanded=False):
+                        st.caption(
+                            "Use this to separate LLM planning errors from "
+                            "Python execution errors when reporting bugs."
+                        )
+                        st.json(plan_debug)
                 can_export = bool(
                     follow.get("export")
                     or follow.get("table_spec")

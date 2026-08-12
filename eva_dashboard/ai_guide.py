@@ -134,7 +134,7 @@ def vocabulary_for_prompt() -> str:
         "  [Lahore,Karachi], row city (+ keep prior nestable leaf).",
         "- \"same period last year\" → compare=\"yoy\". \"which products led",
         "  the growth\" → packing/product rows + compare=yoy, prior filters.",
-        "- \"remove X\" → excludes.{dim}=[value], context_handling=prior,",
+        "- \"remove X\" → excludes.{dim}=[value], state_action=modify,",
         "  keep grain (do not drop the table shape).",
         "- Packing vs packing (Stand up vs LMT packing scope is different —",
         "  LMT is a channel): standup vs tin → row_dimensions=[\"packing_category\"].",
@@ -156,12 +156,14 @@ def vocabulary_for_prompt() -> str:
 def tool_guide_for_prompt() -> str:
     return """
 PRIMARY TOOL — plan_query (Universal Pivot) — ONLY analytics path:
-Emit row_dimensions + column_dimensions + metrics + period_type + context_handling.
+Emit row_dimensions + column_dimensions + metrics + period_type +
+state_action (keep|modify|clear) — legacy context_handling still accepted.
 Do NOT pick rigid intents like sales_matrix vs sales_trend — describe the pivot.
 Do NOT call query_sales / list_clients / analyze_parties / lookup_party /
 advanced_query for analytics — they are disabled; server will reject them.
 Server executes BLINDLY. plan_errors → fix and call plan_query again.
-Customer follow-ups (price / % AMS / last purchase): context_handling='prior',
+Customer follow-ups (price / % AMS / last purchase): state_action='keep'
+(or context_handling='prior'),
 clear_filters=[], keep filters.party from PRIOR_QUERY_CONTEXT.party_scope.
 
 INVESTIGATION (Phase 4):
@@ -171,6 +173,7 @@ INVESTIGATION (Phase 4):
 - Party vs channel compare (al shaheer vs Imtiaz) → two plan_query calls.
 
 Required: row_dimensions, metrics, period_type, context_handling
+(prefer state_action=keep|modify|clear)
 Optional: column_dimensions, filters, months_back, clear_filters, operation,
 sort_order, business_units, extracted_entities, party_query, price_flags.
 

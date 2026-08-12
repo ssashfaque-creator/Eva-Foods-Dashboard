@@ -112,11 +112,22 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
             "the user asked party/customer-wise). "
             "Numeric cuts like 'AMS more than 10' / 'growth > 30%' → "
             "metric_filters=[{metric,op,value}]. "
-            "Follow-ups: context_handling='prior' + clear_filters."
+            "Follow-ups: state_action='keep'|'modify' + clear_filters "
+            "(legacy: context_handling='prior')."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "state_action": {
+                    "type": "string",
+                    "enum": ["keep", "modify", "clear"],
+                    "description": (
+                        "Preferred memory control. keep=reuse all active "
+                        "filters/grain; modify=reuse + clear_filters/patches; "
+                        "clear=fresh ask (ignore MEMORY_CONTEXT). "
+                        "Prefer this over context_handling."
+                    ),
+                },
                 "row_dimensions": {
                     "type": "array",
                     "items": {"type": "string", "enum": list(ROW_DIMENSIONS)},
@@ -166,8 +177,8 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                     "type": "string",
                     "enum": ["none", "prior"],
                     "description": (
-                        "prior = follow-up from PRIOR_QUERY_CONTEXT; "
-                        "none = fresh topic."
+                        "Legacy alias: prior≡state_action keep/modify; "
+                        "none≡clear. Prefer state_action."
                     ),
                 },
                 "base": {
@@ -182,7 +193,8 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "enum": list(FILTER_KEYS) + ["business_units", "city_filter"],
                     },
                     "description": (
-                        "When context_handling=prior, filter keys to REMOVE."
+                        "When state_action=keep|modify (or context_handling=prior), "
+                        "filter keys to REMOVE from MEMORY_CONTEXT."
                     ),
                 },
                 "clear": {
@@ -629,48 +641,11 @@ def prior_context_payload(
 
 
 def prior_context_for_prompt(prior: dict[str, Any] | None) -> str:
-    if not prior:
-        return (
-            "PRIOR_QUERY_CONTEXT: none\n"
-            "Fresh ask → context_handling='none'."
-        )
-    party_hint = ""
-    scope = prior.get("party_scope") or _party_scope_from_filters(
-        prior.get("filters")
-    )
-    if scope:
-        party_hint = (
-            "- CUSTOMER SCOPE ACTIVE: "
-            f"{json.dumps(scope, default=str)}. "
-            "Short follow-ups (price / Price Fetch / % of AMS / vs AMS / "
-            "last purchase / days since invoice / SKU breakup) MUST use "
-            "context_handling='prior', clear_filters=[] (or clear only "
-            "non-party keys), and KEEP this party scope. "
-            "Do NOT drop filters.party unless the user names a different customer.\n"
-        )
-    return (
-        "PRIOR_QUERY_CONTEXT (last answer the user can Reply on):\n"
-        f"{json.dumps(prior, indent=2, default=str)}\n\n"
-        "Follow-up rules (STRICT):\n"
-        "- Reshape / 'this…' / 'compared to…' → context_handling='prior'.\n"
-        "- When context_handling='prior', clear_filters is REQUIRED "
-        "(use [] only if every prior filter still applies).\n"
-        f"{party_hint}"
-        "- Lahore → national / all Pakistan → clear_filters:[\"city\"] "
-        "(and \"zone\" if set). Omit filters.city.\n"
-        "- Lahore → other cities league → clear_filters:[\"city\"], "
-        "group_by=city.\n"
-        "- Lahore → Karachi → clear_filters:[\"city\"], "
-        "filters.city=\"Karachi\".\n"
-        "- Fresh complete ask → context_handling='none'.\n"
-        "- Keep business_units from prior when the user says 'this' and does "
-        "not rename the brand.\n"
-        "- distributor-wise / customer-wise after a brand table → "
-        "row_dimensions=[\"party\"], clear_filters include client_type if sticky; "
-        "metrics=[\"vs_ams\"] for lowest performing. Do NOT invent Eva Distributors.\n"
-        "- Prefer Universal Pivot fields (row_dimensions / column_dimensions / "
-        "metrics) over legacy intent labels.\n"
-    )
+    """Legacy wrapper — prefer MemoryContext.to_prompt_block when available."""
+    from eva_dashboard.memory_context import MemoryContext
+
+    memory = MemoryContext.from_prior_dict(prior)
+    return memory.to_prompt_block()
 
 
 def _derive_period_type(raw: dict[str, Any], period: dict[str, Any]) -> str | None:
@@ -875,11 +850,17 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     if intent and intent not in INTENTS:
         intent = ""
 
-    base = str(
-        raw.get("context_handling") or raw.get("base") or "none"
-    ).strip().lower()
-    if base not in {"none", "prior"}:
-        base = "none"
+    # Prefer explicit state_action (keep|modify|clear) over legacy base
+    state_action = str(raw.get("state_action") or "").strip().lower()
+    if state_action in {"keep", "modify", "clear"}:
+        base = "prior" if state_action in {"keep", "modify"} else "none"
+    else:
+        base = str(
+            raw.get("context_handling") or raw.get("base") or "none"
+        ).strip().lower()
+        if base not in {"none", "prior"}:
+            base = "none"
+        state_action = "modify" if base == "prior" else "clear"
 
     clear_omitted = (
         "clear_filters" not in raw and "clear" not in raw
@@ -1045,9 +1026,15 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "row_dimensions": row_dimensions,
         "column_dimensions": column_dimensions,
         "metrics": metrics,
+        "state_action": state_action,
         "base": base,
+        "context_handling": base,
         "clear": clear,
         "_clear_omitted": clear_omitted,
+        "_state_action_explicit": bool(
+            str(raw.get("state_action") or "").strip().lower()
+            in {"keep", "modify", "clear"}
+        ),
         "period_type": period_type,
         "period": period,
         "months_back": months_back,

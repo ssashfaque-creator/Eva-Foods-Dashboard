@@ -326,6 +326,162 @@ def verify_query_result(
     }
 
 
+def _suggest_fixes_from_errors(
+    errors: list[str],
+    *,
+    query_spec: dict[str, Any] | None = None,
+) -> list[str]:
+    """Heuristic suggested_fixes for the self-correction loop (invisible to user)."""
+    fixes: list[str] = []
+    blob = " ".join(errors).lower()
+    spec = dict(query_spec or {})
+    filters = dict(spec.get("filters") or {})
+    if "client_type" in blob and "party" in blob:
+        fixes.append(
+            "Move product/brand names out of client_type; use business_units "
+            "for Eva/Maan and filters.party only for customer names."
+        )
+    if "not a valid client_type" in blob or "unknown client" in blob:
+        fixes.append(
+            "Use a governed channel from GROUNDED_GLOSSARY / vocabulary "
+            "(e.g. Imtiaz Store, Eva Distributors). Brands are business_units."
+        )
+    if "clear_filters" in blob or "context_handling" in blob:
+        fixes.append(
+            "Set state_action='modify' (or context_handling='prior') and emit "
+            "clear_filters explicitly (use [] if keeping every prior filter)."
+        )
+    if "empty" in blob or "no rows" in blob or "no pivot" in blob:
+        fixes.append(
+            "Widen period to LAST_N_MONTHS/6, clear a sticky city/party via "
+            "clear_filters, or fix spelling via extracted_entities."
+        )
+    if filters.get("party") and "client_type" in blob:
+        fixes.append(
+            "If the name is a channel alias (metro, imtiaz), use "
+            "filters.client_type — not filters.party."
+        )
+    if not fixes:
+        fixes.append(
+            "Revise QuerySpec: check row_dimensions, metrics, period_type, "
+            "state_action, and filter polarity (INCLUDE vs EXCLUDE)."
+        )
+    # de-dupe preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in fixes:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def build_correction_feedback(
+    result: dict[str, Any] | None,
+    *,
+    attempt: int = 1,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Structured feedback for the LLM self-correction loop.
+
+    Never shown to the end user — attached to the tool JSON payload so the
+    planner can revise QuerySpec up to ``max_attempts`` times.
+    """
+    if not isinstance(result, dict):
+        return {
+            "kind": "execution_error",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "errors": ["Non-dict tool result"],
+            "suggested_fixes": ["Call plan_query again with a complete QuerySpec."],
+            "show_to_user": False,
+        }
+    spec = dict(result.get("query_spec") or {})
+    errors: list[str] = []
+    kind = "ok"
+
+    if result.get("ok") is False:
+        plan_errs = [str(e) for e in (result.get("plan_errors") or []) if e]
+        if plan_errs:
+            kind = "validation_error"
+            errors.extend(plan_errs)
+        err = result.get("error")
+        if err:
+            kind = "execution_error" if kind == "ok" else kind
+            errors.append(str(err))
+        if not errors:
+            kind = "execution_error"
+            errors.append("Plan execution failed with no detail.")
+    else:
+        verification = result.get("verification") or {}
+        retry = [str(e) for e in (verification.get("retry_errors") or []) if e]
+        if retry:
+            kind = "empty_result"
+            errors.extend(retry)
+        elif _result_is_empty(result) and result.get("mode") not in {
+            "party_pick",
+            "clarify",
+            "party_lookup",
+            "factor_costs",
+        }:
+            # Soft empty — still ok for user, but flag for optional replan
+            kind = "ok"
+            return {
+                "kind": "ok",
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "errors": [],
+                "suggested_fixes": [],
+                "empty_summary": "Result table is empty or all-zero.",
+                "show_to_user": False,
+            }
+
+    if kind == "ok":
+        return {
+            "kind": "ok",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "errors": [],
+            "suggested_fixes": [],
+            "show_to_user": False,
+        }
+
+    compact_spec = {
+        k: spec[k]
+        for k in (
+            "state_action",
+            "context_handling",
+            "operation",
+            "row_dimensions",
+            "column_dimensions",
+            "metrics",
+            "period_type",
+            "filters",
+            "clear_filters",
+            "clear",
+            "excludes",
+            "business_units",
+            "extracted_entities",
+            "metric_filters",
+        )
+        if k in spec and spec[k] not in (None, "", [], {})
+    }
+    return {
+        "kind": kind,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "errors": errors,
+        "suggested_fixes": _suggest_fixes_from_errors(errors, query_spec=spec),
+        "failed_query_spec": compact_spec,
+        "show_to_user": False,
+        "response_instructions": (
+            f"SYSTEM ERROR (attempt {attempt}/{max_attempts}) — do NOT show "
+            "this to the user. Call plan_query again with a corrected "
+            f"QuerySpec. Errors: {'; '.join(errors[:3])}"
+        ),
+    }
+
+
 def apply_verification(
     result: dict[str, Any],
     *,
@@ -336,6 +492,7 @@ def apply_verification(
         return result
     out = dict(result)
     if out.get("ok") is False and out.get("plan_errors"):
+        out["feedback"] = build_correction_feedback(out)
         return out
 
     verification = verify_query_result(
@@ -362,6 +519,7 @@ def apply_verification(
             "REQUIRED: Paste clarify markdown verbatim. Ask the user to pick "
             "an exact customer name. Do not invent volumes."
         )
+        out["feedback"] = build_correction_feedback(out)
         return out
 
     # Empty → ask model to replan (unless we already have a useful pick UI)
@@ -380,6 +538,7 @@ def apply_verification(
                 "REQUIRED: Call plan_query again with a corrected QuerySpec. "
                 + verification["retry_errors"][0]
             )
+            out["feedback"] = build_correction_feedback(out)
             return out
 
     inv = verification.get("investigation")
@@ -395,6 +554,7 @@ def apply_verification(
         if warnings:
             out["verification_warnings"] = warnings
 
+    out["feedback"] = build_correction_feedback(out)
     return out
 
 
