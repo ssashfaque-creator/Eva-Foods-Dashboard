@@ -17,6 +17,7 @@ def test_golden_magic_eval_all_pass() -> None:
     out = run_eval()
     failed = [r for r in out["results"] if not r["ok"]]
     assert out["failed"] == 0, failed
+    assert out.get("money_passed", 0) == out.get("money_total", 0)
 
 
 def test_golden_cases_nonempty() -> None:

@@ -1,13 +1,23 @@
 {
-  "version": "1.4.3",
-  "description": "Offline magic eval — route + playbook expectations for real commercial asks",
+  "version": "1.4.4",
+  "description": "Offline magic eval — route + playbook + money-metric baseline (AMS/volume/Price Fetch)",
   "cases": [
     {
       "id": "standard_bu_ams",
       "user_text": "Show me volume and AMS by Business Unit for the last 6 months.",
       "expect_kind": ["standard"],
       "expect_playbooks": [],
-      "forbid_tools": ["execute_read_only_sql"]
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
+    },
+    {
+      "id": "money_volume_only",
+      "user_text": "Show me volume by Business Unit for the last 6 months.",
+      "expect_kind": ["standard"],
+      "expect_playbooks": [],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
     },
     {
       "id": "lowest_pepsi_buyer",
@@ -27,13 +37,18 @@
       "user_text": "Which distributors have grown sales?",
       "expect_kind": ["standard"],
       "expect_playbooks": ["distributors_grown"],
-      "forbid_tools": ["execute_read_only_sql"]
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
     },
     {
       "id": "distributors_declined",
       "user_text": "Which distributors declined the most vs AMS?",
       "expect_kind": ["standard"],
-      "expect_playbooks": ["distributors_declined"]
+      "expect_playbooks": ["distributors_declined"],
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
     },
     {
       "id": "same_date_variance",
@@ -64,7 +79,9 @@
       "user_text": "what's the price fetch",
       "expect_kind": ["standard"],
       "expect_playbooks": ["price_fetch_followup"],
-      "forbid_tools": ["execute_read_only_sql"]
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
     },
     {
       "id": "yoy_july",
@@ -76,7 +93,9 @@
       "id": "exclude_ams",
       "user_text": "exclude all customers with less than 10 ams",
       "expect_kind": ["standard", "discovery", "mixed"],
-      "expect_playbooks": ["exclude_then_refresh"]
+      "expect_playbooks": ["exclude_then_refresh"],
+      "forbid_tools": ["execute_read_only_sql"],
+      "money_metric": true
     },
     {
       "id": "last_price",

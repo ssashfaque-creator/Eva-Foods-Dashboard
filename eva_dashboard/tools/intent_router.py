@@ -103,6 +103,26 @@ def route_ask(user_text: str, *, prior: dict[str, Any] | None = None) -> dict[st
         )
     )
 
+    # Learned price preference → skip clarify and apply default
+    learned_price: str | None = None
+    if ambiguous_price and not prior_has_price and not discovery and not math:
+        try:
+            from eva_dashboard.personal_lexicon import (
+                default_price_metric,
+                parse_price_preference,
+                remember_price_preference_from_text,
+            )
+
+            # If this turn already names a type, remember it
+            spoken = parse_price_preference(t)
+            if spoken:
+                remember_price_preference_from_text(t)
+                learned_price = spoken
+            else:
+                learned_price = default_price_metric()
+        except Exception:  # noqa: BLE001
+            learned_price = None
+
     kind: AskKind
     confidence: float
     preferred: list[str]
@@ -110,7 +130,31 @@ def route_ask(user_text: str, *, prior: dict[str, Any] | None = None) -> dict[st
     clarify_q: str | None = None
     rationale: str
 
-    if ambiguous_price and not prior_has_price and not discovery and not math:
+    if (
+        ambiguous_price
+        and not prior_has_price
+        and not discovery
+        and not math
+        and learned_price
+    ):
+        # Clarify-once → default forever
+        if learned_price in {"price_fetch", "avg_price", "last_price"}:
+            kind = "standard"
+            confidence = 0.8
+            preferred = ["run_standard_analytics_pivot"]
+            if learned_price == "price_fetch":
+                blocked = ["execute_read_only_sql"]
+            rationale = f"bare price → learned pref {learned_price}"
+        else:
+            kind = "discovery"
+            confidence = 0.8
+            preferred = [
+                "lookup_entity_values",
+                "execute_read_only_sql",
+                "run_standard_analytics_pivot",
+            ]
+            rationale = f"bare price → learned pref {learned_price}"
+    elif ambiguous_price and not prior_has_price and not discovery and not math:
         kind = "clarify"
         confidence = 0.55
         preferred = []
@@ -225,6 +269,12 @@ def _prompt_block(
         lines.append(
             "AMBIGUOUS ASK: reply with ONLY this clarifying question "
             f"(no tools): {clarify_q}"
+        )
+    # Surface learned price default when routing applied it
+    if "learned pref" in rationale:
+        lines.append(
+            "Use the learned default_price_metric from PERSONAL_LEXICON; "
+            "state the assumption in one short line."
         )
     if kind in {"discovery", "mixed"}:
         lines.append(

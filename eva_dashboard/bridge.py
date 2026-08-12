@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import secrets
+import threading
 import traceback
-from typing import Any
+from typing import Any, Iterator
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +27,7 @@ _FOLLOWUP_KEYS = (
     "party_spec",
     "query_state",
     "export",
+    "plan_debug",
 )
 
 
@@ -44,6 +47,15 @@ class ChatResponse(BaseModel):
     ok: bool = True
     reply: str
     messages: list[dict[str, Any]]
+
+
+class FeedbackRequest(BaseModel):
+    rating: str
+    user_text: str = ""
+    answer: str = ""
+    route: dict[str, Any] | None = None
+    tool_trace: list[dict[str, Any]] | None = None
+    model: str | None = None
 
 
 class ExportRequest(BaseModel):
@@ -296,6 +308,159 @@ def create_app():
                 {"role": m["role"], "content": m["content"]} for m in safe_msgs
             ]
             return ChatResponse(ok=True, reply=reply or "", messages=bare)
+
+    @app.post("/chat/stream")
+    def chat_stream(
+        payload: ChatRequest,
+        authorization: str | None = Header(default=None),
+        x_eva_bridge_secret: str | None = Header(default=None),
+    ):
+        """SSE stream: status events then a final done payload.
+
+        Keeps the phone UI alive during multi-tool ReAct rounds.
+        Event shapes:
+          data: {"type":"status","text":"Running execute_read_only_sql…"}
+          data: {"type":"done","ok":true,"reply":"...","messages":[...]}
+          data: {"type":"error","error":"..."}
+        """
+        from fastapi.responses import StreamingResponse
+
+        _check_secret(authorization, x_eva_bridge_secret)
+        api_key = resolve_api_key()
+        if not api_key:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "OpenAI API key missing on Mac. "
+                    "export OPENAI_API_KEY=sk-… then restart the bridge."
+                ),
+            )
+        init_db()
+        history: list[dict[str, Any]] = []
+        for m in payload.messages:
+            if m.role not in {"user", "assistant"}:
+                continue
+            entry: dict[str, Any] = {
+                "role": m.role,
+                "content": m.content or "",
+            }
+            follow = _sanitize_followup(m.followup, keep_export=False)
+            if follow:
+                entry["_eva_followup"] = follow
+            history.append(entry)
+        if not history or history[-1]["role"] != "user":
+            raise HTTPException(
+                status_code=400, detail="Last message must be from the user"
+            )
+        model = (payload.model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        reply_meta = (
+            _sanitize_followup(payload.reply_followup, keep_export=False) or {}
+        )
+
+        def _safe_messages(updated: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            safe_msgs: list[dict[str, Any]] = []
+            for m in updated:
+                role = m.get("role")
+                if role not in {"user", "assistant"}:
+                    continue
+                content = m.get("content") or ""
+                if not str(content).strip() and role == "assistant":
+                    continue
+                item: dict[str, Any] = {"role": role, "content": str(content)}
+                follow = _sanitize_followup(
+                    m.get("_eva_followup"), keep_export=True
+                )
+                if follow:
+                    try:
+                        item["followup"] = json.loads(json.dumps(follow))
+                    except (TypeError, ValueError):
+                        item["followup"] = _sanitize_followup(
+                            follow, keep_export=False
+                        )
+                safe_msgs.append(item)
+            return safe_msgs
+
+        def event_gen() -> Iterator[str]:
+            q: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+            def on_status(text: str) -> None:
+                q.put(("status", str(text or "")))
+
+            def worker() -> None:
+                try:
+                    reply, updated = chat_completion(
+                        history,
+                        api_key=api_key,
+                        model=model,
+                        on_status=on_status,
+                        forced_prior_spec=reply_meta.get("table_spec"),
+                        forced_prior_price_spec=reply_meta.get("price_spec"),
+                        forced_prior_party_spec=reply_meta.get("party_spec"),
+                        forced_query_state=reply_meta.get("query_state"),
+                    )
+                    q.put(
+                        (
+                            "done",
+                            {
+                                "ok": True,
+                                "reply": reply or "",
+                                "messages": _safe_messages(updated),
+                            },
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        "BRIDGE /chat/stream error:",
+                        _chat_error_detail(exc),
+                        flush=True,
+                    )
+                    traceback.print_exc()
+                    q.put(("error", _chat_error_detail(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            while True:
+                kind, data = q.get()
+                if kind == "status":
+                    yield f"data: {json.dumps({'type': 'status', 'text': data})}\n\n"
+                elif kind == "done":
+                    payload_out = {"type": "done", **data}
+                    yield f"data: {json.dumps(payload_out, default=str)}\n\n"
+                    break
+                elif kind == "error":
+                    yield (
+                        f"data: {json.dumps({'type': 'error', 'error': data})}\n\n"
+                    )
+                    break
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/feedback")
+    def feedback(
+        payload: FeedbackRequest,
+        authorization: str | None = Header(default=None),
+        x_eva_bridge_secret: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _check_secret(authorization, x_eva_bridge_secret)
+        from eva_dashboard.chat_feedback import record_chat_feedback
+
+        init_db()
+        row_id = record_chat_feedback(
+            rating=payload.rating,
+            user_text=payload.user_text,
+            answer=payload.answer,
+            route=payload.route or {},
+            tool_trace=list(payload.tool_trace or []),
+            model=payload.model or DEFAULT_MODEL,
+            source="bridge",
+        )
+        return {"ok": True, "id": row_id}
 
     @app.post("/export")
     def export_table(

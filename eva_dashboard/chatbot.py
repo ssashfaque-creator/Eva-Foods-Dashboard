@@ -53,7 +53,7 @@ from eva_dashboard.sales_query import (
 )
 from eva_dashboard.seasonality import expected_month_close
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-4o"
 MAX_SQL_ROWS = 200
 MAX_TOOL_ROUNDS = 6  # Plan → verify → optional investigation follow-up plans
 MAX_CORRECTION_ATTEMPTS = 3  # Self-heal ValidationError / empty / SQL via feedback

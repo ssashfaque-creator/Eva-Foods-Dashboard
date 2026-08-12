@@ -14,7 +14,7 @@ set -euo pipefail
 
 REPO="${EVA_UPDATE_REPO:-ssashfaque-creator/Eva-Foods-Dashboard}"
 BRANCH="${EVA_UPDATE_BRANCH:-main}"
-MIN_VERSION="${EVA_MIN_VERSION:-1.4.3}"
+MIN_VERSION="${EVA_MIN_VERSION:-1.4.4}"
 TARGET="${1:-${EVA_HOME:-$HOME/Eva-Foods-Dashboard-new}}"
 
 case "$TARGET" in

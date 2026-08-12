@@ -459,6 +459,13 @@ a {
   animation-delay: 0.3s;
 }
 
+.agent-status {
+  margin: 0.55rem 0 0;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
 .composer {
   position: sticky;
   bottom: 0;

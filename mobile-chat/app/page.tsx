@@ -21,6 +21,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   followup?: Followup | null;
+  feedback?: "up" | "down" | null;
 };
 
 const FOLLOWUP_MARKER = "[FOLLOW-UP on the answer you just gave]";
@@ -207,6 +208,7 @@ export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [online, setOnline] = useState<boolean | null>(null);
   const [replyTo, setReplyTo] = useState<number | null>(null);
@@ -234,7 +236,7 @@ export default function HomePage() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, busy, replyTo]);
+  }, [messages, busy, replyTo, agentStatus]);
 
   useEffect(() => {
     if (!toast) return;
@@ -279,6 +281,7 @@ export default function HomePage() {
     ];
     setMessages(next);
     setBusy(true);
+    setAgentStatus("Connecting…");
 
     try {
       const res = await fetch("/api/chat", {
@@ -293,29 +296,94 @@ export default function HomePage() {
           reply_followup: followup || undefined,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || data.ok === false) {
-        throw new Error(data.error || "Chat failed");
-      }
-      const reply =
-        typeof data.reply === "string"
-          ? data.reply
-          : "No reply from the analyst.";
-      if (Array.isArray(data.messages) && data.messages.length) {
-        setMessages(
-          data.messages
-            .filter(
-              (m: ChatMessage) =>
-                m && (m.role === "user" || m.role === "assistant")
-            )
-            .map((m: ChatMessage) => ({
-              role: m.role,
-              content: String(m.content || ""),
-              followup: m.followup || null,
-            }))
-        );
+
+      const ctype = res.headers.get("content-type") || "";
+      if (ctype.includes("text/event-stream") && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalReply: string | null = null;
+        let finalMessages: ChatMessage[] | null = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          for (const chunk of parts) {
+            const line = chunk
+              .split("\n")
+              .map((l) => l.trim())
+              .find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            let evt: {
+              type?: string;
+              text?: string;
+              error?: string;
+              ok?: boolean;
+              reply?: string;
+              messages?: ChatMessage[];
+            };
+            try {
+              evt = JSON.parse(line.slice(5).trim());
+            } catch {
+              continue;
+            }
+            if (evt.type === "status" && evt.text) {
+              setAgentStatus(evt.text);
+            } else if (evt.type === "error") {
+              throw new Error(evt.error || "Chat failed");
+            } else if (evt.type === "done") {
+              finalReply =
+                typeof evt.reply === "string"
+                  ? evt.reply
+                  : "No reply from the analyst.";
+              if (Array.isArray(evt.messages) && evt.messages.length) {
+                finalMessages = evt.messages
+                  .filter(
+                    (m) => m && (m.role === "user" || m.role === "assistant")
+                  )
+                  .map((m) => ({
+                    role: m.role,
+                    content: String(m.content || ""),
+                    followup: m.followup || null,
+                  }));
+              }
+            }
+          }
+        }
+        if (finalMessages) {
+          setMessages(finalMessages);
+        } else if (finalReply != null) {
+          setMessages([...next, { role: "assistant", content: finalReply }]);
+        } else {
+          throw new Error("Chat stream ended without a reply");
+        }
       } else {
-        setMessages([...next, { role: "assistant", content: reply }]);
+        const data = await res.json();
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.error || "Chat failed");
+        }
+        const reply =
+          typeof data.reply === "string"
+            ? data.reply
+            : "No reply from the analyst.";
+        if (Array.isArray(data.messages) && data.messages.length) {
+          setMessages(
+            data.messages
+              .filter(
+                (m: ChatMessage) =>
+                  m && (m.role === "user" || m.role === "assistant")
+              )
+              .map((m: ChatMessage) => ({
+                role: m.role,
+                content: String(m.content || ""),
+                followup: m.followup || null,
+              }))
+          );
+        } else {
+          setMessages([...next, { role: "assistant", content: reply }]);
+        }
       }
       setOnline(true);
     } catch (err) {
@@ -324,6 +392,42 @@ export default function HomePage() {
       setOnline(false);
     } finally {
       setBusy(false);
+      setAgentStatus(null);
+    }
+  }
+
+  async function sendFeedback(index: number, rating: "up" | "down") {
+    const msg = messages[index];
+    if (!msg || msg.role !== "assistant" || msg.feedback) return;
+    let userText = "";
+    for (let j = index - 1; j >= 0; j--) {
+      if (messages[j]?.role === "user") {
+        userText = messages[j].content;
+        break;
+      }
+    }
+    const plan =
+      (msg.followup &&
+        (msg.followup.plan_debug as Record<string, unknown> | undefined)) ||
+      {};
+    try {
+      await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rating,
+          user_text: userText,
+          answer: msg.content,
+          route: plan.route || {},
+          tool_trace: plan.tool_trace || [],
+        }),
+      });
+      setMessages((prev) =>
+        prev.map((m, i) => (i === index ? { ...m, feedback: rating } : m))
+      );
+      setToast(rating === "up" ? "Thanks — marked good" : "Saved for review");
+    } catch {
+      setToast("Could not save feedback");
     }
   }
 
@@ -492,6 +596,24 @@ export default function HomePage() {
                     <button
                       type="button"
                       className="action-btn"
+                      onClick={() => void sendFeedback(i, "up")}
+                      disabled={busy || Boolean(m.feedback)}
+                      title="Good answer"
+                    >
+                      {m.feedback === "up" ? "👍✓" : "👍"}
+                    </button>
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={() => void sendFeedback(i, "down")}
+                      disabled={busy || Boolean(m.feedback)}
+                      title="Bad answer — review later"
+                    >
+                      {m.feedback === "down" ? "👎✓" : "👎"}
+                    </button>
+                    <button
+                      type="button"
+                      className="action-btn"
                       onClick={() => downloadCsv(i)}
                       disabled={
                         busy ||
@@ -534,6 +656,9 @@ export default function HomePage() {
                 <span />
                 <span />
               </div>
+              {agentStatus ? (
+                <p className="agent-status">{agentStatus}</p>
+              ) : null}
             </div>
           </div>
         ) : null}

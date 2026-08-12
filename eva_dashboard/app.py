@@ -172,6 +172,39 @@ def _chat_markdown(text: str) -> None:
     st.markdown(text or "", unsafe_allow_html=True)
 
 
+def _record_thumb(msg: dict, *, rating: str, model: str) -> None:
+    """Persist 👍/👎 into eval_failures for weekly golden promotion."""
+    from eva_dashboard.chat_feedback import record_chat_feedback
+
+    follow = msg.get("_eva_followup") or {}
+    plan = follow.get("plan_debug") or {}
+    # Pair with the nearest prior user turn in session
+    user_text = ""
+    msgs = st.session_state.get("eva_chat_messages") or []
+    try:
+        idx = msgs.index(msg)
+    except ValueError:
+        idx = -1
+    if idx > 0:
+        for j in range(idx - 1, -1, -1):
+            if msgs[j].get("role") == "user":
+                user_text = str(msgs[j].get("content") or "")
+                break
+    try:
+        record_chat_feedback(
+            rating=rating,
+            user_text=user_text,
+            answer=str(msg.get("content") or ""),
+            route=plan.get("route") or {},
+            tool_trace=list(plan.get("tool_trace") or []),
+            verify=plan.get("verify") or {},
+            model=model,
+            source="streamlit",
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not save feedback: {exc}")
+
+
 def page_sales() -> None:
     st.subheader("Sales data")
     st.markdown(
@@ -567,10 +600,10 @@ def page_reports() -> None:
 def page_chat() -> None:
     st.subheader("AI Chat")
     st.info(
-        f"**Engine v{__version__}** — ReAct magic (lexicon + playbooks + eval + verify), "
-        f"MemoryContext, Golden RAG, "
+        f"**Engine v{__version__}** — ReAct production path (gpt-4o default, "
+        f"lexicon prefs, 👍/👎 feedback, money-metric eval), "
 
-        f"self-correction, Show Plan. App file: `{Path(__file__).resolve()}`"
+        f"MemoryContext, Golden RAG. App file: `{Path(__file__).resolve()}`"
     )
     from eva_dashboard.update import wrong_install_reason
 
@@ -580,7 +613,7 @@ def page_chat() -> None:
         st.error(
             f"Wrong install ({_bad}). Stop the app (Ctrl+C), then run:\n\n"
             "`curl -fsSL \"https://raw.githubusercontent.com/ssashfaque-creator/"
-            "Eva-Foods-Dashboard/cursor/phase1-single-planner-50eb/scripts/update.sh\" | bash`\n\n"
+            "Eva-Foods-Dashboard/main/scripts/update.sh\" | bash`\n\n"
             "Then launch with the full path printed at the end "
             "(`~/Eva-Foods-Dashboard-new/.venv/bin/eva-dashboard`)."
         )
@@ -608,7 +641,7 @@ def page_chat() -> None:
         placeholder="sk-… (or set OPENAI_API_KEY)",
         help="Used only for this session unless OPENAI_API_KEY is already set in the environment.",
     )
-    model_options = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+    model_options = ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"]
     default_idx = (
         model_options.index(DEFAULT_MODEL) if DEFAULT_MODEL in model_options else 0
     )
@@ -616,6 +649,7 @@ def page_chat() -> None:
         "Model",
         options=model_options,
         index=default_idx,
+        help="Default gpt-4o for ReAct tool orchestration; mini is cheaper for light asks.",
     )
     chat_msgs = st.session_state.get("eva_chat_messages") or []
     has_chat_turns = any(m.get("role") == "user" for m in chat_msgs)
@@ -748,10 +782,10 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
                     or follow.get("party_spec")
                 )
                 st.markdown(
-                    '<p class="eva-reply-hint">Follow up or export this table:</p>',
+                    '<p class="eva-reply-hint">Follow up, rate, or export this table:</p>',
                     unsafe_allow_html=True,
                 )
-                b_reply, b_xlsx, b_pdf = st.columns([1.2, 1, 1])
+                b_reply, b_up, b_down, b_xlsx, b_pdf = st.columns([1.2, 0.6, 0.6, 1, 1])
                 with b_reply:
                     if st.button(
                         "↩ Reply",
@@ -761,6 +795,29 @@ Use **↩ Reply** under any answer to mark your next question as a follow-up on 
                     ):
                         st.session_state["eva_reply_to"] = i
                         st.rerun()
+                feedback_done = (msg.get("_eva_feedback") or "").lower()
+                with b_up:
+                    if st.button(
+                        "👍",
+                        key=f"eva_up_{i}",
+                        disabled=bool(feedback_done),
+                        help="Good answer — saved for training",
+                    ):
+                        _record_thumb(msg, rating="up", model=model or DEFAULT_MODEL)
+                        msg["_eva_feedback"] = "up"
+                        st.rerun()
+                with b_down:
+                    if st.button(
+                        "👎",
+                        key=f"eva_down_{i}",
+                        disabled=bool(feedback_done),
+                        help="Bad answer — saved to eval_failures for golden eval",
+                    ):
+                        _record_thumb(msg, rating="down", model=model or DEFAULT_MODEL)
+                        msg["_eva_feedback"] = "down"
+                        st.rerun()
+                if feedback_done:
+                    st.caption(f"Feedback saved ({feedback_done}).")
                 if can_export:
                     from eva_dashboard.table_export import (
                         export_excel_from_followup,

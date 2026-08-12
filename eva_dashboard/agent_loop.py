@@ -859,7 +859,7 @@ def run_agent_loop(
     user_query: str,
     *,
     client: Any,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-4o",
     history: list[dict[str, Any]] | None = None,
     memory_block: str = "",
     prior: dict[str, Any] | None = None,
@@ -876,10 +876,16 @@ def run_agent_loop(
     from eva_dashboard.playbooks import playbook_prompt_block
 
     from eva_dashboard.personal_lexicon import (
+        default_price_metric,
         learn_from_turn,
+        price_pref_label,
         remember_clarify,
+        remember_price_preference_from_text,
         should_skip_clarify,
     )
+
+    # Learn price type if the user just answered a clarify ("last sold", etc.)
+    remember_price_preference_from_text(user_query)
 
     route = route_ask(user_query, prior=prior)
     grounded = ground_ask_for_agent(user_query, prior=prior)
@@ -913,27 +919,38 @@ def run_agent_loop(
     ):
         q = str(route["clarify_question"])
         if should_skip_clarify(user_query, q):
-            # Already asked — pick a default and continue with tools
+            pref = default_price_metric() or "last_price"
+            label = price_pref_label(pref)
+            # Already asked — apply learned (or last-sold) default and continue
             route = {
                 **route,
-                "kind": "mixed",
-                "confidence": 0.55,
-                "preferred_tools": [
-                    "lookup_entity_values",
-                    "run_standard_analytics_pivot",
-                    "execute_read_only_sql",
-                ],
-                "blocked_tools": [],
+                "kind": "mixed" if pref in {"min_rate", "max_rate"} else "standard",
+                "confidence": 0.6,
+                "preferred_tools": (
+                    ["run_standard_analytics_pivot"]
+                    if pref in {"price_fetch", "avg_price", "last_price"}
+                    else [
+                        "lookup_entity_values",
+                        "execute_read_only_sql",
+                        "run_standard_analytics_pivot",
+                    ]
+                ),
+                "blocked_tools": (
+                    ["execute_read_only_sql"] if pref == "price_fetch" else []
+                ),
                 "clarify_question": None,
-                "rationale": "clarify_skipped_recent — use a sensible default",
+                "rationale": f"clarify_skipped_recent — default {pref}",
                 "prompt_block": (
                     "=== ROUTING (authoritative) ===\n"
-                    "kind=mixed confidence=0.55 (clarify skipped — already asked).\n"
-                    "Do NOT ask another clarifying question. Default to last sold "
-                    "price if the price type is still ambiguous; state that "
-                    "assumption in one line, then fetch with tools."
+                    f"kind=standard confidence=0.60 (clarify skipped).\n"
+                    f"Do NOT ask again. Use metric `{pref}` ({label}); "
+                    "state that assumption in one line, then fetch with tools."
                 ),
             }
+            if not default_price_metric():
+                from eva_dashboard.personal_lexicon import remember_pref
+
+                remember_pref("default_price_metric", pref)
         else:
             remember_clarify(q, user_query)
             return _finish(
@@ -1114,6 +1131,21 @@ def run_agent_loop(
 
 
 def react_agent_enabled() -> bool:
-    """Feature flag — default ON for v1.4 ReAct path."""
+    """Feature flag — default ON for v1.4 ReAct path.
+
+    Legacy ``plan_query`` loop (``EVA_REACT_AGENT=0``) is deprecated and kept
+    only as an emergency rollback. Prefer ReAct + legacy engines via tools.
+    """
     raw = os.environ.get("EVA_REACT_AGENT", "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    enabled = raw not in {"0", "false", "no", "off"}
+    if not enabled:
+        import warnings
+
+        warnings.warn(
+            "EVA_REACT_AGENT=0 enables the deprecated plan_query chat loop. "
+            "ReAct is the supported path; this rollback will be removed once "
+            "the money-metric golden suite stays green.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return enabled

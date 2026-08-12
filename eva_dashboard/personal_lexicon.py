@@ -118,7 +118,7 @@ def remember_party_alias(spoken: str, canonical: str) -> None:
 
 
 def remember_pref(key: str, value: Any) -> None:
-    """Sticky prefs: default_city, default_bus, ams_window, etc."""
+    """Sticky prefs: default_city, default_bus, default_price_metric, ams_window, etc."""
     k = str(key or "").strip()
     if not k or value in (None, "", [], {}):
         return
@@ -127,6 +127,62 @@ def remember_pref(key: str, value: Any) -> None:
     prefs[k] = value
     data["prefs"] = prefs
     save_lexicon(data)
+
+
+_PRICE_PREF_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(price\s*fetch|cost\s*factor|fetched)\b", re.I), "price_fetch"),
+    (re.compile(r"\b(avg|average)\b.+\b(rate|price)\b|\b(average|avg)\s+rate\b", re.I), "avg_price"),
+    (re.compile(r"\b(last|latest|most\s+recent)\b.+\b(rate|price|sold)\b|\blast\s+sold\b", re.I), "last_price"),
+    (re.compile(r"\b(lowest|minimum|min)\b.+\b(rate|price)\b", re.I), "min_rate"),
+    (re.compile(r"\b(highest|maximum|max)\b.+\b(rate|price)\b", re.I), "max_rate"),
+]
+
+
+def parse_price_preference(user_text: str) -> str | None:
+    """Map spoken price type → sticky pref value."""
+    t = user_text or ""
+    for pat, value in _PRICE_PREF_PATTERNS:
+        if pat.search(t):
+            return value
+    # Bare one-word replies after a clarify
+    low = _norm(t)
+    mapping = {
+        "average": "avg_price",
+        "avg": "avg_price",
+        "average rate": "avg_price",
+        "last": "last_price",
+        "last sold": "last_price",
+        "latest": "last_price",
+        "price fetch": "price_fetch",
+        "fetch": "price_fetch",
+        "lowest": "min_rate",
+        "highest": "max_rate",
+    }
+    return mapping.get(low)
+
+
+def remember_price_preference_from_text(user_text: str) -> str | None:
+    """If the user stated a price type, persist it and return the pref value."""
+    pref = parse_price_preference(user_text)
+    if pref:
+        remember_pref("default_price_metric", pref)
+    return pref
+
+
+def default_price_metric() -> str | None:
+    data = load_lexicon()
+    pref = (data.get("prefs") or {}).get("default_price_metric")
+    return str(pref) if pref else None
+
+
+def price_pref_label(metric: str | None) -> str:
+    return {
+        "avg_price": "average rate",
+        "last_price": "last sold price",
+        "price_fetch": "Price Fetch",
+        "min_rate": "lowest rate",
+        "max_rate": "highest rate",
+    }.get(str(metric or ""), "last sold price")
 
 
 def sync_prefs_from_memory(prior: dict[str, Any] | None) -> None:
@@ -141,6 +197,13 @@ def sync_prefs_from_memory(prior: dict[str, Any] | None) -> None:
         remember_pref("default_business_units", bus[:4])
     if filters.get("client_type"):
         remember_pref("default_client_type", str(filters["client_type"]))
+    metrics = set(prior.get("metrics") or [])
+    for key in ("price_fetch", "last_price", "avg_price"):
+        if key in metrics:
+            remember_pref("default_price_metric", key)
+            break
+    if prior.get("price_spec") and not metrics:
+        remember_pref("default_price_metric", "price_fetch")
 
 
 def expand_aliases_in_text(user_text: str) -> tuple[str, list[dict[str, str]]]:
@@ -179,6 +242,12 @@ def lexicon_prompt_block(user_text: str = "") -> str:
             "did not name a competing city/BU and the ask is a follow-up or "
             "underspecified sales question — never override an explicit clear."
         )
+        if prefs.get("default_price_metric"):
+            payload["price_pref_rule"] = (
+                f"User's preferred price type is `{prefs['default_price_metric']}` "
+                f"({price_pref_label(str(prefs['default_price_metric']))}). "
+                "On bare 'price' asks, use that metric without re-asking."
+            )
     style = data.get("style") or {}
     if style:
         payload["reply_style"] = style

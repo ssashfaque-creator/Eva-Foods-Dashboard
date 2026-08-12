@@ -51,34 +51,71 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const payload = JSON.stringify({
+    messages,
+    model: body.model || undefined,
+    reply_followup: body.reply_followup || undefined,
+  });
+
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${secret}`,
+  };
+
+  // Prefer SSE status stream so long ReAct rounds stay alive / visible.
   try {
-    const upstream = await fetch(`${url}/chat`, {
+    const upstream = await fetch(`${url}/chat/stream`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${secret}`,
-      },
-      body: JSON.stringify({
-        messages,
-        model: body.model || undefined,
-        reply_followup: body.reply_followup || undefined,
-      }),
+      headers,
+      body: payload,
       signal: AbortSignal.timeout(55_000),
     });
 
-    const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            (data && (data.detail || data.error)) ||
-            `Bridge error (${upstream.status})`,
+    if (upstream.ok && upstream.body) {
+      // Proxy SSE through to the browser
+      return new NextResponse(upstream.body, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
         },
-        { status: upstream.status }
-      );
+      });
     }
-    return NextResponse.json(data);
+
+    // Fall back to classic /chat if stream route missing (older bridge)
+    if (upstream.status === 404) {
+      const classic = await fetch(`${url}/chat`, {
+        method: "POST",
+        headers,
+        body: payload,
+        signal: AbortSignal.timeout(55_000),
+      });
+      const data = await classic.json().catch(() => ({}));
+      if (!classic.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              (data && (data.detail || data.error)) ||
+              `Bridge error (${classic.status})`,
+          },
+          { status: classic.status }
+        );
+      }
+      return NextResponse.json(data);
+    }
+
+    const data = await upstream.json().catch(() => ({}));
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          (data && (data.detail || data.error)) ||
+          `Bridge error (${upstream.status})`,
+      },
+      { status: upstream.status }
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Bridge unreachable";
     return NextResponse.json(

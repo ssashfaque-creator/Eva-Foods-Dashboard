@@ -34,7 +34,7 @@ curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashb
 Your browser should open to `http://localhost:8501`.  
 Leave the Terminal window open while you use the app. Stop with `Ctrl+C`.
 
-Chat banner must show **v1.4.3+** and a path containing `Eva-Foods-Dashboard-new`.
+Chat banner must show **v1.4.4+** and a path containing `Eva-Foods-Dashboard-new`.
 If you still see `sales-dashboard-pdf-8203` or **v1.0.0**, you launched the wrong binary — use the full path above.
 
 Optional:

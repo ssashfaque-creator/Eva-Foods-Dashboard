@@ -162,6 +162,21 @@ CREATE TABLE IF NOT EXISTS factor_costs (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (client_type, prod_id)
 );
+
+CREATE TABLE IF NOT EXISTS eval_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    case_id TEXT,
+    user_text TEXT,
+    answer TEXT,
+    rating TEXT NOT NULL,
+    route_kind TEXT,
+    route_json TEXT,
+    tool_trace_json TEXT,
+    issues_json TEXT,
+    model TEXT,
+    source TEXT
+);
 """
 
 
