@@ -1356,6 +1356,16 @@ def _looks_sales_yoy_compare(text: str) -> bool:
             r"compared? (to|with) last year)\b",
             t,
         )
+        # "July 2025 vs 2026" / "compare … 2025 vs 2026"
+        or re.search(
+            r"\b(?:"
+            r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+            r"nov(?:ember)?|dec(?:ember)?"
+            r")\s+20\d{2}\s+(?:vs\.?|versus|compared?\s+to)\s+20\d{2}\b",
+            t,
+        )
+        or re.search(r"\b20\d{2}\s+(?:vs\.?|versus)\s+20\d{2}\b", t)
         or (
             re.search(r"\b(analy[sz]e|analysis)\b.+\b(sales|these|this|them)\b", t)
             and re.search(r"\b(last year|year ago|yoy|year over year)\b", t)

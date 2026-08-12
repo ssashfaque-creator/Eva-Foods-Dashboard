@@ -119,11 +119,15 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
     )
     phrases: list[str] = []
     # "... exclude X" / "without X" / "except X"
+    # Stop before a new INCLUDE ask: "exclude al shaheer and show me Eva…"
     for m in re.finditer(
         rf"\b{_EXCLUDE_VERBS}\s+"
         r"(?:the\s+)?(.+?)(?="
         rf"\s+(?:and|,|;)\s+{_EXCLUDE_VERBS}\b|"
         r"\s+and\s+include\b|"
+        r"\s+and\s+(?:then\s+)?"
+        r"(?:show|display|list|give|return|pull|fetch|get)\b|"
+        r"\s+then\s+(?:show|display|list|give)\b|"
         r"\s+but\s+(?!not\b|exclude|excluding|remove|except)|"
         r"$)",
         scrubbed,

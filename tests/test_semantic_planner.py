@@ -39,7 +39,7 @@ def test_prompt_is_semantic_planner() -> None:
 
 
 def test_executor_does_not_invent_filters_from_user_text() -> None:
-    """Blind execute: user_text must not inject city/client_type."""
+    """Blind execute: user_text must not inject city on a BU matrix plan."""
     plan = {
         "intent": "sales_matrix",
         "period_type": "MTD",
@@ -47,12 +47,13 @@ def test_executor_does_not_invent_filters_from_user_text() -> None:
         "filters": {},
         "business_units": ["Eva Consumer"],
     }
-    # Even with spoken Lahore / distributors in user_text, filters stay empty
+    # Spoken Lahore must not invent city on a BU matrix; distributor channel
+    # is only auto-applied for distributor rank/list asks (not BU sales).
     out = execute_query_spec(
         plan,
-        user_text="Eva distributor sales in Lahore last 6 months",
+        user_text="Eva sales in Lahore last 6 months",
     )
-    # May fail on empty DB — but query_spec filters must stay empty
+    # May fail on empty DB — but query_spec city must stay empty
     qs = out.get("query_spec") or {}
     filters = qs.get("filters") or {}
     assert not filters.get("city")

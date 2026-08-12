@@ -992,6 +992,61 @@ def _fetch_lines(
     return frame.reset_index(drop=True)
 
 
+def _limit_matrix_rows(
+    matrix: dict[str, Any],
+    limit: int,
+    *,
+    row_key: str,
+) -> dict[str, Any]:
+    """Keep top-N non-total rows by Total; recompute footer for the shown set."""
+    if not matrix or not limit or limit <= 0:
+        return matrix
+    rows = list(matrix.get("rows") or [])
+    body = [r for r in rows if str(r.get("row_kind") or "") != "total"]
+    if len(body) <= limit:
+        return matrix
+    # Prefer explicit Total column; else sum numeric cells
+    def _row_total(r: dict[str, Any]) -> float:
+        if r.get("Total") is not None:
+            try:
+                return float(r.get("Total") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        tot = 0.0
+        for k, v in r.items():
+            if k in {row_key, "row_kind"} or isinstance(v, str):
+                continue
+            try:
+                tot += float(v or 0)
+            except (TypeError, ValueError):
+                continue
+        return tot
+
+    body = sorted(body, key=_row_total, reverse=True)[: int(limit)]
+    columns = list(matrix.get("columns") or [])
+    col_tot: dict[str, float] = {str(c): 0.0 for c in columns}
+    for entry in body:
+        for c in columns:
+            try:
+                col_tot[str(c)] = float(col_tot[str(c)]) + float(entry.get(str(c)) or 0)
+            except (TypeError, ValueError):
+                pass
+    col_tot = {k: mt_round(v) for k, v in col_tot.items()}
+    footer: dict[str, Any] = {row_key: "Total", "row_kind": "total"}
+    footer.update(col_tot)
+    out = dict(matrix)
+    out["rows"] = body + [footer]
+    out["column_totals"] = col_tot
+    out["grand_total_mt"] = float(col_tot.get("Total") or 0)
+    out["truncated"] = True
+    out["limit"] = int(limit)
+    hint = str(out.get("markdown_hint") or "")
+    out["markdown_hint"] = (
+        (hint + " " if hint else "") + f"Showing top {int(limit)} rows by Total."
+    )
+    return out
+
+
 def _pivot_mt(
     frame: pd.DataFrame,
     row_dim: str,
@@ -1007,8 +1062,22 @@ def _pivot_mt(
             "grand_total_mt": 0.0,
         }
 
+    # Pandas groupby drops NaN keys — map blanks so party totals match BU totals.
+    work = frame.copy()
+    for dim, blank in ((row_dim, "(unmapped)"), (col_dim, "Unmapped")):
+        if dim not in work.columns:
+            work[dim] = blank
+        else:
+            work[dim] = (
+                work[dim]
+                .fillna(blank)
+                .astype(str)
+                .str.strip()
+                .replace({"": blank, "nan": blank, "None": blank})
+            )
+
     pivot = (
-        frame.groupby([row_dim, col_dim], as_index=False)["mt"]
+        work.groupby([row_dim, col_dim], as_index=False)["mt"]
         .sum()
         .pivot(index=row_dim, columns=col_dim, values="mt")
         .fillna(0.0)
@@ -1102,6 +1171,17 @@ def _pivot_months(
     work = frame.copy()
     work["month"] = work["date"].astype(str).str.slice(0, 7)
     work = work[work["month"].isin(month_labels)]
+    # Keep null/blank row keys so customer-wise totals match BU totals.
+    if row_dim not in work.columns:
+        work[row_dim] = "(unmapped)"
+    else:
+        work[row_dim] = (
+            work[row_dim]
+            .fillna("(unmapped)")
+            .astype(str)
+            .str.strip()
+            .replace({"": "(unmapped)", "nan": "(unmapped)", "None": "(unmapped)"})
+        )
     pivot = (
         work.groupby([row_dim, "month"], as_index=False)["mt"]
         .sum()
@@ -2212,6 +2292,7 @@ def query_sales(
     prior_spec: dict[str, Any] | None = None,
     compare: str | None = None,
     active_only: bool = False,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """One-shot sales answer builder for the chatbot.
 
@@ -2542,6 +2623,10 @@ def query_sales(
         )
     else:
         primary = _build_pivot(frame, row_dim, col, row_groups=groups or None)
+
+    # Spoken "top 5" / limit — keep highest-volume rows; footer shows shown total.
+    if limit and int(limit) > 0 and row_dim in {"party", "city", "product"}:
+        primary = _limit_matrix_rows(primary, int(limit), row_key=row_dim)
 
     mode_norm = (mode or "matrix").strip().lower()
     if mode_norm in {"auto", "default"}:

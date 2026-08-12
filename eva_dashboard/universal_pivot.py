@@ -156,6 +156,150 @@ def _agg_avg_price(grp: pd.DataFrame) -> float | None:
     return float(rate) if rate is not None else None
 
 
+def _fill_row_dims(frame: pd.DataFrame, row_dims: list[str]) -> pd.DataFrame:
+    """Map blank/null grain keys to (unmapped) so volume is never dropped."""
+    work = frame.copy()
+    for d in row_dims:
+        if d not in work.columns:
+            work[d] = "(unmapped)"
+        else:
+            s = work[d]
+            work[d] = (
+                s.fillna("(unmapped)")
+                .astype(str)
+                .str.strip()
+                .replace({"": "(unmapped)", "nan": "(unmapped)", "None": "(unmapped)"})
+            )
+    return work
+
+
+def _combined_volume_avg_price_table(
+    frame: pd.DataFrame,
+    row_dims: list[str],
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Single Customer|BU × Volume (MT) + Avg Rate table (no client_type crosstab)."""
+    from eva_dashboard.fmt import mt_round, mt_str
+
+    leaf = row_dims[-1] if row_dims else "row"
+    work = _fill_row_dims(frame, row_dims)
+    empty = {
+        "row_dimension": leaf,
+        "column_dimension": "metrics",
+        "columns": ["Volume (MT)", "Avg Rate"],
+        "rows": [],
+        "hierarchical": False,
+        "row_headers": list(row_dims) or [leaf],
+        "value_format": "mixed",
+        "grand_total_mt": 0.0,
+    }
+    if work.empty or "mt" not in work.columns:
+        return empty
+
+    rows_out: list[dict[str, Any]] = []
+    for keys, grp in work.groupby(list(row_dims), sort=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        cell = {d: str(v) for d, v in zip(row_dims, keys)}
+        vol = float(grp["mt"].fillna(0).astype(float).sum())
+        cell["Volume (MT)"] = mt_round(vol)
+        cell["Avg Rate"] = _agg_avg_price(grp)
+        cell["_sort_vol"] = vol
+        rows_out.append(cell)
+
+    rows_out.sort(key=lambda r: -float(r.get("_sort_vol") or 0))
+    full_total = sum(float(r.get("_sort_vol") or 0) for r in rows_out)
+    truncated = False
+    if limit and limit > 0 and len(rows_out) > limit:
+        rows_out = rows_out[: int(limit)]
+        truncated = True
+    shown_total = sum(float(r.get("_sort_vol") or 0) for r in rows_out)
+
+    for r in rows_out:
+        r.pop("_sort_vol", None)
+
+    tot = {leaf: "Total"}
+    for d in row_dims[:-1]:
+        tot[d] = ""
+    tot["Volume (MT)"] = mt_round(shown_total if truncated else full_total)
+    # Footer avg = overall MT-weighted avg of the (possibly truncated) set
+    if truncated:
+        keep = {str(r.get(leaf) or "") for r in rows_out}
+        sub = work[work[leaf].astype(str).isin(keep)]
+        tot["Avg Rate"] = _agg_avg_price(sub)
+    else:
+        tot["Avg Rate"] = _agg_avg_price(work)
+    tot["row_kind"] = "total"
+    rows_out.append(tot)
+
+    return {
+        "row_dimension": leaf,
+        "column_dimension": "metrics",
+        "columns": ["Volume (MT)", "Avg Rate"],
+        "rows": rows_out,
+        "hierarchical": len(row_dims) > 1,
+        "row_headers": list(row_dims),
+        "value_format": "mixed",
+        "grand_total_mt": float(full_total),
+        "shown_total_mt": float(shown_total),
+        "truncated": truncated,
+        "limit": limit,
+        "markdown_hint": (
+            f"{leaf} × Volume + Avg Rate"
+            + (f" (top {limit}; full total {mt_str(full_total)} MT)" if truncated else "")
+        ),
+    }
+
+
+def _combined_table_to_markdown(matrix: dict[str, Any], row_key: str) -> str:
+    """Render Volume + Avg Rate side-by-side (MT + PKR)."""
+    from eva_dashboard.fmt import mt_str
+    from eva_dashboard.sales_query import _html_escape, _matrix_row_css_class
+
+    columns = list(matrix.get("columns") or [])
+    rows_in = list(matrix.get("rows") or [])
+    if not columns:
+        return "_No data._\n"
+    label_h = _ROW_HEADER_LABELS.get(row_key, row_key.replace("_", " ").title())
+    lines = [
+        '<div class="eva-mtx-wrap">',
+        '<table class="eva-mtx">',
+        "<thead><tr>",
+        f"<th>{_html_escape(label_h)}</th>",
+    ]
+    for c in columns:
+        lines.append(f'<th class="num">{_html_escape(c)}</th>')
+    lines.append("</tr></thead><tbody>")
+    for row in rows_in:
+        css = _matrix_row_css_class(row, row_key)
+        lines.append(f'<tr class="{css}">' if css else "<tr>")
+        lines.append(
+            f'<td class="dim">{_html_escape(row.get(row_key, ""))}</td>'
+        )
+        for c in columns:
+            val = row.get(c)
+            if c == "Avg Rate":
+                text = _pkr_str(val)
+            elif val is None:
+                text = "—"
+            else:
+                try:
+                    text = mt_str(float(val))
+                except (TypeError, ValueError):
+                    text = _html_escape(val)
+            lines.append(f'<td class="num">{text}</td>')
+        lines.append("</tr>")
+    lines.append("</tbody></table></div>")
+    note = ""
+    if matrix.get("truncated") and matrix.get("grand_total_mt") is not None:
+        note = (
+            f"\n_Showing top {matrix.get('limit')}; "
+            f"full scope total = {mt_str(matrix['grand_total_mt'])} MT._\n"
+        )
+    return "\n".join(lines) + "\n" + note
+
+
 def _pivot_avg_price(
     frame: pd.DataFrame,
     row_dims: list[str],
@@ -273,6 +417,7 @@ def execute_universal_pivot(
     parties: list[str] | None = None,
     party_ilike: list[str] | None = None,
     active_only: bool = False,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """OLAP pivot for avg_price (PKR) and optional volume matrices."""
     rows = [d for d in row_dimensions if d in ROW_DIMS]
@@ -386,43 +531,61 @@ def execute_universal_pivot(
             if col_dim == "month"
             else _ROW_HEADER_LABELS.get(col_dim or "", (col_dim or "Total").title())
         )
-        # Volume + average price in one ask → show both (volume first)
-        if "volume" in mets:
-            vol_frame = frame
-            vol_col = col_dim
-            if not vol_col and "month" not in (labels or []):
-                vol_frame = frame.copy()
-                vol_frame["_metric"] = "Volume (MT)"
-                vol_col = "_metric"
-            vol_matrix = _build_pivot(
-                vol_frame,
-                row_dim,
-                vol_col or "client_type",
-                month_labels=labels or None,
-                row_groups=row_groups,
+        # Flat volume + avg_price → one Customer|BU table (no client_type grid)
+        if "volume" in mets and not col_dim:
+            combined = _combined_volume_avg_price_table(
+                frame, rows or ["business_unit"], limit=limit
             )
-            result["volume_matrix"] = vol_matrix
+            result["matrix"] = combined
+            result["volume_matrix"] = combined
+            parts.append(f"### {title_rows} — Volume + Avg price\n")
+            parts.append(f"_{blurb}_\n")
+            parts.append(_combined_table_to_markdown(combined, row_dim))
+            parts.append("\n_Avg Rate is MT-weighted (PKR)._\n")
+        else:
+            # Volume + average price with a column grain → two matrices
+            if "volume" in mets:
+                vol_frame = _fill_row_dims(frame, rows) if rows else frame
+                vol_col = col_dim
+                if not vol_col and "month" not in (labels or []):
+                    vol_frame = vol_frame.copy()
+                    vol_frame["_metric"] = "Volume (MT)"
+                    vol_col = "_metric"
+                vol_matrix = _build_pivot(
+                    vol_frame,
+                    row_dim,
+                    vol_col or "client_type",
+                    month_labels=labels or None,
+                    row_groups=row_groups,
+                )
+                result["volume_matrix"] = vol_matrix
+                parts.append(
+                    f"### Volume — {title_rows}"
+                    + (f" × {title_cols}" if col_dim else "")
+                    + "\n"
+                )
+                parts.append(f"_{blurb}_\n")
+                parts.append(_matrix_to_markdown(vol_matrix, row_dim))
+                parts.append("\n")
+            price_matrix = _pivot_avg_price(
+                _fill_row_dims(frame, rows) if rows else frame,
+                rows,
+                col_dim,
+                month_labels=labels or None,
+            )
+            result["matrix"] = price_matrix
             parts.append(
-                f"### Volume — {title_rows}"
+                f"### Avg price — {title_rows}"
                 + (f" × {title_cols}" if col_dim else "")
                 + "\n"
             )
             parts.append(f"_{blurb}_\n")
-            parts.append(_matrix_to_markdown(vol_matrix, row_dim))
-            parts.append("\n")
-        price_matrix = _pivot_avg_price(
-            frame, rows, col_dim, month_labels=labels or None
-        )
-        result["matrix"] = price_matrix
-        parts.append(f"### Avg price — {title_rows}" + (
-            f" × {title_cols}" if col_dim else ""
-        ) + "\n")
-        parts.append(f"_{blurb}_\n")
-        parts.append(_matrix_to_markdown_priced(price_matrix, row_dim))
-        parts.append("\n_Values are MT-weighted Avg Rate (PKR)._\n")
+            parts.append(_matrix_to_markdown_priced(price_matrix, row_dim))
+            parts.append("\n_Values are MT-weighted Avg Rate (PKR)._\n")
     else:
+        filled = _fill_row_dims(frame, rows) if rows else frame
         primary = _build_pivot(
-            frame,
+            filled,
             row_dim,
             col_dim or "client_type",
             month_labels=labels or None,

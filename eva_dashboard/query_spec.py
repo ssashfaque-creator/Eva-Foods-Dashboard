@@ -1258,7 +1258,20 @@ def _validate_spoken_city_vs_clear(
         kept = filt_city.lower() == city_l or any(
             c.lower() == city_l for c in filt_cities
         )
-        if "city" in clear and not kept:
+        # City token inside an exact party name ("Al Shaheer Lahore") is not a
+        # geography filter ask — party scope already carries the branch.
+        party_blob = " ".join(
+            str(x)
+            for x in (
+                filters.get("party"),
+                *(filters.get("parties") or []),
+                *(filters.get("party_ilike") or []),
+                spec.get("party_query"),
+            )
+            if x
+        ).lower()
+        city_in_party_name = bool(city_l and city_l in party_blob)
+        if "city" in clear and not kept and not city_in_party_name:
             errors.append(
                 f"clear_filters includes 'city' but the user still said "
                 f"'{city}'. Do NOT clear city — set filters.city='{city}' "
@@ -1267,7 +1280,7 @@ def _validate_spoken_city_vs_clear(
                 "for national / all Pakistan / other cities without naming "
                 "that city."
             )
-        elif not kept and "city" not in row_dims:
+        elif not kept and "city" not in row_dims and not city_in_party_name:
             errors.append(
                 f"User said '{city}' but filters.city is missing. "
                 f"Set filters.city='{city}' (and state_action='clear' for a "
@@ -1373,10 +1386,13 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
             rows = rows or ["business_unit"]
         # Volume for one month → Volume+AMS pack (client_type cross-tab, not months).
         # volume + avg_price summaries stay flat (no forced channel grid).
+        # Party / customer rows stay flat (Customer × Volume[/Avg price]), never
+        # party × client_type unless the user asked channel-wise.
         if (
             ("volume" in mets or "ams" in mets or not mets)
             and not cols
             and "avg_price" not in mets
+            and "party" not in rows
         ):
             grain.setdefault("column_dimension", "client_type")
         return {

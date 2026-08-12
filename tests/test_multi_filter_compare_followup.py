@@ -271,8 +271,8 @@ def test_execute_channel_compare_lahore() -> None:
             ]
             blob = " ".join(labels)
             assert "imtiaz" in blob
-            # Eva Distributors rolls up to Direct Customers on channel rows
-            assert "direct" in blob or "distributor" in blob
+            # Eva Distributors stays its own reporting channel
+            assert "distributor" in blob
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

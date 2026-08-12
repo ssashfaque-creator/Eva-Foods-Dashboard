@@ -1251,15 +1251,42 @@ def analyze_parties(
             else pd.Series(dtype=float)
         )
         all_seg_mt = float(seg_total.sum()) if not seg_total.empty else 0.0
+        # AMS share of segment within each party's baseline (prior 3 months)
+        party_ams = _ams_by_entity(
+            as_of=as_of.replace(day=1),
+            entity_key="party",
+            city=city_f,
+            zone=zone_f,
+            client_type=ctype,
+            business_unit=None,
+            oil_type=None,
+            packing_category=None,
+            brand_prefix=None,
+        )
+        seg_ams = _ams_by_entity(
+            as_of=as_of.replace(day=1),
+            entity_key="party",
+            city=city_f,
+            zone=zone_f,
+            client_type=ctype,
+            business_unit=segment_bu,
+            oil_type=segment_oil,
+            packing_category=segment_pack,
+            brand_prefix=brand_prefix,
+        )
         rows = []
         parties = set(party_total.index) | set(seg_total.index)
         for party in parties:
             p_mt = float(party_total.get(party, 0.0))
             s_mt = float(seg_total.get(party, 0.0))
+            p_ams = float(party_ams.get(party, 0.0))
+            s_ams = float(seg_ams.get(party, 0.0))
             if metric_n == "share_of_segment":
                 score = (s_mt / all_seg_mt * 100.0) if all_seg_mt else None
+                ams_share = None
             else:
                 score = (s_mt / p_mt * 100.0) if p_mt else None
+                ams_share = (s_ams / p_ams * 100.0) if p_ams else None
             meta = _party_meta(party_frame if not party_frame.empty else seg_frame, party)
             rows.append(
                 {
@@ -1267,6 +1294,11 @@ def analyze_parties(
                     **meta,
                     "volume_mt": mt_round(p_mt),
                     "segment_mt": mt_round(s_mt),
+                    "ams_mt": mt_round(p_ams),
+                    "segment_ams_mt": mt_round(s_ams),
+                    "ams_share_pct": (
+                        round(ams_share, 1) if ams_share is not None else None
+                    ),
                     "score": round(score, 1) if score is not None else None,
                 }
             )
@@ -1278,18 +1310,39 @@ def analyze_parties(
             if metric_n == "share_of_segment"
             else "% of party volume"
         )
+        extra = ["volume_mt", "segment_mt"]
+        overrides = None
+        if metric_n == "segment_mix":
+            extra = [
+                "volume_mt",
+                "segment_mt",
+                "ams_mt",
+                "segment_ams_mt",
+                "ams_share_pct",
+            ]
+            overrides = {
+                "segment_mt": "Segment vol (MT)",
+                "segment_ams_mt": "Segment AMS (MT)",
+                "ams_share_pct": "% of party AMS",
+            }
         return _party_table_result(
             rows=rows,
             period_info=period_info,
             filters={**filters, "segment_oil": segment_oil},
             metric=metric_n,
             score_label=score_label,
-            extra_cols=["volume_mt", "segment_mt"],
+            extra_cols=extra,
             blurb=(
                 f"Party share of "
                 f"{segment_oil or segment_bu or segment_pack or brand_prefix} "
                 f"({_scope_blurb(filters, period_info)})"
+                + (
+                    " · % of party volume and % of party AMS"
+                    if metric_n == "segment_mix"
+                    else ""
+                )
             ),
+            col_label_overrides=overrides,
         )
 
     # Volume / AMS / vs AMS / doing well / YoY / invoices (party / city / zone)
@@ -1604,7 +1657,23 @@ def analyze_parties(
         score_key, score_label = "ams_mt", "AMS (MT)"
     elif metric_n == "vs_ams":
         # Need an AMS baseline to judge under/over-performance.
-        rows = [r for r in rows if (r["ams_mt"] or 0) > 0]
+        # Drop empty shells (0 volume AND 0 AMS) — they are not real declines.
+        rows = [
+            r
+            for r in rows
+            if (r.get("ams_mt") or 0) > 0
+            and (
+                (r.get("volume_mt") or 0) > 0
+                or (r.get("ams_mt") or 0) > 0
+            )
+        ]
+        if declined_only:
+            rows = [
+                r
+                for r in rows
+                if isinstance(r.get("pct_vs_ams"), (int, float))
+                and float(r["pct_vs_ams"]) < 0
+            ]
         rows.sort(key=lambda r: sk(r["pct_vs_ams"], r["volume_mt"] or 0))
         score_key, score_label = "pct_vs_ams", "% vs AMS/Expected"
     elif metric_n == "ams_growth":
@@ -1790,6 +1859,12 @@ def analyze_parties(
                     else "AMS (3 prior months)"
                 )
             )
+        if metric_filters:
+            from eva_dashboard.metric_filters import metric_filters_blurb
+
+            cut = metric_filters_blurb(metric_filters)
+            if cut:
+                blurb += f" · {cut}"
         mode = (title_mode or "").strip().lower()
         low_title = sort_n == "asc" or mode in {
             "underperformers",
@@ -2057,6 +2132,8 @@ def _party_table_result(
         "ams_growth_pct": "AMS growth %",
         "expected_mt": "Expected (MT)",
         "segment_mt": "Segment (MT)",
+        "segment_ams_mt": "Segment AMS (MT)",
+        "ams_share_pct": "% of party AMS",
         "prior_mt": "Volume last year (MT)",
         "pct_vs_ams": "% vs AMS",
         "yoy_pct": "Volume YoY %",
@@ -2237,6 +2314,25 @@ def party_sales(
         if qn in str(m.get("client") or "").strip().lower()
         or str(m.get("client") or "").strip().lower().startswith(qn)
     ]
+    best_score = max(float(m.get("match_score") or 0) for m in matches)
+    # Weak fuzzy hits (e.g. nonsense query → random party at 0.4) are not matches.
+    if not exact and best_score < 0.50:
+        cleaned = looked.get("query") or q
+        md = (
+            f"Could not find **{cleaned}** in clients or sales data.\n\n"
+            "Is this a **client / distributor** name? Please check the spelling "
+            "or give a fuller name (a city suffix helps, e.g. "
+            "`Rubina Shaheen (LHR)`). You can also name the city or client type "
+            "to help me search."
+        )
+        return {
+            "ok": True,
+            "mode": "party_not_found",
+            "query": cleaned,
+            "matches": [],
+            "answer_markdown": md + "\n",
+            "response_instructions": "REQUIRED: Use answer_markdown verbatim.",
+        }
     if len(exact) == 1:
         chosen = exact[0]
     elif len(partial) == 1 and float(partial[0].get("match_score") or 0) >= 0.55:

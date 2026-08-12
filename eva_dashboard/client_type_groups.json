@@ -2,7 +2,7 @@
   "version": "1.0",
   "description": "Ops remapping: raw Excel/sales client types → reporting channel groups. Spoken aliases stay in client_language.py. Filter by a specific raw type (metro → METRO HABIB) keeps that type; channel-wise rows use the group (IMT).",
   "groups": {
-    "Eva Distributors": "Direct Customers",
+    "Eva Distributors": "Eva Distributors",
     "Direct Customers (Karachi)": "Direct Customers",
     "Oil Clients": "Oil Clients",
     "Bulk Debtors": "Bulk Debtors",

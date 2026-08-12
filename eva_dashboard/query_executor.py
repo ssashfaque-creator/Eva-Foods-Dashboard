@@ -18,6 +18,7 @@ from typing import Any
 
 from eva_dashboard.client_language import (
     extract_all_client_types_from_text,
+    extract_client_type_from_text,
     extract_oil_and_packing,
     extract_oil_type_from_text,
     match_client_type_alias,
@@ -25,7 +26,7 @@ from eva_dashboard.client_language import (
     normalize_oil_type,
     normalize_packing_category,
 )
-from eva_dashboard.geo import normalize_zone
+from eva_dashboard.geo import extract_zone_from_text, normalize_zone
 from eva_dashboard.advanced_analytics import party_profile
 from eva_dashboard.party_analytics import (
     analyze_parties,
@@ -426,7 +427,9 @@ _WISE_PATTERNS: list[tuple[str, str]] = [
         r"by\s+part(y|ies)|by\s+distributors?|by\s+customers?|"
         r"customer\s+break(?:up|down)?|party\s+break(?:up|down)?|"
         r"break(?:up|down)?\s+customer[- ]?wise|"
-        r"break(?:up|down)?\s+(by\s+)?customers?"
+        r"break(?:up|down)?\s+(by\s+)?customers?|"
+        r"main\s+customers?|who\s+(were|are|bought)|"
+        r"which\s+customers?|top\s+customers?|key\s+customers?"
         r")\b",
         "party",
     ),
@@ -520,7 +523,51 @@ def _looks_yoy_compare(user_text: str) -> bool:
             r")\b",
             t,
         )
+        # "July 2025 vs 2026" / "2025 vs 2026" same-month year compare
+        or re.search(
+            r"\b(?:"
+            r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+            r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+            r"nov(?:ember)?|dec(?:ember)?"
+            r")\s+20\d{2}\s+(?:vs\.?|versus|compared?\s+to)\s+20\d{2}\b",
+            t,
+        )
+        or re.search(
+            r"\b20\d{2}\s+(?:vs\.?|versus)\s+20\d{2}\b",
+            t,
+        )
     )
+
+
+def _looks_main_customers_ask(user_text: str) -> bool:
+    """Follow-ups that want a customer list of the prior scope."""
+    t = (user_text or "").lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"main\s+customers?|key\s+customers?|top\s+customers?|"
+            r"who\s+(were|are)\s+the\s+(main\s+)?customers?|"
+            r"who\s+bought|which\s+customers?|"
+            r"customer\s+wise|customer[- ]?wise|by\s+customers?"
+            r")\b",
+            t,
+        )
+    )
+
+
+def _extract_top_n(user_text: str) -> int | None:
+    t = (user_text or "").lower()
+    m = re.search(r"\btop\s+(\d{1,3})\b", t)
+    if not m:
+        # "the 10 distributors with the highest…" / "show 5 parties"
+        m = re.search(
+            r"\b(?:the\s+)?(\d{1,3})\s+"
+            r"(?:distributors?|parties|customers?|clients?|stores?)\b",
+            t,
+        )
+    if not m:
+        return None
+    return max(1, min(200, int(m.group(1))))
 
 
 def _looks_growth_drivers(user_text: str) -> bool:
@@ -1084,11 +1131,251 @@ def _coerce_vocab_from_user_text(
             else:
                 filters.pop("parties", None)
 
-    # --- YoY / same period last year ---
+    # --- YoY / same period last year / "July 2025 vs 2026" ---
     if _looks_yoy_compare(t) and not out.get("compare"):
         out["compare"] = "yoy"
         if prior and out.get("base") != "prior":
             out["base"] = "prior"
+        # Prefer the later year as the current SPECIFIC_MONTH
+        years = [int(y) for y in re.findall(r"\b(20\d{2})\b", t)]
+        if len(years) >= 2:
+            later = max(years)
+            # Keep spoken month if present
+            name_to_num = {
+                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3,
+                "march": 3, "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6,
+                "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9,
+                "september": 9, "oct": 10, "october": 10, "nov": 11,
+                "november": 11, "dec": 12, "december": 12,
+            }
+            mm = re.search(
+                r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+                r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+                r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+                t,
+            )
+            if mm:
+                num = name_to_num.get(mm.group(1).lower())
+                if num:
+                    out["period_type"] = "SPECIFIC_MONTH"
+                    out["target_month"] = f"{later:04d}-{num:02d}"
+                    period = dict(out.get("period") or {})
+                    period["phrase"] = out["target_month"]
+                    out["period"] = period
+                    cols = [c for c in cols if c != "month"]
+        # Distributor channel on YoY year compares
+        if re.search(r"\bdistributors?\b", t) and not filters.get("client_type"):
+            ct = extract_client_type_from_text(user_text) or "Eva Distributors"
+            filters["client_type"] = ct
+        # Channel is a FILTER on year-vs-year — don't also make it the only row grain
+        if filters.get("client_type") and rows == ["client_type"]:
+            rows = ["business_unit"]
+            cols = []
+
+    # --- Main customers / customer-wise of prior oil|BU|month scope ---
+    # Flat Customer × Volume + Avg Price (never party × client_type).
+    # Preserve nests like customer-wise × packing-wise.
+    nest_leafs = {"packing_category", "product", "oil_type"} & set(wise_dims)
+    main_customers = _looks_main_customers_ask(user_text)
+    if (main_customers or "party" in wise_dims) and prior and not nest_leafs:
+        prior_mets = list(prior.get("metrics") or [])
+        prior_filters = dict(prior.get("filters") or {})
+        has_price_prior = bool(
+            set(prior_mets) & {"avg_price", "price_fetch"}
+            or prior_filters.get("oil_type")
+            or re.search(r"\b(price|rate)\b", t)
+        )
+        rows = ["party"]
+        cols = []
+        if has_price_prior or "avg_price" in metrics or "price_fetch" in metrics:
+            if "volume" not in metrics:
+                metrics = ["volume"] + [m for m in metrics if m != "volume"]
+            if "avg_price" not in metrics:
+                metrics = [m for m in metrics if m != "price_fetch"] + ["avg_price"]
+            # Drop channel crosstab leftovers
+            metrics = [m for m in metrics if m in {"volume", "avg_price", "ams"}]
+            if "volume" not in metrics:
+                metrics.insert(0, "volume")
+            if "avg_price" not in metrics:
+                metrics.append("avg_price")
+        elif not metrics:
+            metrics = ["volume", "ams"]
+        # Inherit prior filters (oil / BU / city / period) via base=prior
+        if out.get("base") != "prior":
+            out["base"] = "prior"
+            out["state_action"] = out.get("state_action") or "modify"
+        out["_clear_omitted"] = False
+        out["context_handling"] = "prior"
+        if "clear_filters" not in out and "clear" not in out:
+            out["clear_filters"] = list(clear)
+            out["clear"] = list(clear)
+        # Carry period from prior when this turn is just "who were the customers"
+        if prior.get("period_type") and not out.get("period_type"):
+            out["period_type"] = prior.get("period_type")
+        if prior.get("target_month") and not out.get("target_month"):
+            out["target_month"] = prior.get("target_month")
+        if prior.get("months_back") and out.get("months_back") is None:
+            out["months_back"] = prior.get("months_back")
+        for key in (
+            "oil_type",
+            "packing_category",
+            "city",
+            "zone",
+            "client_type",
+            "business_unit",
+            "business_units",
+        ):
+            if prior_filters.get(key) and not filters.get(key):
+                filters[key] = prior_filters[key]
+        if prior.get("business_units") and not out.get("business_units"):
+            out["business_units"] = list(prior.get("business_units") or [])
+    elif (main_customers or "party" in wise_dims) and prior and nest_leafs:
+        # Customer × packing/SKU nest — keep prior scope, don't flatten metrics
+        if out.get("base") != "prior":
+            out["base"] = "prior"
+            out["state_action"] = out.get("state_action") or "modify"
+        out["_clear_omitted"] = False
+
+    # Spoken top-N ("top 5 parties" / "10 distributors")
+    top_n = _extract_top_n(user_text)
+    if top_n and (out.get("limit") in (None, 0) or int(out.get("limit") or 0) > top_n):
+        out["limit"] = top_n
+
+    # Spoken geography zone ("from the North", "in Central")
+    spoken_zone = extract_zone_from_text(user_text)
+    if spoken_zone and not filters.get("zone"):
+        filters["zone"] = spoken_zone
+
+    # Bare "distributor sales" / distributor ranking without a channel filter.
+    # Skip when the plan already locked a non-channel grain (e.g. BU matrix) and
+    # the model intentionally left client_type empty — except clear rank asks.
+    if (
+        re.search(r"\bdistributors?\b", t)
+        and not filters.get("client_type")
+        and not filters.get("client_types")
+        and "client_type" not in wise_dims
+    ):
+        ct = extract_client_type_from_text(user_text)
+        wants_dist_rank = bool(
+            re.search(
+                r"\b("
+                r"sales\s+by\s+distributors?|"
+                r"by\s+distributor|"
+                r"distributors?\s+with|"
+                r"distributors?\s+whose|"
+                r"which\s+distributors?|"
+                r"show\s+me\s+distributors?|"
+                r"distributor\s+sales|"
+                r"distributors?\s+sales"
+                r")\b",
+                t,
+            )
+        )
+        # Only invent the channel when ranking/listing distributors, or when
+        # rows are already party-grained. Do not rewrite a BU sales matrix plan.
+        if ct and (wants_dist_rank or "party" in rows or out.get("intent") == "party_rank"):
+            filters["client_type"] = ct
+        elif wants_dist_rank or "party" in rows or out.get("intent") == "party_rank":
+            filters["client_type"] = "Eva Distributors"
+
+    # Fresh "exclude X and show Eva …" must stay BU×month — never flip to party
+    # just because a party name appeared in an exclude phrase.
+    if (
+        re.search(
+            r"\b(remove|exclude|excluding|without|drop|hide|filter\s+out|except)\b",
+            t,
+        )
+        and not prior
+        and "party" not in wise_dims
+        and not re.search(
+            r"\b(customer|party|distributor)[- ]?wise\b|"
+            r"\bby\s+(customers?|parties|distributors?)\b",
+            t,
+        )
+    ):
+        if rows == ["party"] or (rows and rows[-1] == "party"):
+            rows = ["business_unit"]
+            if "month" not in cols:
+                cols = ["month"]
+            if not metrics:
+                metrics = ["volume", "ams"]
+
+    # AMS / growth thresholds → party rank (so metric_filters actually apply)
+    from eva_dashboard.metric_filters import merge_metric_filters, parse_metric_filters
+
+    spoken_mfs = parse_metric_filters(user_text)
+    if spoken_mfs:
+        out["metric_filters"] = merge_metric_filters(
+            list(out.get("metric_filters") or []), spoken_mfs
+        )
+        ams_cut = any(str(f.get("metric")) == "ams" for f in spoken_mfs)
+        if ams_cut and (
+            re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
+            or "party" in rows
+            or prior
+        ):
+            rows = ["party"]
+            cols = [c for c in cols if c != "month"]
+            out["intent"] = "party_rank"
+            out["operation"] = out.get("operation") or "pivot"
+            # Keep planner rank metric (ams_growth / vs_ams / …); default AMS.
+            if "ams_growth" in metrics:
+                out["metric"] = "ams_growth"
+            elif "vs_ams" in metrics:
+                out["metric"] = "vs_ams"
+            elif not out.get("metric"):
+                out["metric"] = "ams"
+            if not metrics:
+                metrics = ["ams", "volume", "vs_ams"]
+            if prior and out.get("base") != "prior":
+                out["base"] = "prior"
+                out["state_action"] = out.get("state_action") or "modify"
+            out["_clear_omitted"] = False
+
+    # "declined the most … vs AMS" → underperformers vs AMS
+    if re.search(
+        r"\b(declined|dropped|fell|underperform|behind)\b.+\b(ams|expected)\b|"
+        r"\bvs\.?\s*ams\b.+\b(declin|drop|worst|most)\b|"
+        r"\b(declined|dropped)\s+the\s+most\b",
+        t,
+    ):
+        rows = ["party"]
+        cols = []
+        out["intent"] = "party_rank"
+        out["metric"] = "vs_ams"
+        out["declined_only"] = True
+        out["sort"] = "asc"
+        metrics = ["vs_ams", "volume", "ams"]
+        if re.search(r"\bdistributors?\b", t) and not filters.get("client_type"):
+            filters["client_type"] = (
+                extract_client_type_from_text(user_text) or "Eva Distributors"
+            )
+
+    # "% of sales being VTF" → segment_mix (share of party volume + AMS)
+    if re.search(
+        r"\b(share|percent|%)\b.+\b(sales?|volume)\b.+\b(being|as|in)\b|"
+        r"\bhighest\s+share\b.+\b(vtf|oil|product|sku)\b|"
+        r"\bshare\s+of\s+their\s+sales\b",
+        t,
+    ):
+        oil_hit = extract_oil_type_from_text(user_text)
+        if oil_hit or re.search(r"\bvtf\b", t):
+            rows = ["party"]
+            cols = []
+            out["intent"] = "party_rank"
+            out["metric"] = "segment_mix"
+            metrics = ["segment_mix"]
+            if oil_hit:
+                filters["oil_type"] = oil_hit
+            elif re.search(r"\bvtf\b", t):
+                filters["oil_type"] = "Eva VTF"
+            if re.search(r"\bdistributors?\b", t) and not filters.get("client_type"):
+                filters["client_type"] = (
+                    extract_client_type_from_text(user_text) or "Eva Distributors"
+                )
+            grain = dict(out.get("grain") or {})
+            grain["mix_dimension"] = "oil_type"
+            out["grain"] = grain
 
     # --- Which products/SKUs led the growth ---
     if _looks_growth_drivers(t):
@@ -1819,11 +2106,15 @@ def execute_query_spec(
             # column grain (never equal the row leaf, e.g. channel×channel).
             # volume + avg_price oil/period summaries stay flat (no channel grid).
             mets_now = set(spec.get("metrics") or [])
+            rows_now = list(spec.get("row_dimensions") or [])
             if "volume" in mets_now and "avg_price" in mets_now:
                 grain.pop("column_dimension", None)
                 spec["column_dimensions"] = []
+            elif "party" in rows_now:
+                # Customer lists stay flat — never invent party × client_type
+                grain.pop("column_dimension", None)
+                spec["column_dimensions"] = []
             elif grain.get("column_dimension") == "month" or not cols_r:
-                rows_now = list(spec.get("row_dimensions") or [])
                 row_set = set(rows_now)
                 leaf = rows_now[-1] if rows_now else None
                 fallback = "client_type"
@@ -2172,7 +2463,8 @@ def execute_query_spec(
                     **party_kw,
                 )
         elif bool(row_dimensions):
-            # Plain avg_price pivot (no cost factor)
+            # Plain avg_price pivot (no cost factor) — party + volume + avg_price
+            # renders as a single Customer × Volume + Avg Rate table.
             result = execute_universal_pivot(
                 row_dimensions=row_dimensions,
                 column_dimensions=column_dimensions,
@@ -2189,6 +2481,7 @@ def execute_query_spec(
                 packing_category=filters.get("packing_category"),
                 client_type=filters.get("client_type"),
                 active_only=bool(filters.get("active_only")),
+                limit=int(spec.get("limit") or 0) or None,
                 **party_kw,
             )
         else:
@@ -2261,6 +2554,7 @@ def execute_query_spec(
             compare=spec.get("compare"),
             active_only=bool(filters.get("active_only")),
             prior_spec=None,
+            limit=int(spec.get("limit") or 0) or None,
             **party_kw,
         )
     else:

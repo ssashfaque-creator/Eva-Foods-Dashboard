@@ -80,7 +80,7 @@ def _seed() -> None:
 
 def test_ops_mapping_sheet_semantics() -> None:
     assert map_client_type("METRO HABIB") == "IMT"
-    assert map_client_type("Eva Distributors") == "Direct Customers"
+    assert map_client_type("Eva Distributors") == "Eva Distributors"
     assert map_client_type("NORTH LMT") == "LMT"
 
 
@@ -173,9 +173,8 @@ def test_execute_channel_wise_uses_groups() -> None:
             }
             assert "IMT" in labels
             assert "LMT" in labels
-            assert "Direct Customers" in labels
+            assert "Eva Distributors" in labels
             assert "METRO HABIB" not in labels
-            assert "Eva Distributors" not in labels
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

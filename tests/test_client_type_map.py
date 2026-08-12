@@ -34,13 +34,14 @@ def test_map_client_type_groups() -> None:
     assert map_client_type("Utility Stores Corporation") == "USC"
     assert map_client_type("Direct Customers (Karachi)") == "Direct Customers"
     assert map_client_type("Online Customer") == "Online Customers"
-    assert map_client_type("Eva Distributors") == "Direct Customers"
+    assert map_client_type("Eva Distributors") == "Eva Distributors"
     assert map_client_type("Imtiaz Store") == "Imtiaz Store"
     # Specific raw filter still classifies as raw (not the whole Direct group)
     from eva_dashboard.client_type_map import classify_client_type_filter
 
+    # Identity-mapped channel group (not rolled into Direct Customers)
     assert classify_client_type_filter("Eva Distributors") == (
-        "raw",
+        "group",
         "Eva Distributors",
     )
     assert classify_client_type_filter("METRO HABIB") == ("raw", "METRO HABIB")
@@ -131,8 +132,7 @@ def test_query_sales_pivots_by_new_client_type() -> None:
             assert "NORTH LMT" not in labels
             assert "IMT" in labels
             assert "LMT" in labels
-            assert "Direct Customers" in labels
-            assert "Eva Distributors" not in labels
+            assert "Eva Distributors" in labels
             assert "METRO HABIB" not in labels
 
             chase = query_sales(
