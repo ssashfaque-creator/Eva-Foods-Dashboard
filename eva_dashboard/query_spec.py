@@ -1368,8 +1368,13 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         if not rows and not (mets & {"avg_price", "price_fetch"}):
             grain.setdefault("row_dimension", "business_unit")
             rows = rows or ["business_unit"]
-        # Volume for one month → Volume+AMS pack (client_type cross-tab, not months)
-        if ("volume" in mets or "ams" in mets or not mets) and not cols:
+        # Volume for one month → Volume+AMS pack (client_type cross-tab, not months).
+        # volume + avg_price summaries stay flat (no forced channel grid).
+        if (
+            ("volume" in mets or "ams" in mets or not mets)
+            and not cols
+            and "avg_price" not in mets
+        ):
             grain.setdefault("column_dimension", "client_type")
         return {
             "period": period,

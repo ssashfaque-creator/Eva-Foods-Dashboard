@@ -323,3 +323,187 @@ def test_exclude_execute_keeps_bu_not_party_rows():
         md = (out.get("answer_markdown") or "").lower()
         assert "customer" in md or "business unit" in md
         assert "distributor" not in md.split("\n")[0:20] or "eva distributors" in md
+
+
+# --- New training CSV (20260812_152958_bee2) ---
+
+
+def test_product_wise_keeps_prior_month_grid():
+    """Turn 5: 'show this product wise' on a monthly table stays monthly."""
+    prior = {
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "months_back": 6,
+        "period_type": "LAST_N_MONTHS",
+        "excludes": {"party_like": ["al shaheer"]},
+    }
+    out = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["packing_category"],
+            "column_dimensions": ["client_type"],
+            "metrics": ["volume", "avg_price"],
+            "period_type": "SPECIFIC_MONTH",
+            "target_month": "2026-03",
+            "filters": {"city": "Lahore"},
+            "business_units": ["Eva Consumer", "Eva Bulk"],
+            "state_action": "modify",
+        },
+        "can you show this product wise",
+        prior=prior,
+    )
+    assert out.get("row_dimensions") == ["packing_category"]
+    assert out.get("column_dimensions") == ["month"]
+    assert out.get("period_type") == "LAST_N_MONTHS"
+    assert out.get("months_back") == 6
+    assert out.get("base") == "prior"
+    assert "volume" in (out.get("metrics") or [])
+
+
+def test_fresh_maan_ask_clears_sticky_city():
+    """Turn 8: complete Maan ask must not keep prior Lahore."""
+    prior = {
+        "filters": {"city": "Lahore"},
+        "business_units": ["Eva Consumer", "Eva Bulk"],
+        "row_dimensions": ["packing_category"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "months_back": 6,
+    }
+    out = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["product"],
+            "metrics": ["volume", "price_fetch"],
+            "period_type": "LAST_MONTH",
+            "filters": {"city": "Lahore"},
+            "business_units": ["Maan Consumer", "Maan Bulk"],
+            "state_action": "clear",
+        },
+        "show last maan sales by client type for all sku with the price fetch",
+        prior=prior,
+    )
+    filters = out.get("filters") or {}
+    assert not filters.get("city")
+    assert "city" in (out.get("clear_filters") or out.get("clear") or [])
+    assert out.get("base") != "prior"
+    assert out.get("row_dimensions") == ["client_type", "product"]
+
+
+def test_optional_city_language_clears_lahore():
+    """Turn 9: 'docent have to be lahore' clears city."""
+    from eva_dashboard.spoken_constraints import (
+        extract_clear_filter_keys,
+        looks_optional_city_scope,
+    )
+
+    assert looks_optional_city_scope("docent have to be lahore")
+    assert "city" in extract_clear_filter_keys("doesn't have to be lahore")
+    prior = {
+        "filters": {"city": "Lahore"},
+        "business_units": ["Maan Consumer", "Maan Bulk"],
+        "row_dimensions": ["product"],
+        "metrics": ["volume", "price_fetch"],
+    }
+    out = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["product"],
+            "metrics": ["volume", "price_fetch"],
+            "filters": {"city": "Lahore"},
+            "business_units": ["Maan Consumer", "Maan Bulk"],
+            "state_action": "modify",
+            "base": "prior",
+        },
+        "docent have to be lahore",
+        prior=prior,
+    )
+    assert not (out.get("filters") or {}).get("city")
+    assert "city" in (out.get("clear") or out.get("clear_filters") or [])
+
+
+def test_exclude_bulk_maps_to_business_units():
+    """Turn 14: bare 'exclude bulk' → Bulk BUs, never party_like."""
+    from eva_dashboard.spoken_constraints import resolve_exclude_map
+
+    assert resolve_exclude_map(
+        "exclude bulk",
+        prior_spec={"business_units": ["Eva Consumer", "Eva Bulk"]},
+    ) == {"business_unit": ["Eva Bulk"]}
+    assert resolve_exclude_map(
+        "exclude bulk",
+        prior_spec={
+            "business_units": [
+                "Eva Consumer",
+                "Eva Bulk",
+                "Maan Consumer",
+                "Maan Bulk",
+            ]
+        },
+    ) == {"business_unit": ["Eva Bulk", "Maan Bulk"]}
+    general = resolve_exclude_map("exclude bulk")
+    assert general.get("business_unit") == ["Eva Bulk", "Maan Bulk"]
+    assert not general.get("party_like")
+
+
+def test_soybean_meal_august_volume_and_avg_price():
+    """Turn 10: soybean meal August → correct year + volume + avg_price."""
+    from eva_dashboard.client_language import extract_oil_type_from_text
+
+    assert extract_oil_type_from_text("soybean meal sales") == "Soya Meal"
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        init_db()
+        with connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO category "
+                "(product, category_1, category_2, packing_category, "
+                "payload_json, updated_at) VALUES "
+                "('SM1', 'Meal', 'Soya Meal', 'Meal', '{}', datetime('now'))"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO clients "
+                "(client_id, client, type, city_filter, city, inactive, "
+                "payload_json, updated_at) VALUES "
+                "('1', 'Dist A', 'Eva Distributors', 'Lahore', 'Lahore', '', "
+                "'{}', datetime('now'))"
+            )
+            for i, dt in enumerate(("2026-08-05", "2026-08-10", "2025-08-05")):
+                conn.execute(
+                    """
+                    INSERT INTO sales (
+                      source_file_id, row_hash, imported_at, date, party, product,
+                      qty, unit, mt_qty, rate, incl_gst_fed_amount, client_type,
+                      payload_json
+                    ) VALUES (NULL, ?, datetime('now'), ?, 'Dist A', 'SM1', 10,
+                      'MT', 10, 150, 1500, 'Eva Distributors', '{}')
+                    """,
+                    (f"sm-{i}", dt),
+                )
+            conn.commit()
+
+        q = (
+            "how much soybean meal have we sold in August and at what "
+            "price average"
+        )
+        out = execute_query_spec(
+            {
+                "row_dimensions": ["business_unit"],
+                "column_dimensions": ["client_type"],
+                "metrics": ["volume"],
+                "period_type": "SPECIFIC_MONTH",
+                "target_month": "2025-08",
+                "filters": {"oil_type": "Soya Meal"},
+                "state_action": "clear",
+            },
+            prior=None,
+            user_text=q,
+        )
+        assert out.get("ok"), out.get("plan_errors") or out.get("error")
+        qs = out.get("query_spec") or {}
+        assert qs.get("target_month") == "2026-08"
+        assert "volume" in (qs.get("metrics") or [])
+        assert "avg_price" in (qs.get("metrics") or [])
+        md = (out.get("answer_markdown") or "").lower()
+        assert "volume" in md
+        assert "avg price" in md or "avg rate" in md

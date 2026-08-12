@@ -1757,11 +1757,53 @@ def _prior_units_list(prior_spec: dict[str, Any] | None) -> list[str]:
     return units
 
 
+def _resolve_segment_business_units(
+    phrase: str,
+    *,
+    prior_units: list[str] | None = None,
+) -> list[str]:
+    """Map bare 'bulk' / 'consumer' → brand Bulk/Consumer business units.
+
+    Rules:
+    - Prior Eva-only → Eva Bulk / Eva Consumer
+    - Prior Eva + Maan → both brands' Bulk / Consumer
+    - No prior / general → Eva + Maan Bulk (or Consumer)
+    """
+    key = re.sub(r"\s+", " ", (phrase or "").strip().lower())
+    key = re.sub(
+        r"\s+(sales?|volumes?|data|figures?|numbers?|units?|bu|business\s*units?)$",
+        "",
+        key,
+    ).strip()
+    is_bulk = key in {"bulk", "bulk oil"}
+    is_cons = key in {"consumer", "consumers"}
+    if not is_bulk and not is_cons:
+        return []
+
+    brands: list[str] = []
+    for u in prior_units or []:
+        ul = str(u or "").lower()
+        if "eva" in ul and "eva" not in brands:
+            brands.append("eva")
+        if "maan" in ul and "maan" not in brands:
+            brands.append("maan")
+    if not brands:
+        brands = ["eva", "maan"]
+
+    out: list[str] = []
+    for brand in brands:
+        label = "Bulk" if is_bulk else "Consumer"
+        name = f"{brand.title()} {label}"
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _companion_business_units(
     text: str,
     prior_spec: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Map bare 'bulk' / 'consumer' to the companion BU of the prior table."""
+    """Map bare 'bulk' / 'consumer' to the companion BU(s) of the prior table."""
     t = (text or "").lower()
     prior_units = _prior_units_list(prior_spec)
     prior_l = [u.lower() for u in prior_units]
@@ -1771,23 +1813,28 @@ def _companion_business_units(
     has_explicit_cons = bool(re.search(r"\b(eva|maan)\s+consumer\b", t))
 
     if re.search(r"\bbulk\b", t) and not has_explicit_bulk:
-        if any("maan" in u and "consumer" in u for u in prior_l):
-            out.append("Maan Bulk")
-        elif any("maan" in u and "bulk" in u for u in prior_l):
-            out.append("Maan Bulk")
-        else:
-            out.append("Eva Bulk")
+        out.extend(
+            _resolve_segment_business_units("bulk", prior_units=prior_units)
+        )
 
     if re.search(r"\bconsumer\b", t) and not has_explicit_cons:
         # Only when clearly asking about consumer relative to a bulk table /
         # include-check — avoid hijacking "Eva Consumer" questions.
         if any("bulk" in u for u in prior_l) or _looks_include_check(t) or _looks_combine_tables(t):
-            if any("maan" in u for u in prior_l):
-                out.append("Maan Consumer")
-            else:
-                out.append("Eva Consumer")
+            out.extend(
+                _resolve_segment_business_units(
+                    "consumer", prior_units=prior_units
+                )
+            )
 
-    return out
+    # Dedupe preserve order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for u in out:
+        if u and u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
 
 
 def _resolve_include_segment(
@@ -2124,6 +2171,10 @@ def _resolve_exclude_value(phrase: str) -> tuple[str, str] | None:
     units = _extract_business_units_from_text(raw)
     if units:
         return ("business_unit", units[0])
+    # Bare bulk/consumer → first matching segment BU (multi handled in resolve_exclude_map)
+    segment = _resolve_segment_business_units(raw)
+    if segment:
+        return ("business_unit", segment[0])
     oil = extract_oil_type_from_text(raw)
     if oil:
         return ("oil_type", oil)
@@ -5401,7 +5452,7 @@ def _plan_from_prior_for_exclude(
     """Build a complete QuerySpec from prior + spoken excludes (no LLM)."""
     from eva_dashboard.spoken_constraints import resolve_exclude_map
 
-    excludes = resolve_exclude_map(user_text)
+    excludes = resolve_exclude_map(user_text, prior_spec=prior_ctx)
     if not excludes:
         return None
     rows = [r for r in list(prior_ctx.get("row_dimensions") or []) if r]

@@ -76,7 +76,31 @@ def extract_clear_filter_keys(user_text: str) -> list[str]:
             mapped = _CLEAR_FILTER_ALIASES.get(p)
             if mapped and mapped not in keys:
                 keys.append(mapped)
+    # "doesn't have to be Lahore" / typo "docent have to be lahore"
+    if looks_optional_city_scope(t) and "city" not in keys:
+        keys.append("city")
     return keys
+
+
+def looks_optional_city_scope(user_text: str) -> bool:
+    """True when the user says the city lock is optional / not required."""
+    t = _norm(user_text)
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(doesn'?t|doesnt|dont|do not|docent|dosent|dosen'?t)\s+"
+            r"have\s+to\s+be\b|"
+            r"\b(doesn'?t|doesnt|dont|do not|docent|dosent|dosen'?t)\s+"
+            r"need\s+to\s+be\b|"
+            r"\bnot\s+necessarily\b|"
+            r"\b(no\s+need\s+for|need\s+not\s+be)\b|"
+            r"\b(doesn'?t|doesnt)\s+have\s+to\s+remain\b|"
+            r"\bwithout\s+(a\s+)?city\s+filter\b|"
+            r"\b(any|all)\s+cit(y|ies)\b",
+            t,
+        )
+    )
 
 
 def extract_exclude_phrases(user_text: str) -> list[str]:
@@ -142,17 +166,34 @@ def extract_exclude_phrases(user_text: str) -> list[str]:
     return phrases
 
 
-def resolve_exclude_map(user_text: str) -> dict[str, list[str]]:
+def resolve_exclude_map(
+    user_text: str,
+    *,
+    prior_spec: dict[str, Any] | None = None,
+) -> dict[str, list[str]]:
     """Map spoken exclude phrases → ``excludes`` dict (any dimension)."""
     from eva_dashboard.chatbot import (
+        _prior_units_list,
         _resolve_exclude_value,
+        _resolve_segment_business_units,
         _split_remove_value_phrases,
     )
 
     out: dict[str, list[str]] = {}
+    prior_units = _prior_units_list(prior_spec) if prior_spec else []
     for phrase in extract_exclude_phrases(user_text):
         for part in _split_remove_value_phrases(phrase) or [phrase]:
             part_s = str(part or "").strip()
+            # Bare "bulk" / "consumer" → brand Bulk/Consumer BUs (not party_like)
+            segment_units = _resolve_segment_business_units(
+                part_s, prior_units=prior_units
+            )
+            if segment_units:
+                bucket = out.setdefault("business_unit", [])
+                for u in segment_units:
+                    if u not in bucket:
+                        bucket.append(u)
+                continue
             resolved = _resolve_exclude_value(part_s)
             if not resolved:
                 if len(part_s) >= 3:
@@ -284,7 +325,17 @@ def apply_spoken_constraints(
         parse_metric_filters(user_text) if user_text else [],
     )
 
-    spoken_ex = resolve_exclude_map(user_text) if user_text else {}
+    spoken_ex = (
+        resolve_exclude_map(
+            user_text,
+            prior_spec={
+                "business_units": list(out.get("business_units") or []),
+                "filters": dict(out.get("filters") or {}),
+            },
+        )
+        if user_text
+        else {}
+    )
     excludes = dict(out.get("excludes") or {})
     for dim, vals in spoken_ex.items():
         bucket = list(excludes.get(dim) or [])

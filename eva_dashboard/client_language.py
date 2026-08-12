@@ -127,6 +127,13 @@ OIL_TYPE_ALIASES: dict[str, str] = {
     "vtf": "Eva VTF",
     "eva vtf": "Eva VTF",
     "banaspati": "Eva VTF",
+    "soybean meal": "Soya Meal",
+    "soya bean meal": "Soya Meal",
+    "soya meal": "Soya Meal",
+    "soy meal": "Soya Meal",
+    "soybean": "Soya Meal",
+    "soya bean": "Soya Meal",
+    "soya": "Soya Meal",
 }
 
 

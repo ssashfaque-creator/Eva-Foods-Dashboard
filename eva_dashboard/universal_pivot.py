@@ -378,19 +378,45 @@ def execute_universal_pivot(
     }
 
     if want_price:
-        price_matrix = _pivot_avg_price(
-            frame, rows, col_dim, month_labels=labels or None
-        )
-        result["matrix"] = price_matrix
         title_rows = " → ".join(
             _ROW_HEADER_LABELS.get(r, r.replace("_", " ").title()) for r in rows
         ) or "All"
         title_cols = (
             "Month"
             if col_dim == "month"
-            else _ROW_HEADER_LABELS.get(col_dim or "", (col_dim or "Value").title())
+            else _ROW_HEADER_LABELS.get(col_dim or "", (col_dim or "Total").title())
         )
-        parts.append(f"### Avg price — {title_rows} × {title_cols}\n")
+        # Volume + average price in one ask → show both (volume first)
+        if "volume" in mets:
+            vol_frame = frame
+            vol_col = col_dim
+            if not vol_col and "month" not in (labels or []):
+                vol_frame = frame.copy()
+                vol_frame["_metric"] = "Volume (MT)"
+                vol_col = "_metric"
+            vol_matrix = _build_pivot(
+                vol_frame,
+                row_dim,
+                vol_col or "client_type",
+                month_labels=labels or None,
+                row_groups=row_groups,
+            )
+            result["volume_matrix"] = vol_matrix
+            parts.append(
+                f"### Volume — {title_rows}"
+                + (f" × {title_cols}" if col_dim else "")
+                + "\n"
+            )
+            parts.append(f"_{blurb}_\n")
+            parts.append(_matrix_to_markdown(vol_matrix, row_dim))
+            parts.append("\n")
+        price_matrix = _pivot_avg_price(
+            frame, rows, col_dim, month_labels=labels or None
+        )
+        result["matrix"] = price_matrix
+        parts.append(f"### Avg price — {title_rows}" + (
+            f" × {title_cols}" if col_dim else ""
+        ) + "\n")
         parts.append(f"_{blurb}_\n")
         parts.append(_matrix_to_markdown_priced(price_matrix, row_dim))
         parts.append("\n_Values are MT-weighted Avg Rate (PKR)._\n")

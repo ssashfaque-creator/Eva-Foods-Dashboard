@@ -19,6 +19,7 @@ from typing import Any
 from eva_dashboard.client_language import (
     extract_all_client_types_from_text,
     extract_oil_and_packing,
+    extract_oil_type_from_text,
     match_client_type_alias,
     normalize_client_type,
     normalize_oil_type,
@@ -385,7 +386,7 @@ _WISE_PATTERNS: list[tuple[str, str]] = [
         "product",
     ),
     (
-        r"\bproduct[-\s]?wise\b|\bby\s+products?\b|"
+        r"\bproduct[-\s]?wise\b|\bthis\s+product\s+wise\b|\bby\s+products?\b|"
         r"\bproducts?\s+(break|breakup|mix|layer)\b",
         "packing_category",
     ),
@@ -405,7 +406,7 @@ _WISE_PATTERNS: list[tuple[str, str]] = [
     (
         r"\b("
         r"client[- ]?type[- ]?wise|channel[- ]?wise|by\s+client\s*types?|"
-        r"by\s+channels?|all\s+channels?|for\s+all\s+channels?|"
+        r"by\s+client\s+type|by\s+channels?|all\s+channels?|for\s+all\s+channels?|"
         r"show\s+(me\s+)?(this\s+)?by\s+channels?|"
         r"sales\s+by\s+channels?|group\s+by\s+channels?|"
         r"channel\s+break(?:up|down)?"
@@ -584,6 +585,30 @@ def _coerce_vocab_from_user_text(
     )
     nest_leaf_dims = {"packing_category", "product", "business_unit", "oil_type"}
     outer_dims = {"city", "zone", "client_type", "party", "business_unit"}
+
+    # Fresh complete ask / explicit clear: do not soft-stick prior city/filters
+    state_action = str(out.get("state_action") or "").strip().lower()
+    explicit_clear = state_action == "clear"
+    fresh_complete = False
+    try:
+        from eva_dashboard.chatbot import _looks_complete_sales_ask
+
+        fresh_complete = bool(_looks_complete_sales_ask(user_text))
+    except Exception:  # noqa: BLE001
+        fresh_complete = False
+    named_cities_early = extract_cities_from_text(user_text)
+    from eva_dashboard.spoken_constraints import looks_optional_city_scope
+
+    optional_city = looks_optional_city_scope(user_text)
+    # Sticky city must drop on fresh asks that never named a city, or when the
+    # user says the city lock is optional ("doesn't have to be Lahore").
+    if (fresh_complete or explicit_clear or optional_city) and not named_cities_early:
+        filters.pop("city", None)
+        filters.pop("cities", None)
+        if "city" not in clear:
+            clear.append("city")
+        if "cities" not in clear:
+            clear.append("cities")
 
     # --- Drop party/customer grain (not channel exclude) ---
     # "remove distributor layer" / "don't show customers" / "overall by BU"
@@ -824,13 +849,21 @@ def _coerce_vocab_from_user_text(
             # Spoken customer/party-wise wins as outer over a sticky prior BU
             if "party" in wise_dims and leaf != "party":
                 outers = ["party"]
+            elif spoken_outers:
+                # "by client type for all SKU" must keep channel outer, not prior BU
+                outers = list(spoken_outers)
+            elif has_product_spoken and leaf == "packing_category":
+                # product-wise replaces BU grain; prior BUs stay as filters
+                outers = [
+                    r for r in (prior_outers or current_outers) if r != "business_unit"
+                ]
             else:
                 outers = prior_outers or current_outers
             # If a dim is already a sticky singleton filter (party from profile,
             # single city/channel lock), keep it as a filter — do not also nest
             # it as an outer row grain (SKU-wise under one customer → product only).
             scoped = dict(filters)
-            if prior:
+            if prior and not explicit_clear and not fresh_complete:
                 for k, v in dict(prior.get("filters") or {}).items():
                     if v not in (None, "", []) and k not in scoped:
                         scoped[k] = v
@@ -872,10 +905,13 @@ def _coerce_vocab_from_user_text(
             rows = (outers_u + [leaf]) if outers_u else [leaf]
             # Keep multi-filters that scoped the prior table — but never re-lock a
             # grain the user just asked to expand (all channels / city-wise).
-            if prior:
+            # Fresh/clear asks must not re-stick prior city/zone/channel.
+            if prior and not explicit_clear and not fresh_complete:
                 pf = dict(prior.get("filters") or {})
                 for key in ("cities", "client_types", "city", "client_type", "zone"):
                     if not pf.get(key) or filters.get(key):
+                        continue
+                    if key in {"city", "cities"} and "city" in clear:
                         continue
                     grain = (
                         "client_type"
@@ -961,12 +997,58 @@ def _coerce_vocab_from_user_text(
 
         # Grain-only follow-ups (customer-wise / city-wise / …) must keep prior
         # filters (city, Eva BUs, …) — promote base=prior when prior exists.
-        if prior and leaf and out.get("base") != "prior":
+        # Never override an explicit clear / fresh complete ask.
+        if (
+            prior
+            and leaf
+            and out.get("base") != "prior"
+            and not explicit_clear
+            and not fresh_complete
+        ):
             out["base"] = "prior"
             out["state_action"] = out.get("state_action") or "modify"
             if out.get("_clear_omitted"):
                 out["_clear_omitted"] = False
                 out["clear"] = list(out.get("clear") or clear or [])
+
+        # Product-wise on a prior monthly grid → keep month columns + period
+        if prior and has_product_spoken and not has_sku:
+            prior_cols = list(
+                prior.get("column_dimensions")
+                or (
+                    [prior.get("column_dimension")]
+                    if prior.get("column_dimension")
+                    else []
+                )
+            )
+            prior_had_month = "month" in prior_cols or prior.get(
+                "column_dimension"
+            ) == "month"
+            if prior_had_month:
+                cols = ["month"]
+                prior_pt = str(prior.get("period_type") or "")
+                prior_mb = prior.get("months_back")
+                if prior_pt == "LAST_N_MONTHS" or prior_mb:
+                    out["period_type"] = "LAST_N_MONTHS"
+                    out["months_back"] = int(prior_mb or 6)
+                    out.pop("target_month", None)
+                    period = dict(out.get("period") or {})
+                    period["phrase"] = f"last {out['months_back']} months"
+                    out["period"] = period
+                if not re.search(
+                    r"\b(price\s*fetch|avg\.?\s*rate|average\s+(price|rate)|"
+                    r"cost\s*factor)\b",
+                    t,
+                ):
+                    prior_mets = list(prior.get("metrics") or [])
+                    if prior_mets:
+                        metrics = prior_mets
+                    elif not (set(metrics) & {"volume", "ams"}):
+                        metrics = ["volume", "ams"]
+            if prior and out.get("base") != "prior" and not explicit_clear:
+                out["base"] = "prior"
+                out["state_action"] = out.get("state_action") or "modify"
+                out["_clear_omitted"] = False
 
     # Pure cost-factor asks stay on factor_costs (do not force Price Fetch metric)
     if not _is_factor_only_ask(t, metrics=metrics, flags=out.get("price_flags")) and re.search(
@@ -1033,7 +1115,7 @@ def _coerce_vocab_from_user_text(
             t,
         )
     ):
-        spoken_ex = _resolve_spoken_excludes(user_text)
+        spoken_ex = _resolve_spoken_excludes(user_text, prior_spec=prior)
         if spoken_ex:
             excludes = dict(out.get("excludes") or {})
             if prior:
@@ -1134,23 +1216,24 @@ def _coerce_vocab_from_user_text(
             except Exception:  # noqa: BLE001
                 pass
 
-    # Bare month name follow-up after a month-grid: lock YYYY-MM to the year
-    # that was on screen (so "July" after a 2026 grid ≠ July 2025).
-    if prior and re.search(
+    # Bare month name: lock YYYY-MM to on-screen year, else live max sales date
+    # (so "August" ≠ 2025-08 when data is through Aug 2026).
+    if re.search(
         r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
         r"nov(?:ember)?|dec(?:ember)?)\b",
         t,
     ) and not re.search(r"20\d{2}", t):
-        month_labels = list(
-            prior.get("month_labels")
-            or (prior.get("period") or {}).get("month_labels")
-            or []
-        )
-        # Also scan prior column_dimensions / table columns if stamped
-        for c in prior.get("columns") or prior.get("column_dimensions") or []:
-            if re.match(r"^\d{4}-\d{2}$", str(c)):
-                month_labels.append(str(c))
+        month_labels: list[str] = []
+        if prior:
+            month_labels = list(
+                prior.get("month_labels")
+                or (prior.get("period") or {}).get("month_labels")
+                or []
+            )
+            for c in prior.get("columns") or prior.get("column_dimensions") or []:
+                if re.match(r"^\d{4}-\d{2}$", str(c)):
+                    month_labels.append(str(c))
         name_to_num = {
             "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
             "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7,
@@ -1175,12 +1258,63 @@ def _coerce_vocab_from_user_text(
             },
             reverse=True,
         )
+        target: str | None = None
         if want and years:
+            target = f"{years[0]:04d}-{want:02d}"
+        elif want and m:
+            try:
+                from eva_dashboard.sales_query import resolve_period
+
+                info = resolve_period(m.group(1))
+                if info.get("ok") is not False and info.get("date_from"):
+                    target = str(info["date_from"])[:7]
+            except Exception:  # noqa: BLE001
+                target = None
+            # Correct a planner year that disagrees with the live anchor
+            if target:
+                bad_tm = str(out.get("target_month") or "").strip()
+                if bad_tm and re.match(r"^\d{4}-\d{2}$", bad_tm) and bad_tm != target:
+                    pass  # overwrite below
+        if want and target:
             out["period_type"] = "SPECIFIC_MONTH"
-            out["target_month"] = f"{years[0]:04d}-{want:02d}"
+            out["target_month"] = target
             period = dict(out.get("period") or {})
-            period["phrase"] = out["target_month"]
+            period["phrase"] = target
             out["period"] = period
+
+    # Oil/volume + average price asks → volume + avg_price (not price_fetch grid)
+    oil_spoken = extract_oil_type_from_text(user_text)
+    if oil_spoken and not filters.get("oil_type"):
+        filters["oil_type"] = oil_spoken
+    if oil_spoken or filters.get("oil_type"):
+        wants_vol = bool(
+            re.search(r"\b(volume|sold|sales?|how much|mt)\b", t)
+        )
+        wants_avg_price = bool(
+            re.search(
+                r"\b("
+                r"average\s+(price|rate)|avg\.?\s*(price|rate)|"
+                r"at what price|what price|with(?:\s+the)?\s+price|"
+                r"pricing\s+data|include\s+pric"
+                r")\b",
+                t,
+            )
+        )
+        if wants_vol and "volume" not in metrics:
+            metrics.append("volume")
+        if wants_avg_price and "avg_price" not in metrics:
+            metrics.append("avg_price")
+        if wants_vol and wants_avg_price:
+            # Single-month oil summary — not a channel crosstab
+            cols = [c for c in cols if c not in {"client_type", "month"}]
+            if not rows or rows == ["business_unit"]:
+                rows = rows or ["business_unit"]
+
+    # Explicit clear must not merge sticky prior filters. Fresh complete asks
+    # already clear unspoken city above; keep base=prior when exclude/grain
+    # follow-ups promoted it (city stays dropped via clear_filters).
+    if explicit_clear and out.get("base") == "prior":
+        out["base"] = "sales"
 
     out["filters"] = filters
     out["row_dimensions"] = rows
@@ -1666,7 +1800,12 @@ def execute_query_spec(
         else:
             # SPECIFIC_MONTH cleared month columns — pick a non-conflicting
             # column grain (never equal the row leaf, e.g. channel×channel).
-            if grain.get("column_dimension") == "month" or not cols_r:
+            # volume + avg_price oil/period summaries stay flat (no channel grid).
+            mets_now = set(spec.get("metrics") or [])
+            if "volume" in mets_now and "avg_price" in mets_now:
+                grain.pop("column_dimension", None)
+                spec["column_dimensions"] = []
+            elif grain.get("column_dimension") == "month" or not cols_r:
                 rows_now = list(spec.get("row_dimensions") or [])
                 row_set = set(rows_now)
                 leaf = rows_now[-1] if rows_now else None

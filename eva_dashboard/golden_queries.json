@@ -275,6 +275,66 @@
         "filters": {"client_type": "Eva Distributors"},
         "sort_order": "asc"
       }
+    },
+    {
+      "id": "product-wise-keep-month-grid",
+      "user_text": "can you show this product wise",
+      "tags": ["product", "packing", "followup", "month"],
+      "plan": {
+        "state_action": "modify",
+        "base": "prior",
+        "context_handling": "prior",
+        "row_dimensions": ["packing_category"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6
+      }
+    },
+    {
+      "id": "exclude-bulk-business-unit",
+      "user_text": "exclude bulk",
+      "tags": ["exclude", "bulk", "business_unit"],
+      "plan": {
+        "state_action": "modify",
+        "base": "prior",
+        "context_handling": "prior",
+        "excludes": {"business_unit": ["Eva Bulk", "Maan Bulk"]},
+        "row_dimensions": ["city"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6
+      }
+    },
+    {
+      "id": "soybean-meal-august-volume-price",
+      "user_text": "how much soybean meal have we sold in August and at what price average",
+      "tags": ["oil_type", "avg_price", "volume", "august"],
+      "plan": {
+        "state_action": "clear",
+        "context_handling": "none",
+        "row_dimensions": ["business_unit"],
+        "column_dimensions": [],
+        "metrics": ["volume", "avg_price"],
+        "period_type": "SPECIFIC_MONTH",
+        "target_month": "2026-08",
+        "filters": {"oil_type": "Soya Meal"}
+      }
+    },
+    {
+      "id": "optional-city-clear",
+      "user_text": "doesn't have to be lahore",
+      "tags": ["city", "clear", "followup"],
+      "plan": {
+        "state_action": "modify",
+        "base": "prior",
+        "context_handling": "prior",
+        "clear_filters": ["city"],
+        "row_dimensions": ["client_type", "product"],
+        "metrics": ["volume", "price_fetch"],
+        "period_type": "LAST_MONTH"
+      }
     }
   ]
 }
