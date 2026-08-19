@@ -2,9 +2,56 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from eva_dashboard.query_executor import execute_query_spec
+from eva_dashboard.query_spec import PLAN_QUERY_TOOL
+
+# QuerySpec fields the model may flatten onto the tool call instead of wrapping
+# them in spec_dict. user_text is intentionally excluded — it is not a spec field.
+QUERY_SPEC_TOOL_KEYS = frozenset(
+    PLAN_QUERY_TOOL["function"]["parameters"]["properties"]
+) | {"period_phrase", "mode"}
+
+
+def _as_spec_dict(value: Any) -> dict[str, Any] | None:
+    """Return a non-empty QuerySpec dict, including JSON-string wrappers."""
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict) or not value:
+        return None
+    return dict(value)
+
+
+def query_spec_from_tool_args(args: dict[str, Any] | None) -> dict[str, Any]:
+    """Recover QuerySpec from a ReAct tool-call payload.
+
+    gpt-4o usually wraps fields in ``spec_dict``, but also often emits the same
+    QuerySpec keys at the top level (``row_dimensions``, ``filters``, …) and
+    leaves ``spec_dict`` omitted or ``{}``. An empty wrapper must fall through
+    to those flattened fields so the engine can run.
+    """
+    args = args if isinstance(args, dict) else {}
+    wrapped = _as_spec_dict(args.get("spec_dict"))
+    if wrapped:
+        return wrapped
+    wrapped = _as_spec_dict(args.get("query_spec"))
+    if wrapped:
+        return wrapped
+    spec = {k: v for k, v in args.items() if k in QUERY_SPEC_TOOL_KEYS}
+    action = str(spec.get("state_action") or "").strip().lower()
+    if (
+        action in {"keep", "modify"}
+        and "clear_filters" not in spec
+        and "clear" not in spec
+    ):
+        # Flattened follow-ups omit clear_filters; [] means keep prior filters.
+        spec["clear_filters"] = []
+    return spec
 
 
 def run_standard_analytics_pivot(

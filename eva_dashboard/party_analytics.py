@@ -272,6 +272,27 @@ def _ams_window_label(as_of: date) -> str:
     return f"{start.strftime('%b %Y')}–{end.strftime('%b %Y')}"
 
 
+def _calendar_months_spanned(date_from: str, date_to: str) -> int:
+    """Inclusive calendar months in a date span (Mar 1 → Aug 12 = 6)."""
+    a = date.fromisoformat(str(date_from)[:10])
+    b = date.fromisoformat(str(date_to)[:10])
+    return max(1, (b.year - a.year) * 12 + (b.month - a.month) + 1)
+
+
+def _shift_calendar_months(d: date, delta: int) -> date:
+    """Shift a date by whole calendar months, clamping the day."""
+    m = d.month + int(delta)
+    y = d.year
+    while m <= 0:
+        m += 12
+        y -= 1
+    while m > 12:
+        m -= 12
+        y += 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return date(y, m, day)
+
+
 def _ams_by_entity(
     *,
     as_of: date,
@@ -839,6 +860,7 @@ def analyze_parties(
             }
     d0, d1 = period_info["date_from"], period_info["date_to"]
     as_of = date.fromisoformat(d1)
+    span_months = _calendar_months_spanned(d0, d1)
 
     filters = {
         "city": city_f,
@@ -1402,13 +1424,41 @@ def analyze_parties(
     compare_info = None
     compare_vol: dict[str, float] = {}
     mom_vol: dict[str, float] = {}
-    want_yoy = metric_n in {"yoy", "yoy_ams", "ams_growth"} or any(
-        str(f.get("metric") or "") == "yoy" for f in (metric_filters or [])
-    )
-    want_mom = any(
-        str(f.get("metric") or "") == "mom" for f in (metric_filters or [])
-    ) or metric_n == "mom"
-    if want_yoy:
+    filter_metrics = {
+        str(f.get("metric") or "") for f in (metric_filters or [])
+    }
+    want_yoy = metric_n in {"yoy", "yoy_ams", "ams_growth"} or "yoy" in filter_metrics
+    want_pop = metric_n == "pop" or "pop" in filter_metrics
+    want_mom = metric_n == "mom" or "mom" in filter_metrics
+    want_ams_growth = metric_n == "ams_growth" or "ams_growth" in filter_metrics
+    if want_pop:
+        start = date.fromisoformat(d0)
+        end = date.fromisoformat(d1)
+        c_start = _shift_calendar_months(start, -span_months)
+        c_end = _shift_calendar_months(end, -span_months)
+        compare_info = {
+            "ok": True,
+            "date_from": c_start.isoformat(),
+            "date_to": c_end.isoformat(),
+            "label": (
+                f"{c_start.strftime('%b %Y')} → {c_end.strftime('%b %Y')} "
+                f"(prior {span_months} months)"
+            ),
+        }
+        cmp_frame = _fetch_party_lines(
+            date_from=compare_info["date_from"],
+            date_to=compare_info["date_to"],
+            city=city_f,
+            zone=zone_f,
+            client_type=ctype,
+            business_unit=bu,
+            oil_type=oil,
+            packing_category=pack,
+            brand_prefix=brand_prefix,
+        )
+        if not cmp_frame.empty:
+            compare_vol = cmp_frame.groupby(entity_key)["mt"].sum().to_dict()
+    elif want_yoy:
         if compare_period:
             compare_info = resolve_period(compare_period)
         else:
@@ -1430,7 +1480,9 @@ def analyze_parties(
                 "ok": True,
                 "date_from": c_start.isoformat(),
                 "date_to": c_end.isoformat(),
-                "label": f"{c_start.strftime('%b %Y')} (YoY)",
+                "label": (
+                    f"{c_start.strftime('%b %Y')} → {c_end.strftime('%b %Y')} (YoY)"
+                ),
             }
         if compare_info.get("ok") is False:
             return {"ok": False, "error": compare_info.get("error"), "period": compare_info}
@@ -1475,7 +1527,7 @@ def analyze_parties(
     prior_ams: dict[str, float] = {}
     ams_current_label = ""
     ams_prior_label = ""
-    if metric_n == "ams_growth":
+    if want_ams_growth:
         ams_as_of = as_of.replace(day=1)
         ams_current_label = _ams_window_label(ams_as_of)
         prior_as_of = ams_as_of
@@ -1522,10 +1574,18 @@ def analyze_parties(
         vs = pct_change(vol, baseline) if baseline else None
         prior = float(compare_vol.get(ent, 0.0))
         yoy = pct_change(vol, prior) if want_yoy else None
+        pop = pct_change(vol, prior) if want_pop else None
         mom_prior = float(mom_vol.get(ent, 0.0))
         mom = pct_change(vol, mom_prior) if want_mom else None
         ams_growth = (
-            pct_change(ams_v, ams_prior_v) if metric_n == "ams_growth" else None
+            pct_change(ams_v, ams_prior_v) if want_ams_growth else None
+        )
+        period_ams = (vol / span_months) if span_months >= 2 else None
+        prior_period_ams = (
+            (prior / span_months)
+            if (want_yoy or want_pop)
+            and span_months >= 2
+            else None
         )
         inv_n = int(invoice_counts.get(ent, 0))
         avg_inv = (vol / inv_n) if inv_n else None
@@ -1541,18 +1601,19 @@ def analyze_parties(
         entry = {
             **name_field,
             **meta,
-            "volume_mt": mt_round(vol),
-            "ams_mt": mt_round(ams_v),
-            "ams_prior_mt": mt_round(ams_prior_v) if metric_n == "ams_growth" else None,
-            "ams_growth_pct": (
-                round(float(ams_growth), 1) if ams_growth is not None else None
-            ),
-            "expected_mt": mt_round(expected) if expected is not None else None,
-            "pct_vs_ams": round(vs, 1) if vs is not None else None,
-            "prior_mt": mt_round(prior) if want_yoy else None,
-            "yoy_pct": round(yoy, 1) if yoy is not None else None,
-            "mom_prior_mt": mt_round(mom_prior) if want_mom else None,
-            "mom_pct": round(mom, 1) if mom is not None else None,
+            "volume_mt": vol,
+            "ams_mt": ams_v,
+            "period_ams_mt": period_ams,
+            "prior_period_ams_mt": prior_period_ams,
+            "ams_prior_mt": ams_prior_v if want_ams_growth else None,
+            "ams_growth_pct": ams_growth,
+            "expected_mt": expected if expected is not None else None,
+            "pct_vs_ams": vs,
+            "prior_mt": prior if (want_yoy or want_pop) else None,
+            "yoy_pct": yoy,
+            "pop_pct": pop,
+            "mom_prior_mt": mom_prior if want_mom else None,
+            "mom_pct": mom,
             "invoices": inv_n,
             "avg_invoice_mt": mt_round(avg_inv) if avg_inv is not None else None,
             "doing_well": bool(vs is not None and vs >= 0),
@@ -1601,13 +1662,15 @@ def analyze_parties(
         for r in well[:lim]:
             base = r["expected_mt"] if partial else r["ams_mt"]
             name = r.get("party") or r.get("city") or "—"
+            vol_cell = mt_round(r["volume_mt"])
+            base_cell = mt_round(base) if base is not None else "—"
             lines.append(
-                f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
-                f"{base if base is not None else '—'} | "
+                f"| {name} | {r.get('city') or '—'} | {vol_cell} | "
+                f"{base_cell} | "
                 f"{r['pct_vs_ams']:+.1f}% |"
                 if r["pct_vs_ams"] is not None
-                else f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
-                f"{base if base is not None else '—'} | — |"
+                else f"| {name} | {r.get('city') or '—'} | {vol_cell} | "
+                f"{base_cell} | — |"
             )
         tips = []
         if pct_well is not None:
@@ -1746,6 +1809,14 @@ def analyze_parties(
             else:
                 declined_only = False
         score_key, score_label = "yoy_pct", "YoY %"
+    elif metric_n == "pop":
+        rows = [
+            r
+            for r in rows
+            if (r["volume_mt"] or 0) > 0 or (r["prior_mt"] or 0) > 0
+        ]
+        rows.sort(key=lambda r: sk(r["pop_pct"], r["volume_mt"] or 0))
+        score_key, score_label = "pop_pct", "vs prior period %"
     elif metric_n == "invoices":
         rows = [r for r in rows if (r["invoices"] or 0) > 0]
         rows.sort(key=lambda r: sk(float(r["invoices"]), r["volume_mt"] or 0))
@@ -1765,6 +1836,26 @@ def analyze_parties(
 
         rows = apply_metric_filters(rows, metric_filters)
 
+    _MT_KEYS = (
+        "volume_mt",
+        "ams_mt",
+        "period_ams_mt",
+        "prior_period_ams_mt",
+        "ams_prior_mt",
+        "expected_mt",
+        "prior_mt",
+        "mom_prior_mt",
+        "avg_invoice_mt",
+    )
+    _PCT_KEYS = ("ams_growth_pct", "pct_vs_ams", "yoy_pct", "mom_pct", "pop_pct")
+    for r in rows:
+        for k in _MT_KEYS:
+            if r.get(k) is not None:
+                r[k] = mt_round(r[k])
+        for k in _PCT_KEYS:
+            if r.get(k) is not None:
+                r[k] = round(float(r[k]), 1)
+
     rows = rows[:lim]
     for r in rows:
         r["score"] = r.get(score_key)
@@ -1776,6 +1867,14 @@ def analyze_parties(
         extra.append("pct_vs_ams")
     if metric_n == "yoy":
         extra = ["volume_mt", "prior_mt", "yoy_pct"]
+    if metric_n == "pop":
+        extra = [
+            "volume_mt",
+            "period_ams_mt",
+            "prior_mt",
+            "prior_period_ams_mt",
+            "pop_pct",
+        ]
     if metric_n == "yoy_ams":
         extra = ["volume_mt", "ams_mt", "pct_vs_ams", "prior_mt", "yoy_pct"]
     if metric_n == "ams_growth":
@@ -1790,6 +1889,20 @@ def analyze_parties(
         extra = ["invoices", "volume_mt", "avg_invoice_mt"]
     if metric_n == "invoice_mt":
         extra = ["avg_invoice_mt", "invoices", "volume_mt"]
+    # Always surface columns the stacked cuts actually test (volume+yoy, …)
+    _FILTER_EXTRA = {
+        "volume": ("volume_mt",),
+        "ams": ("ams_mt",),
+        "vs_ams": ("pct_vs_ams",),
+        "yoy": ("prior_mt", "yoy_pct"),
+        "pop": ("period_ams_mt", "prior_mt", "prior_period_ams_mt", "pop_pct"),
+        "mom": ("mom_prior_mt", "mom_pct"),
+        "ams_growth": ("ams_mt", "ams_prior_mt", "ams_growth_pct"),
+    }
+    for mid in filter_metrics:
+        for col in _FILTER_EXTRA.get(mid, ()):
+            if col not in extra:
+                extra.append(col)
 
     blurb = _scope_blurb(filters, period_info)
     entity_word = "cities" if group == "city" else "parties"
@@ -1839,16 +1952,29 @@ def analyze_parties(
         else:
             blurb = f"{entity_title} by AMS growth % — {blurb}"
     else:
-        if metric_n in {"yoy", "yoy_ams"} and compare_info:
+        if compare_info and (
+            metric_n in {"yoy", "yoy_ams", "pop"}
+            or "yoy_pct" in extra
+            or "pop_pct" in extra
+        ):
             blurb += f" vs {compare_info.get('label')}"
             if grown_only:
                 blurb += " · grown only"
             if declined_only:
                 blurb += " · declined only"
-            col_label_overrides = {
-                "prior_mt": "Volume last year (MT)",
-                "yoy_pct": "Volume YoY %",
-            }
+            if metric_n == "pop":
+                col_label_overrides = {
+                    "prior_mt": "Volume prior period (MT)",
+                    "pop_pct": "vs prior period %",
+                    "period_ams_mt": "AMS in period (MT)",
+                    "prior_period_ams_mt": "AMS prior period (MT)",
+                    "volume_mt": "Volume in period (MT)",
+                }
+            else:
+                col_label_overrides = {
+                    "prior_mt": "Volume last year (MT)",
+                    "yoy_pct": "Volume YoY %",
+                }
         if metric_n == "vs_ams":
             direction = "furthest behind" if sort_n == "asc" else "furthest ahead of"
             blurb += (
@@ -2128,6 +2254,8 @@ def _party_table_result(
     col_labels = {
         "volume_mt": "Volume (MT)",
         "ams_mt": "AMS (MT)",
+        "period_ams_mt": "AMS in period (MT)",
+        "prior_period_ams_mt": "AMS last year (MT)",
         "ams_prior_mt": "AMS prior (MT)",
         "ams_growth_pct": "AMS growth %",
         "expected_mt": "Expected (MT)",
@@ -2137,6 +2265,7 @@ def _party_table_result(
         "prior_mt": "Volume last year (MT)",
         "pct_vs_ams": "% vs AMS",
         "yoy_pct": "Volume YoY %",
+        "pop_pct": "vs prior period %",
         "first_sale": "First sale",
         "invoices": "Invoices",
         "avg_invoice_mt": "Avg MT / invoice",
@@ -2203,6 +2332,8 @@ def _party_table_result(
                 cells.append("—")
             elif isinstance(val, float) and (c.endswith("_pct") or c == "pct_vs_ams"):
                 cells.append(f"{val:+.1f}%")
+            elif c.endswith("_mt"):
+                cells.append(str(mt_round(val)))
             else:
                 cells.append(str(val))
         if show_score:

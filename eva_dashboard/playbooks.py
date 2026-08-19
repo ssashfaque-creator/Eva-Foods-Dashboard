@@ -55,6 +55,36 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "compound_metric_rank",
+        "pattern": re.compile(
+            r"\b(more than|less than|greater than|at least|below|above|over)\b"
+            r".+\b(but|and)\b.+"
+            r"\b(more than|less than|greater than|at least|below|above|over|"
+            r"growth|yoy|ams|volume|sales)\b",
+            flags=re.I,
+        ),
+        "title": "Stacked metric cuts on a party list",
+        "steps": [
+            "run_standard_analytics_pivot with row_dimensions=['party'] and "
+            "NO column_dimensions month (one window, not a month grid)",
+            "Put EVERY numeric cut in metric_filters (AND). "
+            "sales/volume MT → metric=volume; '10 MT AMS' / AMS>10 → metric=ams "
+            "(the 3-month AMS KPI — never also add volume>10 for that number); "
+            "calendar YoY % → metric=yoy; "
+            "AMS-window growth (no last-year language) → metric=ams_growth. "
+            "A trailing % on AMS/volume is growth ('less than 5% in AMS'), "
+            "not an AMS-tonnage cut.",
+            "Last N months vs the same N months last year → "
+            "period_type=LAST_N_MONTHS, months_back=N, compare='yoy', metric='yoy'. "
+            "Last N months vs the prior N months → compare='prior', metric='pop'. "
+            "Do NOT use ams_growth for those compares — AMS growth is always "
+            "the current 3-month AMS window vs the previous 3-month AMS window.",
+            "Distributors → filters.client_type='Eva Distributors'. "
+            "'all' matching parties → limit=200. Complete new ask → "
+            "state_action='clear'. Never invent AMS/YoY in SQL.",
+        ],
+    },
+    {
         "id": "distributors_grown",
         "pattern": re.compile(
             r"\b(distributors?|parties|customers?)\b.+\b(grown|growth|grew)\b|"
@@ -64,9 +94,14 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         ),
         "title": "Distributor growth ranking",
         "steps": [
-            "run_standard_analytics_pivot with metrics including ams_growth, "
-            "row_dimensions=['party'], filters.client_type='Eva Distributors' "
-            "when distributors are named, grown_only=true if they ask who grew",
+            "If the ask is last N months vs the same N months last year / YoY, "
+            "follow yoy_compare (compare='yoy', metric_filters metric=yoy). "
+            "If last N vs the prior N months, follow pop_compare "
+            "(compare='prior', metric='pop'). Do NOT use ams_growth for those.",
+            "Otherwise run_standard_analytics_pivot with metrics including "
+            "ams_growth, row_dimensions=['party'], "
+            "filters.client_type='Eva Distributors' when distributors are named, "
+            "grown_only=true if they ask who grew",
             "Do NOT invent AMS growth in SQL",
         ],
     },
@@ -111,6 +146,22 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         "steps": [
             "lookup_entity_values / run_standard_analytics_pivot operation=party_lookup",
             "Then pivot volume/AMS for the resolved party",
+        ],
+    },
+    {
+        "id": "party_profile",
+        "pattern": re.compile(
+            r"\b(tell\s+me\s+about|customer\s+profile|party\s+profile|"
+            r"rundown\s+on|full\s+picture|everything\s+about|"
+            r"last\s+(purchase|invoice)\b)",
+            flags=re.I,
+        ),
+        "title": "Customer profile",
+        "steps": [
+            "run_standard_analytics_pivot operation=party_profile "
+            "(volume, AMS, % vs AMS, last purchase, rate) — not party_lookup",
+            "SPECIFIC_MONTH if a month is named; GROUNDED_PARTIES for the name",
+            "Do NOT answer with an identity-only who-is table",
         ],
     },
     {
@@ -160,15 +211,47 @@ _PLAYBOOKS: list[dict[str, Any]] = [
     {
         "id": "yoy_compare",
         "pattern": re.compile(
-            r"\b(yoy|year\s*over\s*year|vs\.?\s*(last\s+)?year|20\d{2}\s+vs\.?\s+20\d{2})\b|"
+            r"\b(yoy|year\s*over\s*year|year\s+on\s+year|"
+            r"vs\.?\s*(last\s+)?year|versus\s+(the\s+)?(same\s+)?(last\s+)?year|"
+            r"same\s+(period|\d+\s+months?|months?|three|six|twelve)\s+last\s+year|"
+            r"same\s+(window|span|time|months?)\s+last\s+year|"
+            r"last\s+\d+\s+months?\s+(vs\.?|versus|compared?\s+to).{0,80}last\s+year|"
+            r"20\d{2}\s+vs\.?\s+20\d{2})\b|"
             r"\b(july|jan|feb|mar|apr|may|jun|aug|sep|oct|nov|dec)\w*\s+20\d{2}\s+vs",
             flags=re.I,
         ),
         "title": "YoY compare",
         "steps": [
-            "run_standard_analytics_pivot with compare='yoy' and the later year as "
-            "SPECIFIC_MONTH / current period",
-            "Keep channel/BU filters from spoken text",
+            "run_standard_analytics_pivot with compare='yoy'. "
+            "Last N months vs the same N months last year → "
+            "LAST_N_MONTHS + months_back=N, metric='yoy' (calendar YoY of that "
+            "window). Named month vs last year → SPECIFIC_MONTH of the later year.",
+            "Party/distributor lists: row_dimensions=['party'], no month columns. "
+            "Lowest/least/smallest growth vs last year → metric='yoy', sort=asc. "
+            "Highest/biggest growth vs last year → metric='yoy', sort=desc. "
+            "Never ams_growth / title_mode=smallest_gains for 'same months last year'. "
+            "'with AMS>10' is a size cut (metric_filters), not metric='yoy_ams'.",
+            "ams_growth is a different metric (current 3-month AMS window vs prior "
+            "3-month AMS window) — do not use it for last-N vs last year OR last-N "
+            "vs the prior N months.",
+        ],
+    },
+    {
+        "id": "pop_compare",
+        "pattern": re.compile(
+            r"\b(prior|previous|preceding)\s+(\d+\s+)?months?\b|"
+            r"\bvs\.?\s+(the\s+)?(prior|previous)\s+(period|\d+\s+months?)\b|"
+            r"\bperiod\s+over\s+period\b",
+            flags=re.I,
+        ),
+        "title": "Prior-period compare",
+        "steps": [
+            "run_standard_analytics_pivot with compare='prior', metric='pop'. "
+            "Last N months vs the N months immediately before that window. "
+            "NOT ams_growth (3-month AMS vs previous 3-month AMS) and NOT "
+            "yoy (same span last year).",
+            "Party/distributor lists: row_dimensions=['party'], no month columns. "
+            "Growth of AMS over those N-month windows is the same % as volume.",
         ],
     },
     {
@@ -203,10 +286,31 @@ _PLAYBOOKS: list[dict[str, Any]] = [
 
 
 def match_playbooks(user_text: str) -> list[dict[str, Any]]:
+    from eva_dashboard.metric_filters import (
+        looks_prior_period_compare,
+        looks_yoy_period_compare,
+        parse_metric_filters,
+    )
+
     t = user_text or ""
+    yoy = looks_yoy_period_compare(t)
+    pop = looks_prior_period_compare(t)
+    stacked = len(parse_metric_filters(t)) >= 2
     hits: list[dict[str, Any]] = []
     for pb in _PLAYBOOKS:
-        if pb["pattern"].search(t):
+        if pb["id"] == "distributors_grown" and (yoy or pop):
+            # Calendar YoY / prior-period are not AMS-window growth ranking.
+            continue
+        if pb["id"] == "pop_compare" and yoy:
+            continue
+        matched = bool(pb["pattern"].search(t))
+        if pb["id"] == "yoy_compare" and yoy:
+            matched = True
+        if pb["id"] == "pop_compare" and pop:
+            matched = True
+        if pb["id"] == "compound_metric_rank" and stacked:
+            matched = True
+        if matched:
             hits.append(
                 {
                     "id": pb["id"],

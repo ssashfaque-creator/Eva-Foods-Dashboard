@@ -512,19 +512,14 @@ def _looks_drop_party_grain(user_text: str) -> bool:
 
 
 def _looks_yoy_compare(user_text: str) -> bool:
+    from eva_dashboard.metric_filters import looks_yoy_period_compare
+
     t = (user_text or "").lower()
+    if looks_yoy_period_compare(user_text):
+        return True
     return bool(
-        re.search(
-            r"\b("
-            r"same\s+period\s+last\s+year|year\s+over\s+year|\byoy\b|"
-            r"vs\.?\s*last\s+year|versus\s+last\s+year|"
-            r"compared?\s+(with|to)\s+last\s+year|"
-            r"last\s+year\s+same\s+period"
-            r")\b",
-            t,
-        )
         # "July 2025 vs 2026" / "2025 vs 2026" same-month year compare
-        or re.search(
+        re.search(
             r"\b(?:"
             r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
             r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
@@ -537,6 +532,12 @@ def _looks_yoy_compare(user_text: str) -> bool:
             t,
         )
     )
+
+
+def _looks_prior_compare(user_text: str) -> bool:
+    from eva_dashboard.metric_filters import looks_prior_period_compare
+
+    return looks_prior_period_compare(user_text)
 
 
 def _looks_main_customers_ask(user_text: str) -> bool:
@@ -1171,6 +1172,8 @@ def _coerce_vocab_from_user_text(
         if filters.get("client_type") and rows == ["client_type"]:
             rows = ["business_unit"]
             cols = []
+    elif _looks_prior_compare(t) and not out.get("compare"):
+        out["compare"] = "prior"
 
     # --- Main customers / customer-wise of prior oil|BU|month scope ---
     # Flat Customer × Volume + Avg Price (never party × client_type).
@@ -1320,7 +1323,7 @@ def _coerce_vocab_from_user_text(
             if not metrics:
                 metrics = ["volume", "ams"]
 
-    # AMS / growth thresholds → party rank (so metric_filters actually apply)
+    # AMS / growth / YoY / volume thresholds → party rank (filters actually apply)
     from eva_dashboard.metric_filters import merge_metric_filters, parse_metric_filters
 
     spoken_mfs = parse_metric_filters(user_text)
@@ -1328,37 +1331,164 @@ def _coerce_vocab_from_user_text(
         out["metric_filters"] = merge_metric_filters(
             list(out.get("metric_filters") or []), spoken_mfs
         )
-        ams_cut = any(str(f.get("metric")) == "ams" for f in spoken_mfs)
-        vol_cut = any(str(f.get("metric")) == "volume" for f in spoken_mfs)
-        if (ams_cut or vol_cut) and (
+    mfs = list(out.get("metric_filters") or [])
+    mf_ids = {str(f.get("metric") or "") for f in mfs}
+    yoy_ask = _looks_yoy_compare(t) or "yoy" in mf_ids
+    pop_ask = (not yoy_ask) and (
+        _looks_prior_compare(t) or "pop" in mf_ids
+    )
+    low_growth = bool(
+        re.search(
+            r"\b(least|smallest|lowest|worst|slowest)\s+"
+            r"(?:the\s+)?(?:ams\s+)?(?:growth|gains?|increases?|yoy)\b|"
+            r"\b(least|smallest|lowest|worst)\s+growth\s+in\s+ams\b|"
+            r"\bleast\s+growth\b|"
+            r"\bsmallest\s+ams\s+gains?\b",
+            t,
+        )
+    )
+    high_growth = bool(
+        re.search(
+            r"\b(biggest|highest|most|largest|fastest|top)\s+"
+            r"(?:the\s+)?(?:ams\s+)?(?:growth|gains?|increases?|yoy)\b",
+            t,
+        )
+    )
+    if yoy_ask:
+        remapped = []
+        for entry in mfs:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "yoy"})
+            else:
+                remapped.append(entry)
+        mfs = merge_metric_filters([], remapped)
+        out["metric_filters"] = mfs
+        mf_ids = {str(f.get("metric") or "") for f in mfs}
+    if pop_ask:
+        remapped = []
+        for entry in mfs:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "pop"})
+            else:
+                remapped.append(entry)
+        mfs = merge_metric_filters([], remapped)
+        out["metric_filters"] = mfs
+        mf_ids = {str(f.get("metric") or "") for f in mfs}
+    rank_cuts = mf_ids & {
+        "ams",
+        "volume",
+        "yoy",
+        "pop",
+        "ams_growth",
+        "vs_ams",
+        "mom",
+    }
+    yoy_rank = yoy_ask and (
+        low_growth
+        or high_growth
+        or bool(rank_cuts)
+        or "yoy" in mf_ids
+        or "party" in rows
+        or bool(
+            re.search(
+                r"\b("
+                r"(?:the\s+)?all\s+(?:the\s+)?(?:distributors?|parties|customers?|clients?)|"
+                r"which\s+(?:distributors?|parties|customers?|clients?)|"
+                r"(?:distributors?|parties|customers?|clients?)\s+with\b|"
+                r"show\s+me\s+(?:the\s+)?(?:all\s+)?(?:distributors?|parties)|"
+                r"party[- ]?wise|customer[- ]?wise|by\s+(?:party|customer|distributor)"
+                r")\b",
+                t,
+            )
+        )
+    )
+    if (
+        rank_cuts
+        and (
             re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
             or "party" in rows
             or prior
-            or vol_cut
-        ):
-            rows = ["party"]
-            cols = [c for c in cols if c != "month"]
-            out["intent"] = "party_rank"
-            out["operation"] = out.get("operation") or "pivot"
-            # Keep planner rank metric (ams_growth / vs_ams / …); default AMS.
-            if "ams_growth" in metrics:
-                out["metric"] = "ams_growth"
-            elif "vs_ams" in metrics:
-                out["metric"] = "vs_ams"
-            elif vol_cut and not ams_cut:
-                out["metric"] = "volume"
-            elif not out.get("metric"):
-                out["metric"] = "ams"
-            if not metrics:
-                metrics = (
-                    ["volume", "ams"]
-                    if vol_cut and not ams_cut
-                    else ["ams", "volume", "vs_ams"]
+            or bool(mf_ids & {"volume", "yoy", "pop", "ams_growth", "ams"})
+        )
+    ) or yoy_rank or pop_ask:
+        rows = ["party"]
+        cols = [c for c in cols if c != "month"]
+        out["intent"] = "party_rank"
+        out["operation"] = out.get("operation") or "pivot"
+        if yoy_ask or "yoy" in mf_ids:
+            # Calendar YoY of the spoken window — not AMS vs prior AMS window.
+            # Bare "growth in AMS" with last-year language is still calendar YoY
+            # (AMS of a 3-month window grows at the same % as its volume).
+            out["metric"] = "yoy"
+            out["compare"] = "yoy"
+            metrics = ["volume", "yoy"]
+            # Size cuts like "with AMS>10" are metric_filters, not a request
+            # to rank by trailing 3-month AMS (yoy_ams).
+            if (
+                "ams" not in mf_ids
+                and re.search(
+                    r"\b(and|with|plus|including)\s+ams\b|\bams\s+and\b",
+                    t,
                 )
+                and not re.search(
+                    r"growth\s+in\s+ams|ams\s+growth|ams\s*[><=]",
+                    t,
+                )
+            ):
+                out["metric"] = "yoy_ams"
+                metrics = ["volume", "ams", "yoy"]
+            if low_growth:
+                out["sort"] = "asc"
+                out["title_mode"] = "lowest"
+            elif high_growth:
+                out["sort"] = "desc"
+        elif pop_ask or "pop" in mf_ids:
+            # Last N months vs the N months immediately before — not 3-month AMS.
+            out["metric"] = "pop"
+            out["compare"] = "prior"
+            metrics = ["volume", "pop"]
+            if low_growth:
+                out["sort"] = "asc"
+                out["title_mode"] = "lowest"
+            elif high_growth:
+                out["sort"] = "desc"
+        elif "ams_growth" in mf_ids or "ams_growth" in metrics:
+            out["metric"] = "ams_growth"
+        elif "vs_ams" in mf_ids or "vs_ams" in metrics:
+            out["metric"] = "vs_ams"
+        elif "volume" in mf_ids:
+            out["metric"] = "volume"
+        elif not out.get("metric"):
+            out["metric"] = "ams"
+        if not metrics:
+            metrics = ["volume", "ams"]
+        # Fresh complete ask with its own period — don't glue last conversation.
+        if re.search(
+            r"\b("
+            r"last\s+\d+\s+months?|this\s+month|mtd|last\s+month|"
+            r"same\s+\d+\s+months?\s+last\s+year|"
+            r"same\s+months?\s+last\s+year|20\d{2}"
+            r")\b",
+            t,
+        ):
+            out["base"] = "none"
+            out["state_action"] = "clear"
+            out["context_handling"] = "none"
+        else:
             if prior and out.get("base") != "prior":
                 out["base"] = "prior"
                 out["state_action"] = out.get("state_action") or "modify"
-            out["_clear_omitted"] = False
+        spoken_top = _extract_top_n(user_text)
+        if spoken_top:
+            out["limit"] = spoken_top
+        elif re.search(
+            r"\b(?:the\s+)?all\s+(?:the\s+)?(distributors?|parties|customers?|clients?)\b",
+            t,
+        ) or rank_cuts:
+            out["limit"] = max(int(out.get("limit") or 0), 200)
+        elif yoy_rank:
+            out["limit"] = max(int(out.get("limit") or 0), 200)
+        out["_clear_omitted"] = False
 
     # "declined the most … vs AMS" / "least growth" / "smallest AMS gains"
     if re.search(
@@ -1383,7 +1513,14 @@ def _coerce_vocab_from_user_text(
                 t,
             )
         )
-        if least_growth:
+        if yoy_ask:
+            # Calendar YoY of the spoken window — never AMS-window "smallest gains".
+            out["metric"] = "yoy"
+            out["compare"] = "yoy"
+            out["sort"] = "asc" if least_growth else (out.get("sort") or "asc")
+            out["title_mode"] = "lowest" if least_growth else out.get("title_mode")
+            metrics = ["volume", "yoy"]
+        elif least_growth:
             out["metric"] = "ams_growth"
             out["sort"] = "asc"
             out["title_mode"] = "smallest_gains"
@@ -2183,10 +2320,12 @@ def execute_query_spec(
         else:
             # SPECIFIC_MONTH cleared month columns — pick a non-conflicting
             # column grain (never equal the row leaf, e.g. channel×channel).
-            # volume + avg_price oil/period summaries stay flat (no channel grid).
+            # Average price (alone or with volume) stays flat unless the plan
+            # already named columns — a forced client_type grid is mostly
+            # dashes and is not what "avg price by product in July" asked.
             mets_now = set(spec.get("metrics") or [])
             rows_now = list(spec.get("row_dimensions") or [])
-            if "volume" in mets_now and "avg_price" in mets_now:
+            if "avg_price" in mets_now:
                 grain.pop("column_dimension", None)
                 spec["column_dimensions"] = []
             elif "party" in rows_now:
@@ -2403,6 +2542,9 @@ def execute_query_spec(
         )
     elif not named_month_vol_ams and (
         intent == "party_rank"
+        or str(spec.get("metric") or "")
+        in {"yoy", "yoy_ams", "ams_growth", "vs_ams", "pop"}
+        or set(metrics) & {"yoy", "yoy_ams", "pop"}
         or (
             set(metrics) & {"vs_ams", "ams_growth"}
             and "month" not in column_dimensions

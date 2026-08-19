@@ -70,6 +70,14 @@ def test_playbooks_match_magic_asks() -> None:
             "compare distributor sales in July 2025 vs 2026"
         )
     )
+    stacked = match_playbooks(
+        "show me all distributors with sales more than 10 MT but less than "
+        "5 % growth last 6 months vs the same 6 months last year"
+    )
+    ids = {p["id"] for p in stacked}
+    assert "yoy_compare" in ids
+    assert "compound_metric_rank" in ids
+    assert "distributors_grown" not in ids
     block = playbook_prompt_block(
         "lowest rate for pepsi and multiply by 24.7"
     )

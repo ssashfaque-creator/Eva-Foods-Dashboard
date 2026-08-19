@@ -52,7 +52,9 @@ def verify_agent_answer(
                 issues.append("arithmetic ask without calculate_expression tool")
 
     # Standard AMS/volume should prefer legacy
-    if kind == "standard" and re.search(r"\b(ams|volume|price\s*fetch)\b", q):
+    if kind == "standard" and re.search(
+        r"\b(ams|volume|price\s*fetch|sales?|tell\s+me\s+about)\b", q
+    ):
         if (
             "run_standard_analytics_pivot" not in used_names
             and "execute_read_only_sql" in used_names
@@ -69,7 +71,8 @@ def verify_agent_answer(
 
     # Empty-result smell
     if re.search(
-        r"result set is empty|no rows|_no rows_|no matching|legacy engine error|"
+        r"result set is empty|no rows|_no rows_|no matching|no results|"
+        r"legacy engine error|"
         r"sql execution error|security / validation",
         text,
         flags=re.I,
@@ -80,6 +83,7 @@ def verify_agent_answer(
                 (not t.get("ok"))
                 or "EMPTY" in str(t.get("preview") or "").upper()
                 or "no row" in str(t.get("preview") or "").lower()
+                or "no results" in str(t.get("preview") or "").lower()
                 for t in trace
             ) or not tool_ok:
                 issues.append("tools returned empty/error and answer has no data table")
@@ -109,6 +113,20 @@ def verify_agent_answer(
     )
     if wants_numbers and not has_numbers and not has_table and "?" not in text:
         issues.append("numeric ask but answer has no numbers or table")
+
+    num_cells = re.findall(
+        r'<td class="num">\s*([^<]*?)\s*</td>', text, flags=re.I
+    )
+    if (
+        wants_numbers
+        and len(num_cells) >= 2
+        and all(c.strip() in {"—", "–", "-", ""} for c in num_cells)
+    ):
+        issues.append(
+            "table has no numeric values (all blank cells). "
+            "Rerun run_standard_analytics_pivot; for named-month average price "
+            "omit column_dimensions so rates are not split across a channel grid."
+        )
 
     ok = not issues
     retry_hint = ""

@@ -668,12 +668,14 @@ from typing import Callable
 REACT_SYSTEM_PROMPT = """You are Eva Foods AI Sales Analyst (v2 ReAct).
 Answer commercial questions accurately using tools. Never invent MT, rates, or AMS.
 
-A ROUTING block may be injected below — obey preferred/blocked tools.
+A LIVE DATABASE + QUERY SPEC briefing is injected below — trust it over any
+cutoff / world-knowledge dates. A ROUTING block may follow — obey preferred/blocked tools.
 
 TOOL CHOICE:
 1. run_standard_analytics_pivot — standard volume matrices, AMS, vs AMS, AMS growth,
-   brand/BU trends, party ranks, Price Fetch / avg rate when the ask matches
-   normal commercial tables. Prefer this for volume/AMS pivots.
+   brand/BU trends, party ranks, party_profile / party_lookup, Price Fetch / avg rate.
+   Prefer this for volume/AMS/Price Fetch. Emit a complete spec_dict (see QUERY SPEC).
+   Flattened QuerySpec fields at the top level are also accepted — never send {}.
 2. execute_read_only_sql — novel asks: min/max price, who bought at a rate,
    same-date price dispersion, custom aggregations, discovery SQL.
    NEVER invent AMS windows or Price Fetch (37.3246 / 0.915) in SQL.
@@ -686,10 +688,14 @@ WORKFLOW:
 - You may call multiple tools across turns (multi-hop).
 - For "lowest price then who bought it": SQL for MIN(rate) → SQL/filter parties.
 - For "Pepsi price × 24.7 / 6": lookup entity → SQL rate → calculate_expression.
+- For "tell me about X": party_profile (not a who-is identity table).
+- For "who is X and show sales/AMS": lookup then pivot — do both hops.
 - Prefer sales.mt_qty for volume; join category on product; clients on party name.
 - Final reply: Markdown table(s) with the numbers, then ### Analysis (2–4 bullets).
 - If a tool errors, fix the query and retry — do not invent data.
 - If the ask is ambiguous, ask ONE clarifying question instead of guessing.
+- Tools named plan_query / query_sales / list_clients / analyze_parties are NOT
+  available here — use run_standard_analytics_pivot instead.
 """
 
 REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -766,7 +772,9 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
             "name": "run_standard_analytics_pivot",
             "description": (
                 "Run standard Eva commercial analytics (Volume, AMS, party ranks, "
-                "Price Fetch) via deterministic Python engines."
+                "Price Fetch) via deterministic Python engines. Prefer wrapping "
+                "QuerySpec in spec_dict; the same QuerySpec fields at the top "
+                "level are also accepted if spec_dict is omitted or empty."
             ),
             "parameters": {
                 "type": "object",
@@ -774,17 +782,52 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "spec_dict": {
                         "type": "object",
                         "description": (
-                            "QuerySpec: row_dimensions, column_dimensions, metrics, "
-                            "period_type, months_back, target_month, filters, "
-                            "business_units, limit, sort, operation, …"
+                            "QuerySpec object. Preferred wrapper. Inside: "
+                            "row_dimensions, metrics, period_type, "
+                            "state_action (keep|modify|clear). "
+                            "Also: column_dimensions, months_back, target_month, "
+                            "filters (city, client_type, party, oil_type, "
+                            "packing_category, …), business_units, excludes, "
+                            "metric_filters, limit, sort_order, compare=yoy, "
+                            "operation=pivot|party_lookup|party_profile|party_list. "
+                            "Eva brand → business_units Eva Consumer+Eva Bulk. "
+                            "who is X → party_lookup. tell me about X → party_profile. "
+                            "Last N months vs same N last year → compare=yoy, "
+                            "metric=yoy (not ams_growth). Last N vs the prior N "
+                            "months → compare=prior, metric=pop. Stacked volume+growth "
+                            "cuts → metric_filters AND, party rows, no month cols. "
+                            "Do not send an empty object when QuerySpec fields "
+                            "are already at the top level of this tool call."
                         ),
                     },
                     "user_text": {
                         "type": "string",
                         "description": "Original user question (helps spoken filters).",
                     },
+                    "state_action": {
+                        "type": "string",
+                        "enum": ["keep", "modify", "clear"],
+                    },
+                    "row_dimensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "column_dimensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "period_type": {"type": "string"},
+                    "months_back": {"type": "integer"},
+                    "filters": {"type": "object"},
+                    "compare": {"type": "string"},
+                    "metric_filters": {"type": "array"},
+                    "limit": {"type": "integer"},
+                    "operation": {"type": "string"},
                 },
-                "required": ["spec_dict"],
             },
         },
     },
@@ -816,7 +859,10 @@ def dispatch_react_tool(
         lookup_entity_values,
     )
     from eva_dashboard.tools.intent_router import tool_allowed
-    from eva_dashboard.tools.legacy_tool import run_standard_analytics_pivot
+    from eva_dashboard.tools.legacy_tool import (
+        query_spec_from_tool_args,
+        run_standard_analytics_pivot,
+    )
     from eva_dashboard.tools.sql_tool import execute_read_only_sql
 
     allowed, reason = tool_allowed(name, route)
@@ -836,13 +882,7 @@ def dispatch_react_tool(
             str(args.get("search_term") or ""),
         )
     if name == "run_standard_analytics_pivot":
-        spec = args.get("spec_dict") or args.get("query_spec") or {}
-        if not isinstance(spec, dict):
-            return {
-                "ok": False,
-                "error": "spec_dict must be an object",
-                "markdown": "Legacy Engine Error: spec_dict must be an object",
-            }
+        spec = query_spec_from_tool_args(args)
         return run_standard_analytics_pivot(
             spec,
             user_text=str(args.get("user_text") or user_text or ""),
@@ -862,6 +902,7 @@ def run_agent_loop(
     model: str = "gpt-4o",
     history: list[dict[str, Any]] | None = None,
     memory_block: str = "",
+    commercial_briefing: str = "",
     prior: dict[str, Any] | None = None,
     max_turns: int = 8,
     on_status: Callable[[str], None] | None = None,
@@ -969,7 +1010,18 @@ def run_agent_loop(
                 }
             )
 
+    briefing = (commercial_briefing or "").strip()
+    if not briefing:
+        try:
+            from eva_dashboard.react_briefing import react_commercial_briefing
+
+            briefing = react_commercial_briefing()
+        except Exception:  # noqa: BLE001 — briefing must never break chat
+            briefing = ""
+
     system = REACT_SYSTEM_PROMPT
+    if briefing:
+        system = system + "\n\n" + briefing
     if route.get("prompt_block"):
         system = system + "\n\n" + str(route["prompt_block"])
     if playbook:

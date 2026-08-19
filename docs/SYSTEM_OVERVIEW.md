@@ -1,6 +1,6 @@
-# Eva Foods Dashboard — System Overview (v1.4.4)
+# Eva Foods Dashboard — System Overview (v1.4.5)
 
-Stakeholder-grade architecture reference derived from the codebase on `main` (`eva_dashboard.__version__ = "1.4.4"`). Do not treat this as a product roadmap; it describes what the code does today.
+Stakeholder-grade architecture reference derived from the codebase on `main` (`eva_dashboard.__version__ = "1.4.5"`). Do not treat this as a product roadmap; it describes what the code does today.
 
 ---
 
@@ -12,7 +12,7 @@ Stakeholder-grade architecture reference derived from the codebase on `main` (`e
 2. Lets operators browse data and generate a Sales dashboard PDF.
 3. Answers natural-language commercial questions via an OpenAI-powered chat stack whose default orchestrator model is **`gpt-4o`**.
 
-Chat (v1.4.4) uses a **ReAct multi-step agent** (`EVA_REACT_AGENT=1` by default): an intent router classifies the ask; tools call either deterministic analytics engines (`run_standard_analytics_pivot` → QuerySpec / `execute_query_spec`) or guarded read-only SQL / a sandboxed calculator. **Money metrics** (AMS, volume pivots, Price Fetch, AMS growth/decline) are required to go through the Python engines—not reinvented in SQL. A verifier can retry bad answers up to twice. Personal lexicon, playbooks, memory context, and 👍/👎 feedback (`eval_failures`) round out production chat.
+Chat (v1.4.5) uses a **ReAct multi-step agent** (`EVA_REACT_AGENT=1` by default): an intent router classifies the ask; a **commercial briefing** (live DB dates, QuerySpec contract, vocabulary, metrics, product language) is injected every turn; tools call either deterministic analytics engines (`run_standard_analytics_pivot` → QuerySpec / `execute_query_spec`) or guarded read-only SQL / a sandboxed calculator. **Money metrics** (AMS, volume/sales pivots, Price Fetch, AMS growth/decline) are required to go through the Python engines—not reinvented in SQL. Fast paths handle exclude follow-ups, **tell me about X** (`party_profile`), and identity-only **who is X**. A verifier can retry bad answers up to twice. Personal lexicon, playbooks, memory context, and 👍/👎 feedback (`eval_failures`) round out production chat.
 
 Surfaces: Streamlit desktop UI, FastAPI Mac bridge + Vercel phone UI, and a CLI (`app`, `report`, `costs`, `update`, `bridge`).
 
@@ -24,7 +24,7 @@ Surfaces: Streamlit desktop UI, FastAPI Mac bridge + Vercel phone UI, and a CLI 
 
 - Entry: `eva_dashboard.app:main` via `eva-dashboard app [--port 8501] [--data-dir …]`.
 - Tabs (exact labels): **Sales data**, **Cost structure**, **Client list**, **Reports**, **AI Chat**.
-- Banner shows version, data root, DB filename, and launch path (must show **v1.4.4+** and `Eva-Foods-Dashboard-new` after a correct Mac install).
+- Banner shows version, data root, DB filename, and launch path (must show **v1.4.5+** and `Eva-Foods-Dashboard-new` after a correct Mac install).
 - AI Chat: API key (env or session paste), model select (`gpt-4o` default; also `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`), markdown answers, 👍/👎 feedback, downloadable training CSV.
 
 ### Bridge (`eva-dashboard bridge`)
@@ -59,7 +59,7 @@ Surfaces: Streamlit desktop UI, FastAPI Mac bridge + Vercel phone UI, and a CLI 
 
 ### Update
 
-- Code defaults: repo `ssashfaque-creator/Eva-Foods-Dashboard`, branch **`main`**, min version **1.4.4**, install dir `~/Eva-Foods-Dashboard-new` (or `EVA_HOME`).
+- Code defaults: repo `ssashfaque-creator/Eva-Foods-Dashboard`, branch **`main`**, min version **1.4.5**, install dir `~/Eva-Foods-Dashboard-new` (or `EVA_HOME`).
 - One-liner: `curl …/main/scripts/update.sh | bash`.
 - Refuses legacy folders matching `sales-dashboard-pdf` / `ai-chatbot-data-testing`.
 - Preserves `data/`, `.venv/`, `.env`, etc.
@@ -260,13 +260,14 @@ Expands lexicon aliases and resolves party candidates into a `GROUNDED_PARTIES` 
 2. **`chat_completion`** rebuilds a live system prompt (DB overview + data catalog), resolves prior specs / `query_state`, builds `MemoryContext`, golden RAG snippets, and semantic entity grounding.
 3. **Fast paths** (skip full agent when they succeed):
    - Short exclude/remove follow-up on prior table → `execute_query_spec` directly  
-   - “Who is X” → `party_lookup`  
+   - “Tell me about X” / customer rundown → `party_profile`  
+   - “Who is X” (identity only; not “and show sales”) → `party_lookup`  
    - Ordinal picks from prior who-is (“AMS for 1 and 2”) → cache or pivot  
 4. If **`EVA_REACT_AGENT` enabled** (default):
    1. Learn price preference from this turn’s text if stated  
    2. **`route_ask`** → kind / preferred / blocked tools  
    3. **`ground_ask_for_agent`** + lexicon expansions  
-   4. Match **playbooks** into system prompt  
+   4. Inject **commercial briefing** (`react_briefing.react_commercial_briefing`) + match **playbooks**  
    5. High-confidence **clarify** may return one question (or skip if lexicon already has a price default)  
    6. Model loop: tool_choice auto → `dispatch_react_tool` (router may soft-block tools)  
    7. On final text: **`verify_agent_answer`**; retry ≤2×  
@@ -289,7 +290,7 @@ Expands lexicon aliases and resolves party candidates into a `GROUNDED_PARTIES` 
 | `EVA_HOME` | Canonical install directory override |
 | `EVA_UPDATE_REPO` | GitHub owner/repo for update (default `ssashfaque-creator/Eva-Foods-Dashboard`) |
 | `EVA_UPDATE_BRANCH` | Update branch (default **`main`**) |
-| `EVA_MIN_VERSION` | Used by `scripts/update.sh` (default `1.4.4`) |
+| `EVA_MIN_VERSION` | Used by `scripts/update.sh` (default `1.4.5`) |
 
 CLI `--data-dir` sets `EVA_DATA_DIR` for that process.
 
@@ -298,7 +299,7 @@ CLI `--data-dir` sets `EVA_DATA_DIR` for that process.
 ## 8. Testing / eval
 
 - Large pytest suite under `tests/` (ingest, sales_query, universal_pivot, party analytics, ReAct tools, bridge API, memory, product language, Price Fetch, etc.).
-- **Money-metric golden eval:** `eva_dashboard/golden_magic_eval.json` (version `"1.4.4"`) + `eval_harness.py` / `tests/test_golden_magic_eval.py`.
+- **Money-metric golden eval:** `eva_dashboard/golden_magic_eval.json` (version `"1.4.5"`) + `eval_harness.py` / `tests/test_golden_magic_eval.py`.
   - Offline: scores **router kind**, **playbook ids**, preferred/blocked tools, lexicon aliases.
   - Cases marked `money_metric: true` must route **`standard`**, prefer **`run_standard_analytics_pivot`**, and (for AMS / Price Fetch / grown / declined language) **block** `execute_read_only_sql`.
 - CLI: `python -m eva_dashboard.eval_harness`.
@@ -308,7 +309,7 @@ CLI `--data-dir` sets `EVA_DATA_DIR` for that process.
 
 ## 9. Versioning & Mac install
 
-- Package / module version: **`1.4.4`** (`pyproject.toml`, `eva_dashboard/__init__.py`, golden eval JSON, update `MIN_VERSION`).
+- Package / module version: **`1.4.5`** (`pyproject.toml`, `eva_dashboard/__init__.py`, golden eval JSON, update `MIN_VERSION`).
 - Install Python **3.10+**.
 - Recommended:
 
@@ -326,7 +327,6 @@ export OPENAI_API_KEY=sk-...
 
 ## 10. Known limits / tech debt
 
-- **README lag:** AI Chat section still says default **GPT-4o-mini**; code/UI default is **`gpt-4o`**.
 - **CLI help lag:** `eva-dashboard update --branch` help text still mentions `cursor/phase1-single-planner-50eb`; actual default is **`main`** (`update.py` / `scripts/update.sh`).
 - **`EVA_REACT_AGENT=0`** plan_query loop is deprecated and warned; kept only for emergency rollback until money goldens stay green.
 - **SQL vs engines:** Agents must not invent AMS windows or Price Fetch (`37.3246` / `0.915`) in SQL; verifier and SQL bans enforce this, but discovery asks still need careful prompting.
@@ -334,6 +334,7 @@ export OPENAI_API_KEY=sk-...
 - **Mobile latency:** Multi-tool turns often **10–40s**; tunnel URL changes require Vercel env update + redeploy unless a named tunnel is used.
 - **Category map required** for correct BU / Oil / Packing reports and chat pivots; unmapped products must be called out.
 - **Clarify / price ambiguity:** Bare “price” asks interrupt until a preference is learned.
+- **Teaching-text dual names:** vocabulary examples still say `plan_query`; ReAct briefing remaps that to `run_standard_analytics_pivot`.
 - Deploy doc still shows an older branch URL in one update example; prefer `main` after this release line.
 
 ---
@@ -351,8 +352,9 @@ flowchart TB
   subgraph MacHost[Mac host]
     BR[FastAPI bridge :8787<br/>/health /ready /chat /chat/stream /feedback]
     CC[chat_completion]
-    FP[Fast paths<br/>exclude · who-is · ordinal]
+    FP[Fast paths<br/>exclude · profile · who-is · ordinal]
     RA[run_agent_loop ReAct<br/>DEFAULT_MODEL gpt-4o]
+    BRF[react_commercial_briefing<br/>live DB + QuerySpec + vocab]
     RT[intent_router<br/>standard · discovery · math · clarify · mixed]
     LX[personal_lexicon.json]
     PB[playbooks]
@@ -380,6 +382,7 @@ flowchart TB
   CC --> FP
   CC -->|EVA_REACT_AGENT=1| RA
   RA --> RT
+  RA --> BRF
   RA --> LX
   RA --> PB
   RA --> AG
@@ -405,4 +408,4 @@ flowchart TB
 
 ---
 
-*Generated from repository sources for Eva Foods Dashboard v1.4.4. Prefer `docs/DATA_CATALOG.md` and `docs/REACT_AGENT.md` for deeper catalog / agent notes.*
+*Generated from repository sources for Eva Foods Dashboard v1.4.5. Prefer `docs/DATA_CATALOG.md` and `docs/REACT_AGENT.md` for deeper catalog / agent notes.*

@@ -75,13 +75,21 @@ def score_case(case: dict[str, Any]) -> dict[str, Any]:
             money_ok = False
             money_details.append("money metric must prefer run_standard_analytics_pivot")
         if "execute_read_only_sql" not in (route.get("blocked_tools") or []):
-            # AMS / Price Fetch / growth must hard-block SQL
+            # AMS / volume / Price Fetch / growth must hard-block SQL
             if any(
                 x in text.lower()
-                for x in ("ams", "price fetch", "price_fetch", "grown", "declined")
-            ):
+                for x in (
+                    "ams",
+                    "price fetch",
+                    "price_fetch",
+                    "grown",
+                    "declined",
+                    "volume",
+                    "tonnage",
+                )
+            ) or re.search(r"\bsales?\b", text.lower()):
                 money_ok = False
-                money_details.append("money/AMS/PF ask must block execute_read_only_sql")
+                money_details.append("money/AMS/PF/volume ask must block execute_read_only_sql")
 
     ok = bool(kind_ok and pb_ok and forbid_ok and prefer_ok and alias_ok and money_ok)
     return {

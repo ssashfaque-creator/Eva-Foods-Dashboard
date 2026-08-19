@@ -716,7 +716,7 @@ def _fetch_lines(
     """
     init_db()
     params: list[Any] = [date_from, date_to]
-    where = ["s.date >= ?", "s.date <= ?"]
+    where = ["substr(s.date, 1, 10) >= ?", "substr(s.date, 1, 10) <= ?"]
     zone_n = normalize_zone(zone) if zone else None
 
     # Resolve city / zone / client_type to party lists from the clients master.
@@ -4225,7 +4225,7 @@ def query_price(
     d1 = period_info["date_to"]
 
     params: list[Any] = [d0, d1]
-    where = ["s.date >= ?", "s.date <= ?"]
+    where = ["substr(s.date, 1, 10) >= ?", "substr(s.date, 1, 10) <= ?"]
     if city_f:
         where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
         params.append(city_f)
@@ -4889,7 +4889,7 @@ def query_price_fetch_table(
     d1 = period_info["date_to"]
 
     params: list[Any] = [d0, d1]
-    where = ["s.date >= ?", "s.date <= ?"]
+    where = ["substr(s.date, 1, 10) >= ?", "substr(s.date, 1, 10) <= ?"]
     if city_f:
         where.append("lower(trim(COALESCE(cl.city_filter, ''))) = lower(trim(?))")
         params.append(city_f)

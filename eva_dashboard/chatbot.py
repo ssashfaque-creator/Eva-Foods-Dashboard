@@ -250,9 +250,11 @@ def system_prompt() -> str:
     return f"""You are the Eva Foods AI Sales Analyst (v2 ReAct). Answer ONLY from the live SQLite database.
 
 When the ReAct agent path is active, use tools: run_standard_analytics_pivot
-(Volume/AMS/ranks/Price Fetch), execute_read_only_sql (novel min/max /
+(Volume/AMS/ranks/Price Fetch/party_profile), execute_read_only_sql (novel min/max /
 who-at-rate), calculate_expression (any math), get_database_schema /
 lookup_entity_values (before custom SQL). Multi-hop is encouraged.
+Do not call plan_query / query_sales as tools on the ReAct path — they are not
+exposed; the pivot tool runs those engines.
 
 {live}
 
@@ -285,10 +287,17 @@ lookup_entity_values (before custom SQL). Multi-hop is encouraged.
    → that row dimension.
 10. Channels → filters.client_type. Customers → filters.party only when INCLUDE.
     who is X → party_lookup. Profile → party_profile.
-11. COMPARE: compared things = rows; shared scope = filters. Growth → ams_growth.
+11. COMPARE: compared things = rows; shared scope = filters.
+    Last N months vs same N last year → compare=yoy + metric=yoy (NOT ams_growth).
+    Last N vs the prior N months → compare=prior + metric=pop.
+    Lowest/least growth of that window → sort=asc; highest/biggest → sort=desc.
+    AMS-window growth (no last-year / prior-N language) → ams_growth.
+    Stacked cuts (volume > X AND growth < Y%) → metric_filters AND, party rows,
+    no month columns, state_action=clear on a complete new ask.
 12. Prefer standard pivots for AMS/volume; use SQL tools for discovery asks.
-    Escape: get_schema, get_sales_overview, run_sql, resolve_product_language,
-    report_snapshot, list_unmapped_products.
+    ReAct tools: run_standard_analytics_pivot, execute_read_only_sql,
+    calculate_expression, get_database_schema, lookup_entity_values.
+    (Deprecated plan_query loop still maps query_sales / get_schema.)
 13. INVESTIGATION: empty/plan_errors/feedback → re-plan before Analysis. Mixed
     party-vs-channel → two plan_query calls.
 14. GOLDEN_QUERY_EXAMPLES are few-shot templates — mirror structure, adapt
@@ -934,6 +943,7 @@ _LEGACY_TOOLS: list[dict[str, Any]] = [
                             "yoy",
                             "ams_growth",
                             "yoy_ams",
+                            "pop",
                             "share_of_segment",
                             "segment_mix",
                             "geo_share",
@@ -2997,18 +3007,105 @@ def _looks_named_party_sales(text: str) -> bool:
     return False
 
 
+def _extract_profile_subject(text: str) -> str | None:
+    """Pull the customer name from 'tell me about X' / rundown language."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.search(
+        r"\b(?:"
+        r"tell\s+me\s+about|"
+        r"rundown\s+on|"
+        r"everything\s+about|"
+        r"(?:customer|party)\s+profile(?:\s+(?:of|for))?|"
+        r"profile\s+(?:of|for)|"
+        r"full\s+picture(?:\s+(?:on|of|for))?|"
+        r"give\s+me\s+(?:a\s+)?(?:full\s+)?(?:picture|profile|rundown)(?:\s+(?:on|of|for))?"
+        r")\s+(.+)",
+        t,
+        flags=re.I,
+    )
+    if not m:
+        return None
+    rest = m.group(1).strip(" .,?!")
+    rest = re.sub(
+        r"\s+\b("
+        r"in|for|this|last|on"
+        r")\s+("
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?|"
+        r"(?:this|last)\s+month|"
+        r"20\d{2}"
+        r").*$",
+        "",
+        rest,
+        flags=re.I,
+    )
+    rest = rest.strip(" .,?!")
+    if not rest or len(rest) < 2:
+        return None
+    return rest
+
+
+def _looks_explicit_party_profile(text: str) -> bool:
+    """Customer rundown — not identity lookup and not BU 'how are sales doing'."""
+    t = (text or "").lower()
+    if not t:
+        return False
+    # BU / city / channel performance stays on the sales pivot
+    if re.search(
+        r"\b(how\s+(is|are)\s+).+\b(sales?|volume)\b.+\b(doing|performing)\b",
+        t,
+    ):
+        return False
+    if re.search(
+        r"\b(eva consumer|eva bulk|maan consumer|maan bulk|business unit)\b",
+        t,
+    ) and re.search(r"\b(sales?|volume|ams|doing|performing)\b", t):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"tell\s+me\s+about|customer\s+profile|party\s+profile|"
+            r"profile\s+(of|for)|rundown\s+on|everything\s+about|"
+            r"give\s+me\s+(a\s+)?(full\s+)?(picture|profile|rundown)|"
+            r"full\s+picture|"
+            r"last\s+(purchase|invoice|order)\b"
+            r")",
+            t,
+        )
+    )
+
+
+def _looks_who_is_with_analytics(text: str) -> bool:
+    """'who is X and show sales/AMS' — identity + numbers, not lookup-only."""
+    t = (text or "").lower()
+    if not re.search(r"\b(who\s+is|who'?s)\b", t):
+        return False
+    return bool(
+        re.search(
+            r"\b(sales?|volume|ams|price|growth|doing|performance|exclude)\b",
+            t,
+        )
+    )
+
+
 def _looks_party_lookup(text: str) -> bool:
-    """Fuzzy single-name lookup only (not lists / rankings)."""
+    """Fuzzy single-name lookup only (not lists / rankings / profiles)."""
     t = (text or "").lower()
     if _looks_named_party_sales(text):
+        return False
+    if _looks_explicit_party_profile(text):
+        return False
+    if _looks_who_is_with_analytics(text):
         return False
     if _looks_client_list(t) or _looks_party_analytics(t):
         return False
     return bool(
         re.search(
             r"\b(who\s+is|who'?s|find\s+(the\s+)?client|"
-            r"search\s+(for\s+)?(client|party)|lookup\s+(client|party)|"
-            r"tell me about)\b",
+            r"search\s+(for\s+)?(client|party)|lookup\s+(client|party))\b",
             t,
         )
     )
@@ -5134,7 +5231,14 @@ def _dispatch_tool(
                 if wants_vol_vs_ams:
                     metric = "yoy_ams"
                 elif inferred_m in {"ams_growth", "yoy_ams", "yoy", "vs_ams"}:
-                    metric = "ams_growth" if inferred_m == "yoy" else inferred_m
+                    from eva_dashboard.metric_filters import looks_yoy_period_compare
+
+                    if inferred_m == "yoy" and not looks_yoy_period_compare(
+                        user_text
+                    ):
+                        metric = "ams_growth"
+                    else:
+                        metric = inferred_m
                 elif re.search(r"\b(ams|gains?|growth)\b", t_low):
                     metric = "ams_growth"
                 else:
@@ -6225,6 +6329,51 @@ def chat_completion(
                     plan_debug=plan_debug,
                 )
                 return md, _prune_session_messages(working)
+
+    # Fast path: "tell me about X" / customer rundown — party_profile engine
+    if _looks_explicit_party_profile(last_user):
+        if on_status:
+            on_status("Building customer profile…")
+        subject = _extract_profile_subject(last_user)
+        profile_plan: dict[str, Any] = {
+            "operation": "party_profile",
+            "intent": "party_profile",
+            "context_handling": "prior" if prior_ctx else "none",
+            "state_action": "modify" if prior_ctx else "clear",
+            "row_dimensions": ["party"],
+            "metrics": ["volume", "ams", "vs_ams"],
+            "filters": {},
+        }
+        if subject:
+            profile_plan["party_query"] = subject
+            profile_plan["extracted_entities"] = [subject]
+            profile_plan["filters"] = {"party": subject}
+        try:
+            result = execute_query_spec(
+                profile_plan,
+                prior=prior_ctx,
+                user_text=last_user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": str(exc)}
+        if isinstance(result, dict) and result.get("ok") and result.get(
+            "answer_markdown"
+        ):
+            md = str(result["answer_markdown"])
+            plan_debug = {
+                "path": "party_profile_fast_path",
+                "query_spec": result.get("query_spec"),
+                "memory": memory.to_dict(),
+            }
+            working.append({"role": "assistant", "content": md})
+            _attach_followup_meta(
+                working,
+                table_spec=result.get("table_spec") or result.get("query_spec"),
+                party_spec=result.get("party_spec"),
+                query_state=result.get("query_state"),
+                plan_debug=plan_debug,
+            )
+            return md, _prune_session_messages(working)
 
     # Fast path: "who is X" — skip OpenAI plan_query (lookup_party is enough)
     if _looks_party_lookup(last_user):

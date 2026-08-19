@@ -34,7 +34,7 @@ curl -fsSL "https://raw.githubusercontent.com/ssashfaque-creator/Eva-Foods-Dashb
 Your browser should open to `http://localhost:8501`.  
 Leave the Terminal window open while you use the app. Stop with `Ctrl+C`.
 
-Chat banner must show **v1.4.4+** and a path containing `Eva-Foods-Dashboard-new`.
+Chat banner must show **v1.4.5+** and a path containing `Eva-Foods-Dashboard-new`.
 If you still see `sales-dashboard-pdf-8203` or **v1.0.0**, you launched the wrong binary — use the full path above.
 
 Optional:
@@ -82,11 +82,13 @@ Do **not** run bare `eva-dashboard update` / `eva-dashboard app` if `which eva-d
 
 ### AI Chat
 - Ask natural-language questions about the live database (sales, cities, clients, costs, Price Fetch).
-- Sales questions use a fast **`query_sales`** path: AI sets filters → system builds MT pivots
-  (Business Unit → Oil Type → Packing rows; Client Type or City columns; AMS analytical mode).
+- Sales / AMS / Price Fetch questions go through deterministic Python engines
+  (`run_standard_analytics_pivot` → QuerySpec). Discovery asks (min/max rate,
+  who bought at a price) use guarded SQL. Arithmetic uses a sandboxed calculator.
 - Understands **team product language** (e.g. "VTF bulk", "canola standup") and resolves to exact SKUs.
 - Returns **markdown tables** for numeric answers.
-- Uses **OpenAI GPT-4o-mini** by default with read-only tools.
+- Uses **OpenAI GPT-4o** by default (ReAct orchestrator) with read-only tools.
+  Mini / 4.1 variants are still selectable in the UI.
 - **Download chat CSV** exports Q&A turns with blank `comment` / `rating_1_to_5` /
   `expected_answer_notes` columns for training feedback.
 - Set `OPENAI_API_KEY` in the environment, or paste a key in the tab (session only).

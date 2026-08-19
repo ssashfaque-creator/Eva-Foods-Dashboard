@@ -161,6 +161,34 @@ def test_coerce_product_wise_nests_under_prior_city() -> None:
     assert fixed["filters"].get("client_type") == "Imtiaz Store"
 
 
+def test_coerce_productwise_nests_under_prior_channel() -> None:
+    """After Lahore channel-wise, productwise keeps channel as the outer grain."""
+    prior = {
+        "row_dimensions": ["client_type"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "filters": {"city": "Lahore"},
+        "months_back": 6,
+    }
+    planned = {
+        "state_action": "modify",
+        "row_dimensions": ["packing_category"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+    }
+    for text in (
+        "show Lahore sales productwise",
+        "can you show this productwise",
+        "can you show this product wise",
+    ):
+        fixed = _coerce_vocab_from_user_text(planned, text, prior=prior)
+        assert fixed["row_dimensions"] == ["client_type", "packing_category"], text
+        assert fixed["filters"].get("city") == "Lahore"
+
+
 def test_regroup_product_wise_nests_under_city() -> None:
     assert extract_regroup_dimension("show this product wise") == "packing_category"
     prior = {

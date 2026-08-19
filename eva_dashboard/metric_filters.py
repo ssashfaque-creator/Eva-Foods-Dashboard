@@ -16,6 +16,7 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "volume": ("volume_mt", "volume", "mt"),
     "vs_ams": ("pct_vs_ams", "vs_ams"),
     "yoy": ("yoy_pct", "yoy"),
+    "pop": ("pop_pct", "pop"),
     "mom": ("mom_pct", "mom"),
     "last_price": ("last_price",),
     "avg_price": ("avg_price_incl_gst", "avg_price", "incl_gst_per_unit"),
@@ -24,12 +25,12 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 _METRIC_ALIASES: list[tuple[str, str]] = [
-    (r"ams\s*growth|growth\s*%|growth\s+percent|growth", "ams_growth"),
+    (r"ams\s*growth|growth\s+in\s+ams|growth\s*%|growth\s+percent|\bgrowth\b", "ams_growth"),
     (r"%\s*vs\s*ams|vs\.?\s*ams|versus\s+ams", "vs_ams"),
     (r"yoy|year\s*over\s*year|year\s+on\s+year", "yoy"),
     (r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month", "mom"),
-    (r"ams|average\s+monthly\s+sales", "ams"),
-    (r"volume|sales\s+mt|tonnage|\bmt\b", "volume"),
+    (r"(?:mt|tons?|tonnes?)\s*ams|ams|average\s+monthly\s+sales", "ams"),
+    (r"volume|\bsales\b|sales\s+mt|tonnage|\bmt\b", "volume"),
     (r"last\s+price|latest\s+price", "last_price"),
     (r"avg\s+price|average\s+price|average\s+rate", "avg_price"),
     (r"price\s*fetch", "price_fetch"),
@@ -62,12 +63,85 @@ def _norm(text: str) -> str:
     return " ".join(str(text or "").strip().lower().replace("-", " ").split())
 
 
+def looks_yoy_period_compare(user_text: str) -> bool:
+    """True when the user wants calendar YoY (same span last year), not AMS-window growth.
+
+    Covers 'YoY', 'vs last year', and 'last N months vs the same N months last year'.
+    """
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"year\s+over\s+year|\byoy\b|year\s+on\s+year|"
+            r"same\s+period\s+last\s+year|"
+            r"same\s+\d+\s+months?\s+last\s+year|"
+            r"same\s+(?:three|six|twelve)\s+months?\s+last\s+year|"
+            r"same\s+months?\s+last\s+year|"
+            r"corresponding\s+period\s+last\s+year|"
+            r"same\s+(?:window|span|time|months?)\s+last\s+year|"
+            r"last\s+year\s+same\s+(?:period|\d+\s+months?|months?)|"
+            r"vs\.?\s*(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+|months?\s+)?last\s+year|"
+            r"versus\s+(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+)?last\s+year|"
+            r"compared?\s+(?:with|to)\s+(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+)?"
+            r"last\s+year|"
+            r"last\s+\d+\s+months?\s+(?:vs\.?|versus|compared?\s+to).{0,60}last\s+year|"
+            r"vs\.?\s+(?:the\s+)?previous\s+year|"
+            r"year\s+ago"
+            r")\b",
+            t,
+        )
+    )
+
+
+def looks_prior_period_compare(user_text: str) -> bool:
+    """True when last N months should be compared to the N months before that.
+
+    Sequential period-over-period — not calendar YoY and not the 3-month AMS
+    windows. 'vs last year' always wins as YoY.
+    """
+    if looks_yoy_period_compare(user_text):
+        return False
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"vs\.?\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"versus\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"compared?\s+(?:with|to)\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"last\s+\d+\s+months?\s+(?:vs\.?|versus|compared?\s+to)\s+"
+            r"(?:the\s+)?(?:prior|previous|preceding)|"
+            r"(?:prior|previous|preceding)\s+\d+\s+months?|"
+            r"period\s+over\s+period|\bpop\b"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _resolve_metric_name(blob: str) -> str | None:
     t = _norm(blob)
     for pat, canon in _METRIC_ALIASES:
         if re.search(rf"^{pat}$", t) or re.search(rf"\b{pat}\b", t):
             return canon
     return None
+
+
+def _cut_entry(metric: str, op: str, value: float, *, pct: bool) -> dict[str, Any]:
+    """Bind a parsed threshold to a canonical metric.
+
+    A trailing % on AMS/volume is growth (\"less than 5% in AMS\"), not an
+    AMS-tonnage cut. Bare \"AMS > 10\" stays AMS tons.
+    """
+    if pct and metric in {"ams", "volume"}:
+        metric = "ams_growth"
+    return {"metric": metric, "op": op, "value": value}
 
 
 def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
@@ -89,8 +163,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         re.escape(k) for k in sorted(_OPS.keys(), key=len, reverse=True)
     )
     metric_alt = (
-        r"ams\s*growth|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
-        r"average\s+monthly\s+sales|ams|volume|"
+        r"ams\s*growth|growth\s+in\s+ams|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
+        r"average\s+monthly\s+sales|(?:mt|tons?|tonnes?)\s*ams|ams|"
+        r"volume|\bsales\b|tonnage|\bmt\b|"
         r"yoy|year\s*over\s*year|year\s+on\s+year|"
         r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month|"
         r"last\s+price|avg\s+price|price\s*fetch|invoices?"
@@ -114,7 +189,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if not op:
             continue
         value = float(m.group("value"))
-        entry = {"metric": metric, "op": op, "value": value}
+        entry = _cut_entry(
+            metric, op, value, pct=bool(m.group("pct"))
+        )
         if entry not in found:
             found.append(entry)
 
@@ -134,7 +211,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if not op:
             continue
         value = float(m.group("value"))
-        entry = {"metric": metric, "op": op, "value": value}
+        entry = _cut_entry(
+            metric, op, value, pct=bool(m.group("pct"))
+        )
         if entry not in found:
             found.append(entry)
 
@@ -174,7 +253,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         value = float(m.group("value"))
         verb = m.group(1).lower()
         metric = "ams_growth"
-        if re.search(r"\b(yoy|year\s*over\s*year)\b", t):
+        if looks_yoy_period_compare(raw) or re.search(
+            r"\b(yoy|year\s*over\s*year)\b", t
+        ):
             metric = "yoy"
         elif re.search(r"\b(mom|month\s*over\s*month|last\s+month)\b", t):
             metric = "mom"
@@ -184,7 +265,25 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
             entry = {"metric": metric, "op": op, "value": value}
         if entry not in found:
             found.append(entry)
-    return found
+    # Calendar YoY language ("same 3 months last year") → growth cuts are yoy,
+    # not AMS-window growth (which is the previous 3-month AMS vs current AMS).
+    if looks_yoy_period_compare(raw):
+        remapped: list[dict[str, Any]] = []
+        for entry in found:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "yoy"})
+            else:
+                remapped.append(entry)
+        found = remapped
+    elif looks_prior_period_compare(raw):
+        remapped = []
+        for entry in found:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "pop"})
+            else:
+                remapped.append(entry)
+        found = remapped
+    return _collapse_same_threshold_volume_vs_ams(found)
 
 
 def looks_like_metric_threshold_phrase(text: str) -> bool:
@@ -193,7 +292,7 @@ def looks_like_metric_threshold_phrase(text: str) -> bool:
     if not raw:
         return False
     if not re.search(
-        r"\b(ams|volume|growth|yoy|mom|average\s+monthly)\b",
+        r"\b(ams|volume|growth|yoy|mom|sales|average\s+monthly)\b",
         raw,
         flags=re.I,
     ):
@@ -216,6 +315,31 @@ def looks_metric_threshold_exclude(user_text: str) -> bool:
             (user_text or "").lower(),
         )
     )
+
+
+def _collapse_same_threshold_volume_vs_ams(
+    filters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One number cannot be both volume and AMS.
+
+    'more than 10 MT AMS' must not AND volume>10 with ams>10. Keep AMS —
+    that is the named KPI. Distinct numbers (volume>25 and AMS>10) stay.
+    """
+    drop: set[int] = set()
+    for i, a in enumerate(filters):
+        if str(a.get("metric") or "") not in {"volume", "ams"}:
+            continue
+        for j, b in enumerate(filters):
+            if j <= i:
+                continue
+            if str(b.get("metric") or "") not in {"volume", "ams"}:
+                continue
+            if a.get("op") != b.get("op") or a.get("value") != b.get("value"):
+                continue
+            if a.get("metric") == b.get("metric"):
+                continue
+            drop.add(i if a.get("metric") == "volume" else j)
+    return [f for i, f in enumerate(filters) if i not in drop]
 
 
 def merge_metric_filters(
@@ -243,7 +367,7 @@ def merge_metric_filters(
         entry = {"metric": metric, "op": op, "value": value}
         if entry not in out:
             out.append(entry)
-    return out
+    return _collapse_same_threshold_volume_vs_ams(out)
 
 
 def _row_metric_value(row: dict[str, Any], metric: str) -> float | None:
