@@ -1326,6 +1326,23 @@ def _coerce_vocab_from_user_text(
     mfs = list(out.get("metric_filters") or [])
     mf_ids = {str(f.get("metric") or "") for f in mfs}
     yoy_ask = _looks_yoy_compare(t) or "yoy" in mf_ids
+    low_growth = bool(
+        re.search(
+            r"\b(least|smallest|lowest|worst|slowest)\s+"
+            r"(?:the\s+)?(?:ams\s+)?(?:growth|gains?|increases?|yoy)\b|"
+            r"\b(least|smallest|lowest|worst)\s+growth\s+in\s+ams\b|"
+            r"\bleast\s+growth\b|"
+            r"\bsmallest\s+ams\s+gains?\b",
+            t,
+        )
+    )
+    high_growth = bool(
+        re.search(
+            r"\b(biggest|highest|most|largest|fastest|top)\s+"
+            r"(?:the\s+)?(?:ams\s+)?(?:growth|gains?|increases?|yoy)\b",
+            t,
+        )
+    )
     if yoy_ask:
         remapped = []
         for entry in mfs:
@@ -1344,12 +1361,34 @@ def _coerce_vocab_from_user_text(
         "vs_ams",
         "mom",
     }
-    if rank_cuts and (
-        re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
+    yoy_rank = yoy_ask and (
+        low_growth
+        or high_growth
+        or bool(rank_cuts)
+        or "yoy" in mf_ids
         or "party" in rows
-        or prior
-        or bool(mf_ids & {"volume", "yoy", "ams_growth", "ams"})
-    ):
+        or bool(
+            re.search(
+                r"\b("
+                r"(?:the\s+)?all\s+(?:the\s+)?(?:distributors?|parties|customers?|clients?)|"
+                r"which\s+(?:distributors?|parties|customers?|clients?)|"
+                r"(?:distributors?|parties|customers?|clients?)\s+with\b|"
+                r"show\s+me\s+(?:the\s+)?(?:all\s+)?(?:distributors?|parties)|"
+                r"party[- ]?wise|customer[- ]?wise|by\s+(?:party|customer|distributor)"
+                r")\b",
+                t,
+            )
+        )
+    )
+    if (
+        rank_cuts
+        and (
+            re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
+            or "party" in rows
+            or prior
+            or bool(mf_ids & {"volume", "yoy", "ams_growth", "ams"})
+        )
+    ) or yoy_rank:
         rows = ["party"]
         cols = [c for c in cols if c != "month"]
         out["intent"] = "party_rank"
@@ -1367,6 +1406,11 @@ def _coerce_vocab_from_user_text(
             ) and not re.search(r"growth\s+in\s+ams|ams\s+growth", t):
                 out["metric"] = "yoy_ams"
                 metrics = ["volume", "ams", "yoy"]
+            if low_growth:
+                out["sort"] = "asc"
+                out["title_mode"] = "lowest"
+            elif high_growth:
+                out["sort"] = "desc"
         elif "ams_growth" in mf_ids or "ams_growth" in metrics:
             out["metric"] = "ams_growth"
         elif "vs_ams" in mf_ids or "vs_ams" in metrics:
@@ -1381,7 +1425,8 @@ def _coerce_vocab_from_user_text(
         if re.search(
             r"\b("
             r"last\s+\d+\s+months?|this\s+month|mtd|last\s+month|"
-            r"same\s+\d+\s+months?\s+last\s+year|20\d{2}"
+            r"same\s+\d+\s+months?\s+last\s+year|"
+            r"same\s+months?\s+last\s+year|20\d{2}"
             r")\b",
             t,
         ):
@@ -1396,9 +1441,11 @@ def _coerce_vocab_from_user_text(
         if spoken_top:
             out["limit"] = spoken_top
         elif re.search(
-            r"\ball\s+(the\s+)?(distributors?|parties|customers?|clients?)\b",
+            r"\b(?:the\s+)?all\s+(?:the\s+)?(distributors?|parties|customers?|clients?)\b",
             t,
         ) or rank_cuts:
+            out["limit"] = max(int(out.get("limit") or 0), 200)
+        elif yoy_rank:
             out["limit"] = max(int(out.get("limit") or 0), 200)
         out["_clear_omitted"] = False
 
@@ -1425,7 +1472,14 @@ def _coerce_vocab_from_user_text(
                 t,
             )
         )
-        if least_growth:
+        if yoy_ask:
+            # Calendar YoY of the spoken window — never AMS-window "smallest gains".
+            out["metric"] = "yoy"
+            out["compare"] = "yoy"
+            out["sort"] = "asc" if least_growth else (out.get("sort") or "asc")
+            out["title_mode"] = "lowest" if least_growth else out.get("title_mode")
+            metrics = ["volume", "yoy"]
+        elif least_growth:
             out["metric"] = "ams_growth"
             out["sort"] = "asc"
             out["title_mode"] = "smallest_gains"

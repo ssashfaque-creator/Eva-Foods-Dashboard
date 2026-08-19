@@ -289,6 +289,7 @@ exposed; the pivot tool runs those engines.
     who is X → party_lookup. Profile → party_profile.
 11. COMPARE: compared things = rows; shared scope = filters.
     Last N months vs same N last year → compare=yoy + metric=yoy (NOT ams_growth).
+    Lowest/least growth of that window → sort=asc; highest/biggest → sort=desc.
     AMS-window growth (no last-year language) → ams_growth.
     Stacked cuts (volume > X AND growth < Y%) → metric_filters AND, party rows,
     no month columns, state_action=clear on a complete new ask.

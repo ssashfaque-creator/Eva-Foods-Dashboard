@@ -207,8 +207,8 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"\b(yoy|year\s*over\s*year|year\s+on\s+year|"
             r"vs\.?\s*(last\s+)?year|versus\s+(the\s+)?(same\s+)?(last\s+)?year|"
-            r"same\s+(period|\d+\s+months?|three|six|twelve)\s+last\s+year|"
-            r"same\s+(window|span|time)\s+last\s+year|"
+            r"same\s+(period|\d+\s+months?|months?|three|six|twelve)\s+last\s+year|"
+            r"same\s+(window|span|time|months?)\s+last\s+year|"
             r"last\s+\d+\s+months?\s+(vs\.?|versus|compared?\s+to).{0,80}last\s+year|"
             r"20\d{2}\s+vs\.?\s+20\d{2})\b|"
             r"\b(july|jan|feb|mar|apr|may|jun|aug|sep|oct|nov|dec)\w*\s+20\d{2}\s+vs",
@@ -220,8 +220,10 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "Last N months vs the same N months last year → "
             "LAST_N_MONTHS + months_back=N, metric='yoy' (calendar YoY of that "
             "window). Named month vs last year → SPECIFIC_MONTH of the later year.",
-            "Party/distributor lists: row_dimensions=['party'], no month columns, "
-            "stack metric_filters for volume/growth cuts. Keep channel/BU filters.",
+            "Party/distributor lists: row_dimensions=['party'], no month columns. "
+            "Lowest/least/smallest growth vs last year → metric='yoy', sort=asc. "
+            "Highest/biggest growth vs last year → metric='yoy', sort=desc. "
+            "Never ams_growth / title_mode=smallest_gains for 'same months last year'.",
             "ams_growth is a different metric (current AMS window vs prior AMS "
             "window) — do not use it for 'same months last year'.",
         ],

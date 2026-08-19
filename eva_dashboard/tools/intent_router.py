@@ -14,17 +14,19 @@ from typing import Any, Literal
 
 AskKind = Literal["standard", "discovery", "math", "clarify", "mixed"]
 
-# Price / rate discovery (not period avg rate matrices)
+# Price / rate discovery (not period avg rate matrices / growth ranks).
+# Bare "lowest"/"highest" is NOT discovery — "lowest growth" is a commercial rank.
 _DISCOVERY = re.compile(
-    r"\b("
-    r"lowest|highest|minimum|maximum|min\b|max\b|"
-    r"who\s+(bought|paid|got|was\s+sold)|"
-    r"sold\s+to|buyer|at\s+that\s+(price|rate)|"
-    r"same[- ]?date|on\s+the\s+same\s+day|"
-    r"price\s+dispers|price\s+varian|different\s+price|"
-    r"different\s+rate|rate\s+differ|"
-    r"which\s+.+\s+at\s+(a\s+)?(different|higher|lower)\s+(price|rate)"
-    r")\b",
+    r"(?:"
+    r"\b(?:lowest|highest|minimum|maximum|min|max)\b.{0,48}\b(?:rate|price)s?\b|"
+    r"\b(?:rate|price)s?\b.{0,48}\b(?:lowest|highest|minimum|maximum)\b|"
+    r"\bwho\s+(?:bought|paid|got|was\s+sold)\b|"
+    r"\bsold\s+to\b|\bbuyer\b|\bat\s+that\s+(?:price|rate)\b|"
+    r"\bsame[- ]?date\b|\bon\s+the\s+same\s+day\b|"
+    r"\bprice\s+dispers|\bprice\s+varian|\bdifferent\s+price\b|"
+    r"\bdifferent\s+rate\b|\brate\s+differ\b|"
+    r"\bwhich\s+.+\s+at\s+(?:a\s+)?(?:different|higher|lower)\s+(?:price|rate)\b"
+    r")",
     flags=re.I,
 )
 

@@ -32,6 +32,13 @@ ALT_Q = (
     "customers with volume over 25 MT and yoy below 0 last 6 months "
     "vs the same 6 months last year"
 )
+LOWEST_YOY_Q = (
+    "show me the all distributors with the lowest growth in ams last 6 months "
+    "vs the same months last year"
+)
+HIGHEST_YOY_Q = (
+    "which customers had the highest growth last 4 months vs the same months last year"
+)
 
 
 def _env(tmp: str) -> None:
@@ -138,6 +145,8 @@ def test_parse_stacked_volume_and_yoy_not_ams_growth() -> None:
 def test_yoy_period_language_is_calendar_not_ams_window() -> None:
     assert looks_yoy_period_compare(EXAMPLE_Q)
     assert looks_yoy_period_compare(ALT_Q)
+    assert looks_yoy_period_compare(LOWEST_YOY_Q)
+    assert looks_yoy_period_compare("vs the same months last year")
     assert looks_yoy_period_compare(
         "last 4 months versus the same 4 months last year"
     )
@@ -302,6 +311,98 @@ def test_engine_computes_ams_growth_when_filter_needs_it() -> None:
             md = out.get("answer_markdown") or ""
             assert "No results" not in md
             assert "KeepMe Dist" in md or "FastGrow Dist" in md
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_lowest_growth_vs_last_year_is_yoy_not_ams_window() -> None:
+    spec = _coerce_vocab_from_user_text(
+        {
+            "state_action": "clear",
+            "row_dimensions": ["party"],
+            "metrics": ["yoy"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+            "filters": {"client_type": "Eva Distributors"},
+            "sort_order": "asc",
+        },
+        LOWEST_YOY_Q,
+    )
+    assert spec.get("metric") == "yoy"
+    assert spec.get("compare") == "yoy"
+    assert spec.get("sort") == "asc"
+    assert spec.get("title_mode") != "smallest_gains"
+    assert spec.get("intent") == "party_rank"
+    assert "month" not in (spec.get("column_dimensions") or [])
+    assert spec.get("limit") == 200
+    assert spec.get("metrics") == ["volume", "yoy"]
+
+    high = _coerce_vocab_from_user_text(
+        {
+            "row_dimensions": ["party"],
+            "metrics": ["ams_growth"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 4,
+            "filters": {},
+        },
+        HIGHEST_YOY_Q,
+    )
+    assert high.get("metric") == "yoy"
+    assert high.get("sort") == "desc"
+
+
+def test_router_lowest_growth_vs_last_year_is_standard() -> None:
+    route = route_ask(LOWEST_YOY_Q)
+    assert route["kind"] == "standard"
+    assert "run_standard_analytics_pivot" in (route.get("preferred_tools") or [])
+    ok, _ = tool_allowed("execute_read_only_sql", route)
+    assert ok is False
+    pids = playbook_ids(LOWEST_YOY_Q)
+    assert "yoy_compare" in pids
+    assert "distributors_grown" not in pids
+    # Rate discovery must still work
+    rate = route_ask(
+        "what was the lowest rate Pepsi was sold at, and who was the buyer?"
+    )
+    assert rate["kind"] == "discovery"
+
+
+def test_execute_lowest_yoy_not_smallest_ams_gains() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            _seed_yoy_window()
+            out = execute_query_spec(
+                {
+                    "state_action": "clear",
+                    "row_dimensions": ["party"],
+                    "metrics": ["yoy"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "filters": {"client_type": "Eva Distributors"},
+                    "sort_order": "asc",
+                },
+                user_text=LOWEST_YOY_Q,
+            )
+            assert out.get("ok"), out.get("error") or out.get("plan_errors")
+            qs = out.get("query_spec") or {}
+            assert qs.get("metric") == "yoy"
+            md = out.get("answer_markdown") or ""
+            assert "Smallest AMS gains" not in md
+            assert "AMS current" not in md
+            assert "YoY" in md or "yoy" in md.lower()
+            parties = out.get("parties") or out.get("rows") or []
+            names = [str(r.get("party") or "") for r in parties]
+            assert "Shrinker Dist" in names
+            # Lowest calendar YoY first (Shrinker declined vs last year)
+            assert names[0] == "Shrinker Dist"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

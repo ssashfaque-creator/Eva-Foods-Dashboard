@@ -31,10 +31,9 @@ metric_filters: [{metric, op, value}] stacked with AND
 TREND DEFAULT (no period spoken): LAST_N_MONTHS months_back=6, rows=business_unit, cols=month, metrics=[volume,ams].
 Named month (March / July 2026) → SPECIFIC_MONTH + target_month=YYYY-MM (anchor year to LIVE DATABASE), no month columns unless they asked month-wise.
 Party list/rank / stacked metric cuts over last N months → LAST_N_MONTHS + months_back=N, row_dimensions=['party'], NO month columns (one window, not a month grid).
-Last N months vs the same N months last year → compare='yoy', metric='yoy', metric_filters metric=yoy.
-  That is calendar YoY of the spoken window. ams_growth is DIFFERENT: current 3-month AMS vs the previous 3-month AMS window. Do not use ams_growth for 'same months last year'.
+Lowest/highest/least growth last N months vs the same months last year → metric='yoy', compare='yoy', sort=asc (lowest) or desc (highest). Never ams_growth for that. ams_growth is DIFFERENT: current AMS window vs the previous AMS window.
 Complete new analytical ask (own period + cuts) → state_action='clear' (do not keep last-12-months memory).
-'show all matching' → limit=200.
+'show all matching' / 'the all distributors' → limit=200.
 Named customer INCLUDE → filters.party (or extracted_entities) + rows=party.
 who is X (identity only) → operation=party_lookup.
 tell me about X / customer rundown / last purchase → operation=party_profile.
