@@ -675,6 +675,7 @@ TOOL CHOICE:
 1. run_standard_analytics_pivot — standard volume matrices, AMS, vs AMS, AMS growth,
    brand/BU trends, party ranks, party_profile / party_lookup, Price Fetch / avg rate.
    Prefer this for volume/AMS/Price Fetch. Emit a complete spec_dict (see QUERY SPEC).
+   Flattened QuerySpec fields at the top level are also accepted — never send {}.
 2. execute_read_only_sql — novel asks: min/max price, who bought at a rate,
    same-date price dispersion, custom aggregations, discovery SQL.
    NEVER invent AMS windows or Price Fetch (37.3246 / 0.915) in SQL.
@@ -771,7 +772,9 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
             "name": "run_standard_analytics_pivot",
             "description": (
                 "Run standard Eva commercial analytics (Volume, AMS, party ranks, "
-                "Price Fetch) via deterministic Python engines."
+                "Price Fetch) via deterministic Python engines. Prefer wrapping "
+                "QuerySpec in spec_dict; the same QuerySpec fields at the top "
+                "level are also accepted if spec_dict is omitted or empty."
             ),
             "parameters": {
                 "type": "object",
@@ -779,8 +782,9 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "spec_dict": {
                         "type": "object",
                         "description": (
-                            "QuerySpec object. Required: row_dimensions, metrics, "
-                            "period_type, state_action (keep|modify|clear). "
+                            "QuerySpec object. Preferred wrapper. Inside: "
+                            "row_dimensions, metrics, period_type, "
+                            "state_action (keep|modify|clear). "
                             "Also: column_dimensions, months_back, target_month, "
                             "filters (city, client_type, party, oil_type, "
                             "packing_category, …), business_units, excludes, "
@@ -791,15 +795,39 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                             "Last N months vs same N last year → compare=yoy, "
                             "metric=yoy (not ams_growth). Last N vs the prior N "
                             "months → compare=prior, metric=pop. Stacked volume+growth "
-                            "cuts → metric_filters AND, party rows, no month cols."
+                            "cuts → metric_filters AND, party rows, no month cols. "
+                            "Do not send an empty object when QuerySpec fields "
+                            "are already at the top level of this tool call."
                         ),
                     },
                     "user_text": {
                         "type": "string",
                         "description": "Original user question (helps spoken filters).",
                     },
+                    "state_action": {
+                        "type": "string",
+                        "enum": ["keep", "modify", "clear"],
+                    },
+                    "row_dimensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "column_dimensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "period_type": {"type": "string"},
+                    "months_back": {"type": "integer"},
+                    "filters": {"type": "object"},
+                    "compare": {"type": "string"},
+                    "metric_filters": {"type": "array"},
+                    "limit": {"type": "integer"},
+                    "operation": {"type": "string"},
                 },
-                "required": ["spec_dict"],
             },
         },
     },
@@ -831,7 +859,10 @@ def dispatch_react_tool(
         lookup_entity_values,
     )
     from eva_dashboard.tools.intent_router import tool_allowed
-    from eva_dashboard.tools.legacy_tool import run_standard_analytics_pivot
+    from eva_dashboard.tools.legacy_tool import (
+        query_spec_from_tool_args,
+        run_standard_analytics_pivot,
+    )
     from eva_dashboard.tools.sql_tool import execute_read_only_sql
 
     allowed, reason = tool_allowed(name, route)
@@ -851,13 +882,7 @@ def dispatch_react_tool(
             str(args.get("search_term") or ""),
         )
     if name == "run_standard_analytics_pivot":
-        spec = args.get("spec_dict") or args.get("query_spec") or {}
-        if not isinstance(spec, dict):
-            return {
-                "ok": False,
-                "error": "spec_dict must be an object",
-                "markdown": "Legacy Engine Error: spec_dict must be an object",
-            }
+        spec = query_spec_from_tool_args(args)
         return run_standard_analytics_pivot(
             spec,
             user_text=str(args.get("user_text") or user_text or ""),

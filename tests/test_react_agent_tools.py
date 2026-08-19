@@ -14,7 +14,10 @@ from eva_dashboard.agent_loop import (
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.tools.calculator_tool import calculate_expression
 from eva_dashboard.tools.discovery_tool import get_database_schema, lookup_entity_values
-from eva_dashboard.tools.legacy_tool import run_standard_analytics_pivot
+from eva_dashboard.tools.legacy_tool import (
+    query_spec_from_tool_args,
+    run_standard_analytics_pivot,
+)
 from eva_dashboard.tools.sql_tool import execute_read_only_sql
 
 
@@ -198,6 +201,111 @@ def test_multi_hop_sql_then_math_via_dispatch() -> None:
             )
             assert math["ok"] is True
             assert abs(float(math["result"]) - ((80.0 * 24.7) / 6)) < 1e-6
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_query_spec_from_tool_args_prefers_nonempty_spec_dict() -> None:
+    args = {
+        "spec_dict": {
+            "row_dimensions": ["party"],
+            "metrics": ["volume"],
+            "period_type": "MTD",
+        },
+        "row_dimensions": ["packing_category"],
+        "user_text": "ignored as a spec field",
+    }
+    spec = query_spec_from_tool_args(args)
+    assert spec["row_dimensions"] == ["party"]
+    assert "user_text" not in spec
+
+
+def test_query_spec_from_tool_args_empty_spec_dict_uses_flat_fields() -> None:
+    args = {
+        "spec_dict": {},
+        "state_action": "modify",
+        "row_dimensions": ["packing_category"],
+        "column_dimensions": ["month"],
+        "metrics": ["volume", "ams"],
+        "period_type": "LAST_N_MONTHS",
+        "months_back": 6,
+        "filters": {"city": "Lahore"},
+        "user_text": "show Lahore sales productwise",
+    }
+    spec = query_spec_from_tool_args(args)
+    assert spec["row_dimensions"] == ["packing_category"]
+    assert spec["filters"] == {"city": "Lahore"}
+    assert spec["months_back"] == 6
+    assert spec["clear_filters"] == []
+    assert "user_text" not in spec
+    assert "spec_dict" not in spec
+
+
+def test_query_spec_from_tool_args_parses_json_string_spec_dict() -> None:
+    spec = query_spec_from_tool_args(
+        {"spec_dict": '{"row_dimensions": ["city"], "metrics": ["volume"]}'}
+    )
+    assert spec == {"row_dimensions": ["city"], "metrics": ["volume"]}
+
+
+def test_dispatch_react_flattened_productwise_lahore() -> None:
+    """gpt-4o flatten of QuerySpec must not die with empty spec_dict."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _seed(tmp)
+        try:
+            empty = dispatch_react_tool("run_standard_analytics_pivot", {})
+            assert empty["ok"] is False
+            assert "empty spec_dict" in empty["markdown"]
+
+            wrapped = dispatch_react_tool(
+                "run_standard_analytics_pivot",
+                {
+                    "spec_dict": {
+                        "row_dimensions": ["business_unit"],
+                        "column_dimensions": ["month"],
+                        "metrics": ["volume", "ams"],
+                        "period_type": "LAST_N_MONTHS",
+                        "months_back": 6,
+                        "filters": {"city": "Lahore"},
+                    },
+                    "user_text": "show Lahore sales",
+                },
+            )
+            assert wrapped["ok"] is True
+
+            # Exact flattened args from the failed ReAct trace.
+            args = {
+                "state_action": "modify",
+                "row_dimensions": ["packing_category"],
+                "column_dimensions": ["month"],
+                "metrics": ["volume", "ams"],
+                "period_type": "LAST_N_MONTHS",
+                "months_back": 6,
+                "filters": {"city": "Lahore"},
+                "user_text": "show Lahore sales productwise",
+            }
+            prior = {
+                "row_dimensions": ["client_type"],
+                "column_dimensions": ["month"],
+                "metrics": ["volume", "ams"],
+                "filters": {"city": "Lahore"},
+                "months_back": 6,
+            }
+            out = dispatch_react_tool(
+                "run_standard_analytics_pivot",
+                args,
+                user_text="show Lahore sales productwise",
+                prior=prior,
+            )
+            assert out["ok"] is True, out.get("markdown")
+            assert "empty spec_dict" not in (out.get("markdown") or "")
+            qs = out.get("query_spec") or (out.get("result") or {}).get("query_spec") or {}
+            assert qs.get("row_dimensions") == ["client_type", "packing_category"]
+            assert (qs.get("filters") or {}).get("city") == "Lahore"
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

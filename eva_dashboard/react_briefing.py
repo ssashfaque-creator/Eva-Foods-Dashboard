@@ -16,6 +16,9 @@ def react_queryspec_contract() -> str:
 Whenever other teaching text says plan_query / query_sales, call
 run_standard_analytics_pivot with the same spec_dict — those old tool names
 are not available on this ReAct path.
+Prefer spec_dict={row_dimensions, metrics, period_type, …}. Flattened
+QuerySpec fields at the top level of the tool call are also executed —
+never send an empty spec_dict.
 operations: pivot | party_list | party_lookup | party_profile | overview | advanced
 row_dimensions: city, zone, party, business_unit, packing_category, product, oil_type, client_type
 column_dimensions: month, client_type, business_unit, city, oil_type, packing_category
