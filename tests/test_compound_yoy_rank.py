@@ -43,6 +43,10 @@ AMS_YOY_CUT_Q = (
     "show me all distributors who have growth less than 5% in AMS last 6 months "
     "vs same period last year (only distributors with AMS>10)"
 )
+AMS_MT_YOY_Q = (
+    "show me all distributors with more than 10 MT AMS that have less than "
+    "5% growth in ams last 6 months vs the same period last year"
+)
 
 
 def _env(tmp: str) -> None:
@@ -177,12 +181,21 @@ def test_parse_stacked_volume_and_yoy_not_ams_growth() -> None:
     pct_only = parse_metric_filters("growth less than 5% in AMS")
     assert pct_only == [{"metric": "ams_growth", "op": "lt", "value": 5.0}]
 
+    # Unit before AMS is still AMS, not a volume cut ('10 MT AMS').
+    mt_ams = parse_metric_filters("more than 10 MT AMS")
+    assert mt_ams == [{"metric": "ams", "op": "gt", "value": 10.0}]
+    phrasing = parse_metric_filters(AMS_MT_YOY_Q)
+    assert {"metric": "ams", "op": "gt", "value": 10.0} in phrasing
+    assert {"metric": "yoy", "op": "lt", "value": 5.0} in phrasing
+    assert not any(f.get("metric") == "volume" for f in phrasing)
+
 
 def test_yoy_period_language_is_calendar_not_ams_window() -> None:
     assert looks_yoy_period_compare(EXAMPLE_Q)
     assert looks_yoy_period_compare(ALT_Q)
     assert looks_yoy_period_compare(LOWEST_YOY_Q)
     assert looks_yoy_period_compare(AMS_YOY_CUT_Q)
+    assert looks_yoy_period_compare(AMS_MT_YOY_Q)
     assert looks_yoy_period_compare("vs the same months last year")
     assert looks_yoy_period_compare(
         "last 4 months versus the same 4 months last year"
@@ -474,6 +487,29 @@ def test_coerce_ams_size_cut_stays_calendar_yoy() -> None:
     assert any(f.get("metric") == "yoy" and f.get("op") == "lt" for f in mfs)
     assert any(f.get("metric") == "ams" and f.get("op") == "gt" for f in mfs)
     assert not any(f.get("metric") == "ams" and f.get("op") == "lt" for f in mfs)
+    assert not any(f.get("metric") == "volume" for f in mfs)
+
+    same = _coerce_vocab_from_user_text(
+        {
+            "state_action": "clear",
+            "row_dimensions": ["party"],
+            "metrics": ["yoy"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+            "filters": {"client_type": "Eva Distributors"},
+            "metric_filters": [
+                {"metric": "ams", "op": "gt", "value": 10},
+                {"metric": "yoy", "op": "lt", "value": 5},
+            ],
+            "compare": "yoy",
+        },
+        AMS_MT_YOY_Q,
+    )
+    same_mfs = same.get("metric_filters") or []
+    assert same.get("metric") == "yoy"
+    assert any(f.get("metric") == "ams" and f.get("op") == "gt" for f in same_mfs)
+    assert any(f.get("metric") == "yoy" and f.get("op") == "lt" for f in same_mfs)
+    assert not any(f.get("metric") == "volume" for f in same_mfs)
 
 
 def test_router_ams_yoy_cut_is_standard() -> None:
@@ -488,8 +524,8 @@ def test_router_ams_yoy_cut_is_standard() -> None:
     assert "distributors_grown" not in pids
 
 
-def test_execute_yoy_lt_5_uses_period_ams_not_trailing() -> None:
-    """AMS>10 on last-N YoY is volume/N, not the trailing 3-month AMS window."""
+def test_execute_yoy_lt_5_uses_trailing_ams_kpi() -> None:
+    """AMS>10 is the 3-month AMS KPI; last-N volume/N is not AMS."""
     previous = os.environ.get("EVA_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
         _env(tmp)
@@ -502,21 +538,23 @@ def test_execute_yoy_lt_5_uses_period_ams_not_trailing() -> None:
                 {
                     "state_action": "clear",
                     "row_dimensions": ["party"],
-                    "metrics": ["yoy", "ams"],
+                    "metrics": ["yoy"],
                     "period_type": "LAST_N_MONTHS",
                     "months_back": 6,
                     "filters": {"client_type": "Eva Distributors"},
                     "metric_filters": [
-                        {"metric": "yoy", "op": "lt", "value": 5},
                         {"metric": "ams", "op": "gt", "value": 10},
+                        {"metric": "yoy", "op": "lt", "value": 5},
                     ],
                     "compare": "yoy",
                 },
-                user_text=AMS_YOY_CUT_Q,
+                user_text=AMS_MT_YOY_Q,
             )
             assert out.get("ok"), out.get("error") or out.get("plan_errors")
             qs = out.get("query_spec") or {}
             assert qs.get("metric") == "yoy"
+            mfs = qs.get("metric_filters") or []
+            assert not any(f.get("metric") == "volume" for f in mfs)
             md = out.get("answer_markdown") or ""
             assert "No results" not in md
             names = {
@@ -524,8 +562,10 @@ def test_execute_yoy_lt_5_uses_period_ams_not_trailing() -> None:
                 for r in (out.get("rows") or out.get("parties") or [])
             }
             blob = md + " " + " ".join(sorted(names))
-            assert "WindowStar Dist" in blob
-            assert "TrailingOnly Dist" not in blob
+            # Trailing 3-mo AMS ~15, calendar YoY 0%.
+            assert "TrailingOnly Dist" in blob
+            # Trailing 3-mo AMS ~2 even though last-6 volume/N > 10.
+            assert "WindowStar Dist" not in blob
             assert "Tiny Dist" not in blob
             assert "FastGrow Dist" not in blob
         finally:

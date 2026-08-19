@@ -71,7 +71,8 @@ def verify_agent_answer(
 
     # Empty-result smell
     if re.search(
-        r"result set is empty|no rows|_no rows_|no matching|legacy engine error|"
+        r"result set is empty|no rows|_no rows_|no matching|no results|"
+        r"legacy engine error|"
         r"sql execution error|security / validation",
         text,
         flags=re.I,
@@ -82,6 +83,7 @@ def verify_agent_answer(
                 (not t.get("ok"))
                 or "EMPTY" in str(t.get("preview") or "").upper()
                 or "no row" in str(t.get("preview") or "").lower()
+                or "no results" in str(t.get("preview") or "").lower()
                 for t in trace
             ) or not tool_ok:
                 issues.append("tools returned empty/error and answer has no data table")

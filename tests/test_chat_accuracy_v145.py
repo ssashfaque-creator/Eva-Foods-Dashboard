@@ -117,7 +117,7 @@ def test_react_briefing_teaches_live_db_and_queryspec(tmp_path: Path, monkeypatc
     assert "compare='yoy'" in contract or "compare=yoy" in contract
     assert "metric='yoy'" in contract or "metric=yoy" in contract
     assert "ams_growth is DIFFERENT" in contract
-    assert "period AMS" in contract
+    assert "10 MT AMS" in contract
 
 
 def test_profile_fast_path_returns_card_not_whois() -> None:

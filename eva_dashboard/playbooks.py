@@ -68,11 +68,12 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "run_standard_analytics_pivot with row_dimensions=['party'] and "
             "NO column_dimensions month (one window, not a month grid)",
             "Put EVERY numeric cut in metric_filters (AND). "
-            "sales/volume MT → metric=volume; calendar YoY % → metric=yoy; "
+            "sales/volume MT → metric=volume; '10 MT AMS' / AMS>10 → metric=ams "
+            "(the 3-month AMS KPI — never also add volume>10 for that number); "
+            "calendar YoY % → metric=yoy; "
             "AMS-window growth (no last-year language) → metric=ams_growth. "
             "A trailing % on AMS/volume is growth ('less than 5% in AMS'), "
-            "not an AMS-tonnage cut. Bare AMS>10 on last N months is "
-            "period AMS (volume/N), still metric_filters metric=ams.",
+            "not an AMS-tonnage cut.",
             "Last N months vs the same N months last year → "
             "period_type=LAST_N_MONTHS, months_back=N, compare='yoy', metric='yoy'. "
             "Do NOT use ams_growth for that compare — AMS growth is current AMS "

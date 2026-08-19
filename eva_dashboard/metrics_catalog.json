@@ -18,7 +18,7 @@
     },
     "ams": {
       "label": "AMS",
-      "description": "Average monthly sales — mean of the 3 full calendar months before the focus month. On last-N-month party ranks, AMS>X filters use period AMS (volume / N months in the spoken window).",
+      "description": "Average monthly sales — mean of the 3 full calendar months before the focus month. 'AMS > 10' / '10 MT AMS' filters this KPI, not period volume.",
       "synonyms": [
         "ams",
         "average monthly sales",

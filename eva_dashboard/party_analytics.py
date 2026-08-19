@@ -1812,18 +1812,8 @@ def analyze_parties(
         extra.append("pct_vs_ams")
     if metric_n == "yoy":
         extra = ["volume_mt", "prior_mt", "yoy_pct"]
-        if span_months >= 2:
-            extra = ["volume_mt", "period_ams_mt", "prior_mt", "yoy_pct"]
     if metric_n == "yoy_ams":
         extra = ["volume_mt", "ams_mt", "pct_vs_ams", "prior_mt", "yoy_pct"]
-        if span_months >= 2:
-            extra = [
-                "volume_mt",
-                "period_ams_mt",
-                "ams_mt",
-                "prior_mt",
-                "yoy_pct",
-            ]
     if metric_n == "ams_growth":
         # AMS columns only — do not mix YoY volume (confuses "last year AMS").
         extra = [
@@ -1839,7 +1829,7 @@ def analyze_parties(
     # Always surface columns the stacked cuts actually test (volume+yoy, …)
     _FILTER_EXTRA = {
         "volume": ("volume_mt",),
-        "ams": ("period_ams_mt", "ams_mt"),
+        "ams": ("ams_mt",),
         "vs_ams": ("pct_vs_ams",),
         "yoy": ("prior_mt", "yoy_pct"),
         "mom": ("mom_prior_mt", "mom_pct"),
@@ -1847,8 +1837,6 @@ def analyze_parties(
     }
     for mid in filter_metrics:
         for col in _FILTER_EXTRA.get(mid, ()):
-            if col == "ams_mt" and "period_ams_mt" in extra:
-                continue
             if col not in extra:
                 extra.append(col)
 

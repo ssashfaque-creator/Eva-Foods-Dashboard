@@ -26,11 +26,11 @@ excludes: party_like, client_type, business_unit (EXCLUDE only — never put exc
 state_action: keep | modify | clear   (follow-up vs fresh ask)
 compare: yoy = calendar YoY of the spoken window (same span last year)
 metric_filters: [{metric, op, value}] stacked with AND
-  ('sales more than 10 MT but less than 5% growth' → two cuts)
+  ('sales more than 10 MT but less than 5% growth' → volume>10 AND yoy<5)
   A trailing % on AMS/volume is growth, not tons
   ('less than 5% in AMS' → yoy when vs last year, else ams_growth — NEVER ams < 5).
-  Bare AMS>10 on last N months = period AMS (volume/N) via metric_filters.
-  Do NOT switch metric to yoy_ams for a size cut.
+  'more than 10 MT AMS' → metric_filters ams>10 (the 3-month AMS KPI).
+  Do NOT also add volume>10. Do NOT switch metric to yoy_ams for a size cut.
 
 TREND DEFAULT (no period spoken): LAST_N_MONTHS months_back=6, rows=business_unit, cols=month, metrics=[volume,ams].
 Named month (March / July 2026) → SPECIFIC_MONTH + target_month=YYYY-MM (anchor year to LIVE DATABASE), no month columns unless they asked month-wise.

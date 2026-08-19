@@ -99,6 +99,23 @@ def test_verify_passes_clarify() -> None:
     assert check["ok"] is True
 
 
+def test_verify_retries_empty_pivot_preview() -> None:
+    check = verify_agent_answer(
+        "show me all distributors with more than 10 MT AMS",
+        "No results for Top parties by YoY %.",
+        tool_trace=[
+            {
+                "tool": "run_standard_analytics_pivot",
+                "ok": True,
+                "preview": "No results for Top parties by YoY % · ams > 10.0.",
+            }
+        ],
+        route={"kind": "standard"},
+    )
+    assert check["ok"] is False
+    assert check["issues"]
+
+
 def test_dispatch_respects_router_block() -> None:
     route = route_ask("show AMS for Eva Consumer last 6 months")
     out = dispatch_react_tool(

@@ -11,7 +11,7 @@ from typing import Any
 
 # Canonical metric id → column name on result row dicts
 METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
-    "ams": ("period_ams_mt", "ams_mt", "ams"),
+    "ams": ("ams_mt", "ams"),
     "ams_growth": ("ams_growth_pct", "ams_growth"),
     "volume": ("volume_mt", "volume", "mt"),
     "vs_ams": ("pct_vs_ams", "vs_ams"),
@@ -28,7 +28,7 @@ _METRIC_ALIASES: list[tuple[str, str]] = [
     (r"%\s*vs\s*ams|vs\.?\s*ams|versus\s+ams", "vs_ams"),
     (r"yoy|year\s*over\s*year|year\s+on\s+year", "yoy"),
     (r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month", "mom"),
-    (r"ams|average\s+monthly\s+sales", "ams"),
+    (r"(?:mt|tons?|tonnes?)\s*ams|ams|average\s+monthly\s+sales", "ams"),
     (r"volume|\bsales\b|sales\s+mt|tonnage|\bmt\b", "volume"),
     (r"last\s+price|latest\s+price", "last_price"),
     (r"avg\s+price|average\s+price|average\s+rate", "avg_price"),
@@ -133,7 +133,8 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
     )
     metric_alt = (
         r"ams\s*growth|growth\s+in\s+ams|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
-        r"average\s+monthly\s+sales|ams|volume|\bsales\b|tonnage|\bmt\b|"
+        r"average\s+monthly\s+sales|(?:mt|tons?|tonnes?)\s*ams|ams|"
+        r"volume|\bsales\b|tonnage|\bmt\b|"
         r"yoy|year\s*over\s*year|year\s+on\s+year|"
         r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month|"
         r"last\s+price|avg\s+price|price\s*fetch|invoices?"
@@ -243,7 +244,7 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
             else:
                 remapped.append(entry)
         found = remapped
-    return found
+    return _collapse_same_threshold_volume_vs_ams(found)
 
 
 def looks_like_metric_threshold_phrase(text: str) -> bool:
@@ -277,6 +278,31 @@ def looks_metric_threshold_exclude(user_text: str) -> bool:
     )
 
 
+def _collapse_same_threshold_volume_vs_ams(
+    filters: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One number cannot be both volume and AMS.
+
+    'more than 10 MT AMS' must not AND volume>10 with ams>10. Keep AMS —
+    that is the named KPI. Distinct numbers (volume>25 and AMS>10) stay.
+    """
+    drop: set[int] = set()
+    for i, a in enumerate(filters):
+        if str(a.get("metric") or "") not in {"volume", "ams"}:
+            continue
+        for j, b in enumerate(filters):
+            if j <= i:
+                continue
+            if str(b.get("metric") or "") not in {"volume", "ams"}:
+                continue
+            if a.get("op") != b.get("op") or a.get("value") != b.get("value"):
+                continue
+            if a.get("metric") == b.get("metric"):
+                continue
+            drop.add(i if a.get("metric") == "volume" else j)
+    return [f for i, f in enumerate(filters) if i not in drop]
+
+
 def merge_metric_filters(
     existing: list[dict[str, Any]] | None,
     spoken: list[dict[str, Any]] | None,
@@ -302,7 +328,7 @@ def merge_metric_filters(
         entry = {"metric": metric, "op": op, "value": value}
         if entry not in out:
             out.append(entry)
-    return out
+    return _collapse_same_threshold_volume_vs_ams(out)
 
 
 def _row_metric_value(row: dict[str, Any], metric: str) -> float | None:

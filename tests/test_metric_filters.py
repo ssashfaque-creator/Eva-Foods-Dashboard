@@ -9,6 +9,7 @@ from pathlib import Path
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.metric_filters import (
     apply_metric_filters,
+    merge_metric_filters,
     parse_metric_filters,
 )
 from eva_dashboard.query_executor import execute_query_spec
@@ -20,6 +21,19 @@ def test_parse_ams_more_than() -> None:
         "only show Eva consumer and only show customers with ams more than 10"
     )
     assert got == [{"metric": "ams", "op": "gt", "value": 10.0}]
+    assert parse_metric_filters("more than 10 MT AMS") == [
+        {"metric": "ams", "op": "gt", "value": 10.0}
+    ]
+
+
+def test_merge_does_not_and_volume_with_same_ams_cut() -> None:
+    got = merge_metric_filters(
+        [{"metric": "ams", "op": "gt", "value": 10}, {"metric": "yoy", "op": "lt", "value": 5}],
+        [{"metric": "volume", "op": "gt", "value": 10}, {"metric": "yoy", "op": "lt", "value": 5}],
+    )
+    assert {"metric": "ams", "op": "gt", "value": 10.0} in got
+    assert {"metric": "yoy", "op": "lt", "value": 5.0} in got
+    assert not any(f.get("metric") == "volume" for f in got)
 
 
 def test_parse_exclude_less_than_ams_inverts() -> None:
@@ -53,15 +67,15 @@ def test_apply_metric_filters_rows() -> None:
     assert [r["party"] for r in kept] == ["B"]
 
 
-def test_ams_cut_prefers_unrounded_period_ams() -> None:
-    """Last-N AMS>10 uses period AMS (volume/N), and must not integer-round first."""
+def test_ams_cut_uses_trailing_kpi_not_period_average() -> None:
+    """'AMS > 10' is the 3-month AMS KPI, even if last-N volume/N differs."""
     rows = [
-        {"party": "Window", "period_ams_mt": 11.4, "ams_mt": 2.0},
         {"party": "Trail", "period_ams_mt": 7.5, "ams_mt": 15.0},
-        {"party": "Edge", "period_ams_mt": 10.4, "ams_mt": 10.4},
+        {"party": "Window", "period_ams_mt": 11.4, "ams_mt": 2.0},
+        {"party": "Edge", "period_ams_mt": 8.0, "ams_mt": 10.4},
     ]
     kept = apply_metric_filters(rows, [{"metric": "ams", "op": "gt", "value": 10}])
-    assert [r["party"] for r in kept] == ["Window", "Edge"]
+    assert [r["party"] for r in kept] == ["Trail", "Edge"]
 
 
 def test_spoken_constraints_merge_metric_filters() -> None:
