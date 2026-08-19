@@ -262,7 +262,7 @@ def metrics_for_prompt() -> str:
     """Compact governed-metric block for the system prompt."""
     catalog = load_metrics_catalog()
     lines = [
-        "GOVERNED METRICS (canonical ids — use these in plan_query.metrics):",
+        "GOVERNED METRICS (canonical ids — use these in QuerySpec.metrics):",
         f"(catalog v{catalog.get('version', '?')})",
         "",
     ]
@@ -274,7 +274,7 @@ def metrics_for_prompt() -> str:
         if syns:
             lines.append(f"  spoken ← {syns}")
     lines.append("")
-    lines.append("GOVERNED OPERATIONS (optional plan_query.operation):")
+    lines.append("GOVERNED OPERATIONS (optional QuerySpec.operation):")
     for canon, meta in (catalog.get("operations") or {}).items():
         syns = ", ".join(list((meta or {}).get("synonyms") or [])[:6])
         lines.append(f"- {canon} ← {syns}")

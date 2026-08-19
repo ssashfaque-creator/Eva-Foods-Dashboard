@@ -52,7 +52,9 @@ def verify_agent_answer(
                 issues.append("arithmetic ask without calculate_expression tool")
 
     # Standard AMS/volume should prefer legacy
-    if kind == "standard" and re.search(r"\b(ams|volume|price\s*fetch)\b", q):
+    if kind == "standard" and re.search(
+        r"\b(ams|volume|price\s*fetch|sales?|tell\s+me\s+about)\b", q
+    ):
         if (
             "run_standard_analytics_pivot" not in used_names
             and "execute_read_only_sql" in used_names

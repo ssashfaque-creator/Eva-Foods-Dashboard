@@ -114,6 +114,22 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "party_profile",
+        "pattern": re.compile(
+            r"\b(tell\s+me\s+about|customer\s+profile|party\s+profile|"
+            r"rundown\s+on|full\s+picture|everything\s+about|"
+            r"last\s+(purchase|invoice)\b)",
+            flags=re.I,
+        ),
+        "title": "Customer profile",
+        "steps": [
+            "run_standard_analytics_pivot operation=party_profile "
+            "(volume, AMS, % vs AMS, last purchase, rate) — not party_lookup",
+            "SPECIFIC_MONTH if a month is named; GROUNDED_PARTIES for the name",
+            "Do NOT answer with an identity-only who-is table",
+        ],
+    },
+    {
         "id": "top_n_customers_month",
         "pattern": re.compile(
             r"\btop\s+\d+\b.+\b(customers?|parties|distributors?)\b|"

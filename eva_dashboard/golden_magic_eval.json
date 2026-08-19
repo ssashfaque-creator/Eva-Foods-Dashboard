@@ -1,5 +1,5 @@
 {
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "Offline magic eval — route + playbook + money-metric baseline (AMS/volume/Price Fetch)",
   "cases": [
     {
@@ -16,6 +16,25 @@
       "user_text": "Show me volume by Business Unit for the last 6 months.",
       "expect_kind": ["standard"],
       "expect_playbooks": [],
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
+    },
+    {
+      "id": "show_me_sales_default",
+      "user_text": "Show me sales",
+      "expect_kind": ["standard"],
+      "expect_playbooks": [],
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
+    },
+    {
+      "id": "how_are_bu_sales_doing",
+      "user_text": "How are Eva Consumer sales doing in Lahore this month?",
+      "expect_kind": ["standard"],
+      "expect_playbooks": [],
+      "forbid_tools": ["execute_read_only_sql"],
       "expect_preferred_tools": ["run_standard_analytics_pivot"],
       "money_metric": true
     },
@@ -108,6 +127,21 @@
       "user_text": "highest rate we sold and who paid it",
       "expect_kind": ["discovery"],
       "expect_playbooks": ["highest_rate_then_buyer"]
+    },
+    {
+      "id": "party_profile_tell_me",
+      "user_text": "tell me about Alpha Dist in July",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["party_profile"],
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"]
+    },
+    {
+      "id": "who_is_and_sales",
+      "user_text": "who is pepsi and show sales",
+      "expect_kind": ["standard", "mixed"],
+      "expect_playbooks": ["who_is_then_sales"],
+      "expect_alias": "pepsi"
     }
   ]
 }

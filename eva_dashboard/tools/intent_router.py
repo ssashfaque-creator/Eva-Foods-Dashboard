@@ -45,12 +45,16 @@ _STANDARD = re.compile(
     r"\b("
     r"ams|vs\.?\s*ams|average\s+monthly|"
     r"volume|tonnage|\bmt\b|"
+    r"\bsales?\b|"
     r"business\s+unit|bu[- ]?wise|"
     r"last\s+\d+\s+months|trend|month[- ]?wise|"
     r"grown|growth|declined|vs\s+ams|"
     r"price\s*fetch|cost\s*factor|"
     r"top\s+\d+|party\s+rank|customer[- ]?wise|"
-    r"who\s+is\b|who'?s\b"
+    r"who\s+is\b|who'?s\b|"
+    r"tell\s+me\s+about|customer\s+profile|party\s+profile|rundown|"
+    r"how\s+(is|are)\s+.+\s+(doing|performing)|"
+    r"performance"
     r")\b",
     flags=re.I,
 )
@@ -191,18 +195,22 @@ def route_ask(user_text: str, *, prior: dict[str, Any] | None = None) -> dict[st
         rationale = "arithmetic on a fetched number"
     elif standard and not discovery:
         kind = "standard"
-        confidence = 0.9 if re.search(r"\b(ams|volume|price\s*fetch)\b", low) else 0.75
+        confidence = 0.9 if re.search(
+            r"\b(ams|volume|price\s*fetch|\bsales?\b|tell\s+me\s+about)\b", low
+        ) else 0.75
         preferred = ["run_standard_analytics_pivot"]
-        # Hard preference: don't invent AMS windows / growth in raw SQL
+        # Hard preference: don't invent AMS windows / volume / growth in raw SQL
         if re.search(
             r"\b("
             r"ams|vs\.?\s*ams|price\s*fetch|cost\s*factor|"
-            r"grown|growth|declined|grown_only|declined_only"
+            r"grown|growth|declined|grown_only|declined_only|"
+            r"volume|tonnage|\bmt\b|\bsales?\b|"
+            r"tell\s+me\s+about|customer\s+profile|party\s+profile"
             r")\b",
             low,
         ):
             blocked = ["execute_read_only_sql"]
-        rationale = "standard commercial pivot / rank / Price Fetch"
+        rationale = "standard commercial pivot / rank / Price Fetch / profile"
     elif math and standard:
         kind = "mixed"
         confidence = 0.8

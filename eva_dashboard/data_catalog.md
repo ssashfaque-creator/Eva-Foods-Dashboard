@@ -189,11 +189,13 @@ MT-weighted Incl/kg; Bulk Oil × 37.3246 → per maund; others per kg.
 2. **Cost structure** — product/packing costs + factor costs browse  
 3. **Client list** — client upload + browse  
 4. **Reports** — generate Sales dashboard PDF from DB  
-5. **AI Chat** — OpenAI assistant with read-only SQL tools over `eva.db`
+5. **AI Chat** — OpenAI ReAct assistant (GPT-4o) over `eva.db`
 
-## Chatbot sales matrices (query_sales)
+## Chatbot sales matrices (QuerySpec / run_standard_analytics_pivot)
 
-For sales questions the assistant should call **`query_sales` once** (not multi-step SQL):
+For standard sales / AMS / Price Fetch questions the assistant should call
+**`run_standard_analytics_pivot` once** (not multi-step SQL). The Python engines
+(`query_sales`, universal pivot, party analytics) still build the tables.
 
 | User specifies | Rows | Columns (default) |
 |---|---|---|
@@ -216,12 +218,14 @@ Do not invent a Business Unit when the user only named a client type.
 - “dissect further” / “SKU wise” / “show by SKU” → rows = **Product** (SKU)
 - “by oil type” → rows = **Oil Type**; “by BU” → **Business Unit**
 
-**Other tools:**
-- `list_clients` — “Who are my distributors in Lahore?” (City-Filter + Client Type)
-- `analyze_parties` — top parties/cities (default AMS), vs AMS / underperformers,
-  new/lost parties, packing or SKU mix, invoices, share, YoY, doing-well, geo %
-- `lookup_party` — “Who is Al Bari?” → fuzzy client/party matches (name, type, city, MT)
-- `query_price` — Rate from sales; optional Price Fetch follow-up on the same scope
+**Other tools (via run_standard_analytics_pivot operation=…):**
+- `party_list` — “Who are my distributors in Lahore?” (City-Filter + Client Type)
+- `party_rank` / AMS metrics — top parties, vs AMS, growth, YoY
+- `party_lookup` — “Who is Al Bari?” → fuzzy client/party matches
+- `party_profile` — “tell me about Alpha Dist” → volume, AMS, last purchase
+- Price / Price Fetch → metrics `avg_price` / `last_price` / `price_fetch`
+
+Discovery (min/max rate, who bought at a rate) uses `execute_read_only_sql`.
 
 **Mode from language (not from filters):**
 - “what were / show / breakdown” → **matrix** (one pivot)
@@ -249,8 +253,8 @@ When answering:
 12. Present numeric answers as **markdown tables**, not bullet lists of metrics.  
 13. Product speech rules: **16 ltr ≈ oil**, **16 kg ≈ ghee/banaspati**; VTF bulk = Eva VTF 16 Kg Tin only; canola standup pouch is the flagship canola SKU.  
 14. Taxonomy: **Business Unit** / **Oil Type** / **Packing Category** — always join `category` and label columns with these names in answers.
-15. Filter by **Client Type** when named; use `lookup_party` for individual client names.  
-16. Rate / price → `query_price`; “Price Fetch?” follow-up reuses the prior price scope.
+15. Filter by **Client Type** when named; use `party_lookup` / `party_profile` for individual client names.  
+16. Rate / price → `avg_price` / `last_price`; “Price Fetch?” follow-up reuses the prior price scope.
 
 ## Product language (spoken → exact)
 
