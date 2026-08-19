@@ -76,8 +76,9 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "not an AMS-tonnage cut.",
             "Last N months vs the same N months last year → "
             "period_type=LAST_N_MONTHS, months_back=N, compare='yoy', metric='yoy'. "
-            "Do NOT use ams_growth for that compare — AMS growth is current AMS "
-            "window vs the previous AMS window.",
+            "Last N months vs the prior N months → compare='prior', metric='pop'. "
+            "Do NOT use ams_growth for those compares — AMS growth is always "
+            "the current 3-month AMS window vs the previous 3-month AMS window.",
             "Distributors → filters.client_type='Eva Distributors'. "
             "'all' matching parties → limit=200. Complete new ask → "
             "state_action='clear'. Never invent AMS/YoY in SQL.",
@@ -94,8 +95,9 @@ _PLAYBOOKS: list[dict[str, Any]] = [
         "title": "Distributor growth ranking",
         "steps": [
             "If the ask is last N months vs the same N months last year / YoY, "
-            "follow yoy_compare (compare='yoy', metric_filters metric=yoy) — "
-            "do NOT use ams_growth for that.",
+            "follow yoy_compare (compare='yoy', metric_filters metric=yoy). "
+            "If last N vs the prior N months, follow pop_compare "
+            "(compare='prior', metric='pop'). Do NOT use ams_growth for those.",
             "Otherwise run_standard_analytics_pivot with metrics including "
             "ams_growth, row_dimensions=['party'], "
             "filters.client_type='Eva Distributors' when distributors are named, "
@@ -229,8 +231,27 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "Highest/biggest growth vs last year → metric='yoy', sort=desc. "
             "Never ams_growth / title_mode=smallest_gains for 'same months last year'. "
             "'with AMS>10' is a size cut (metric_filters), not metric='yoy_ams'.",
-            "ams_growth is a different metric (current AMS window vs prior AMS "
-            "window) — do not use it for 'same months last year'.",
+            "ams_growth is a different metric (current 3-month AMS window vs prior "
+            "3-month AMS window) — do not use it for last-N vs last year OR last-N "
+            "vs the prior N months.",
+        ],
+    },
+    {
+        "id": "pop_compare",
+        "pattern": re.compile(
+            r"\b(prior|previous|preceding)\s+(\d+\s+)?months?\b|"
+            r"\bvs\.?\s+(the\s+)?(prior|previous)\s+(period|\d+\s+months?)\b|"
+            r"\bperiod\s+over\s+period\b",
+            flags=re.I,
+        ),
+        "title": "Prior-period compare",
+        "steps": [
+            "run_standard_analytics_pivot with compare='prior', metric='pop'. "
+            "Last N months vs the N months immediately before that window. "
+            "NOT ams_growth (3-month AMS vs previous 3-month AMS) and NOT "
+            "yoy (same span last year).",
+            "Party/distributor lists: row_dimensions=['party'], no month columns. "
+            "Growth of AMS over those N-month windows is the same % as volume.",
         ],
     },
     {
@@ -265,18 +286,27 @@ _PLAYBOOKS: list[dict[str, Any]] = [
 
 
 def match_playbooks(user_text: str) -> list[dict[str, Any]]:
-    from eva_dashboard.metric_filters import looks_yoy_period_compare, parse_metric_filters
+    from eva_dashboard.metric_filters import (
+        looks_prior_period_compare,
+        looks_yoy_period_compare,
+        parse_metric_filters,
+    )
 
     t = user_text or ""
     yoy = looks_yoy_period_compare(t)
+    pop = looks_prior_period_compare(t)
     stacked = len(parse_metric_filters(t)) >= 2
     hits: list[dict[str, Any]] = []
     for pb in _PLAYBOOKS:
-        if pb["id"] == "distributors_grown" and yoy:
-            # Calendar YoY is yoy_compare, not AMS-window growth ranking.
+        if pb["id"] == "distributors_grown" and (yoy or pop):
+            # Calendar YoY / prior-period are not AMS-window growth ranking.
+            continue
+        if pb["id"] == "pop_compare" and yoy:
             continue
         matched = bool(pb["pattern"].search(t))
         if pb["id"] == "yoy_compare" and yoy:
+            matched = True
+        if pb["id"] == "pop_compare" and pop:
             matched = True
         if pb["id"] == "compound_metric_rank" and stacked:
             matched = True

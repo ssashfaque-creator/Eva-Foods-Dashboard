@@ -77,6 +77,18 @@
       ],
       "implies_row": "party"
     },
+    "pop": {
+      "label": "vs prior period %",
+      "description": "Last N months versus the N months immediately before that (period-over-period). Not calendar YoY and not the 3-month AMS windows.",
+      "synonyms": [
+        "prior period",
+        "previous period",
+        "prior months",
+        "previous months",
+        "period over period"
+      ],
+      "implies_row": "party"
+    },
     "yoy_ams": {
       "label": "Volume YoY + AMS",
       "description": "Calendar YoY of the spoken window plus AMS columns.",

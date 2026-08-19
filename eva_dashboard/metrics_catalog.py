@@ -27,6 +27,7 @@ CANONICAL_METRICS = (
     "ams_growth",
     "yoy",
     "yoy_ams",
+    "pop",
 )
 
 

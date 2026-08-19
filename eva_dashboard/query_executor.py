@@ -534,6 +534,12 @@ def _looks_yoy_compare(user_text: str) -> bool:
     )
 
 
+def _looks_prior_compare(user_text: str) -> bool:
+    from eva_dashboard.metric_filters import looks_prior_period_compare
+
+    return looks_prior_period_compare(user_text)
+
+
 def _looks_main_customers_ask(user_text: str) -> bool:
     """Follow-ups that want a customer list of the prior scope."""
     t = (user_text or "").lower()
@@ -1166,6 +1172,8 @@ def _coerce_vocab_from_user_text(
         if filters.get("client_type") and rows == ["client_type"]:
             rows = ["business_unit"]
             cols = []
+    elif _looks_prior_compare(t) and not out.get("compare"):
+        out["compare"] = "prior"
 
     # --- Main customers / customer-wise of prior oil|BU|month scope ---
     # Flat Customer × Volume + Avg Price (never party × client_type).
@@ -1326,6 +1334,9 @@ def _coerce_vocab_from_user_text(
     mfs = list(out.get("metric_filters") or [])
     mf_ids = {str(f.get("metric") or "") for f in mfs}
     yoy_ask = _looks_yoy_compare(t) or "yoy" in mf_ids
+    pop_ask = (not yoy_ask) and (
+        _looks_prior_compare(t) or "pop" in mf_ids
+    )
     low_growth = bool(
         re.search(
             r"\b(least|smallest|lowest|worst|slowest)\s+"
@@ -1353,10 +1364,21 @@ def _coerce_vocab_from_user_text(
         mfs = merge_metric_filters([], remapped)
         out["metric_filters"] = mfs
         mf_ids = {str(f.get("metric") or "") for f in mfs}
+    if pop_ask:
+        remapped = []
+        for entry in mfs:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "pop"})
+            else:
+                remapped.append(entry)
+        mfs = merge_metric_filters([], remapped)
+        out["metric_filters"] = mfs
+        mf_ids = {str(f.get("metric") or "") for f in mfs}
     rank_cuts = mf_ids & {
         "ams",
         "volume",
         "yoy",
+        "pop",
         "ams_growth",
         "vs_ams",
         "mom",
@@ -1386,9 +1408,9 @@ def _coerce_vocab_from_user_text(
             re.search(r"\b(distributors?|parties|customers?|clients?)\b", t)
             or "party" in rows
             or prior
-            or bool(mf_ids & {"volume", "yoy", "ams_growth", "ams"})
+            or bool(mf_ids & {"volume", "yoy", "pop", "ams_growth", "ams"})
         )
-    ) or yoy_rank:
+    ) or yoy_rank or pop_ask:
         rows = ["party"]
         cols = [c for c in cols if c != "month"]
         out["intent"] = "party_rank"
@@ -1415,6 +1437,16 @@ def _coerce_vocab_from_user_text(
             ):
                 out["metric"] = "yoy_ams"
                 metrics = ["volume", "ams", "yoy"]
+            if low_growth:
+                out["sort"] = "asc"
+                out["title_mode"] = "lowest"
+            elif high_growth:
+                out["sort"] = "desc"
+        elif pop_ask or "pop" in mf_ids:
+            # Last N months vs the N months immediately before — not 3-month AMS.
+            out["metric"] = "pop"
+            out["compare"] = "prior"
+            metrics = ["volume", "pop"]
             if low_growth:
                 out["sort"] = "asc"
                 out["title_mode"] = "lowest"
@@ -2509,8 +2541,8 @@ def execute_query_spec(
     elif not named_month_vol_ams and (
         intent == "party_rank"
         or str(spec.get("metric") or "")
-        in {"yoy", "yoy_ams", "ams_growth", "vs_ams"}
-        or set(metrics) & {"yoy", "yoy_ams"}
+        in {"yoy", "yoy_ams", "ams_growth", "vs_ams", "pop"}
+        or set(metrics) & {"yoy", "yoy_ams", "pop"}
         or (
             set(metrics) & {"vs_ams", "ams_growth"}
             and "month" not in column_dimensions

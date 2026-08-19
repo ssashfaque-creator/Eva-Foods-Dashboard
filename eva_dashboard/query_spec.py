@@ -87,6 +87,7 @@ PIVOT_METRICS = (
     "ams_growth",
     "yoy",
     "yoy_ams",
+    "pop",
     "mom",
 )
 OPERATIONS = (
@@ -118,6 +119,7 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
             "metric_filters=[{metric,op,value}] (AND when stacked). "
             "Last N months vs the same N months last year → compare='yoy' "
             "and metric_filters metric='yoy' (NOT ams_growth). "
+            "Last N months vs the prior N months → compare='prior', metric='pop'. "
             "Party list/rank over last N months: no column_dimensions month. "
             "Follow-ups: state_action='keep'|'modify' + clear_filters "
             "(legacy: context_handling='prior')."
@@ -317,8 +319,9 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "('last 3 months vs same 3 months last year') → "
                         "metric:'yoy' — not ams_growth (that is AMS window vs "
                         "the previous AMS window). "
+                        "Last N vs the prior N months → metric:'pop'. "
                         "op: gt|gte|lt|lte|eq. "
-                        "metric: ams|ams_growth|volume|vs_ams|yoy|last_price|…"
+                        "metric: ams|ams_growth|volume|vs_ams|yoy|pop|last_price|…"
                     ),
                     "items": {
                         "type": "object",
@@ -781,8 +784,8 @@ def _derive_intent_from_universal(
     # vs_ams / growth / YoY on party rows (or unspecified grain) → rank.
     # Named-month BU/city Volume vs AMS packs keep sales_* intent even when
     # vs_ams is present.
-    if mets & {"vs_ams", "ams_growth", "yoy", "yoy_ams", "mom"} and (
-        "month" not in column_dimensions or mets & {"yoy", "yoy_ams"}
+    if mets & {"vs_ams", "ams_growth", "yoy", "yoy_ams", "mom", "pop"} and (
+        "month" not in column_dimensions or mets & {"yoy", "yoy_ams", "pop"}
     ):
         if "party" in row_dimensions or not row_dimensions:
             return "party_rank"
@@ -1045,6 +1048,7 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not metric:
         for m in (
             "yoy",
+            "pop",
             "yoy_ams",
             "ams_growth",
             "vs_ams",
@@ -1380,6 +1384,7 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
         ) or str(spec.get("metric") or "") in {
             "yoy",
             "yoy_ams",
+            "pop",
             "ams_growth",
             "vs_ams",
         }

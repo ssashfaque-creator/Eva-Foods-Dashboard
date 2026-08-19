@@ -11,6 +11,7 @@ from pathlib import Path
 
 from eva_dashboard.db import connect, init_db
 from eva_dashboard.metric_filters import (
+    looks_prior_period_compare,
     looks_yoy_period_compare,
     parse_metric_filters,
 )
@@ -46,6 +47,10 @@ AMS_YOY_CUT_Q = (
 AMS_MT_YOY_Q = (
     "show me all distributors with more than 10 MT AMS that have less than "
     "5% growth in ams last 6 months vs the same period last year"
+)
+POP_Q = (
+    "all distributors with sales growth less than 5% in ams last 6 months "
+    "vs the prior 6 months. Only distributors with sales more than 10 MT"
 )
 
 
@@ -121,6 +126,17 @@ def _seed_yoy_window() -> None:
             ("2025-06-10", "Shrinker Dist", 40.0),
             ("2025-07-10", "Shrinker Dist", 40.0),
             ("2025-08-10", "Shrinker Dist", 40.0),
+            # Prior 6 months for last-6 vs prior-6 (Sep 2025 → Feb 2026).
+            ("2025-09-10", "KeepMe Dist", 11.0),
+            ("2025-10-10", "KeepMe Dist", 11.0),
+            ("2025-11-10", "KeepMe Dist", 11.0),
+            ("2025-12-10", "KeepMe Dist", 11.0),
+            ("2026-01-10", "KeepMe Dist", 11.0),
+            ("2025-09-10", "FastGrow Dist", 10.0),
+            ("2025-10-10", "FastGrow Dist", 10.0),
+            ("2025-11-10", "FastGrow Dist", 10.0),
+            ("2025-12-10", "FastGrow Dist", 10.0),
+            ("2026-01-10", "FastGrow Dist", 10.0),
             # WindowStar: period AMS of last 6 months > 10, trailing 3-mo AMS ~2,
             # calendar YoY negative. TrailingOnly: opposite (trailing AMS high,
             # period AMS of last 6 months < 10).
@@ -568,6 +584,86 @@ def test_execute_yoy_lt_5_uses_trailing_ams_kpi() -> None:
             assert "WindowStar Dist" not in blob
             assert "Tiny Dist" not in blob
             assert "FastGrow Dist" not in blob
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_prior_n_months_is_not_three_month_ams_growth() -> None:
+    assert looks_prior_period_compare(POP_Q)
+    assert not looks_yoy_period_compare(POP_Q)
+    got = parse_metric_filters(POP_Q)
+    assert {"metric": "pop", "op": "lt", "value": 5.0} in got
+    assert {"metric": "volume", "op": "gt", "value": 10.0} in got
+    assert not any(f.get("metric") == "ams_growth" for f in got)
+
+    spec = _coerce_vocab_from_user_text(
+        {
+            "state_action": "clear",
+            "row_dimensions": ["party"],
+            "metrics": ["ams_growth", "volume"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+            "filters": {"client_type": "Eva Distributors"},
+            "metric_filters": [
+                {"metric": "ams_growth", "op": "lt", "value": 5},
+                {"metric": "volume", "op": "gt", "value": 10},
+            ],
+        },
+        POP_Q,
+    )
+    assert spec.get("metric") == "pop"
+    assert spec.get("compare") == "prior"
+    mfs = spec.get("metric_filters") or []
+    assert any(f.get("metric") == "pop" and f.get("op") == "lt" for f in mfs)
+    assert not any(f.get("metric") == "ams_growth" for f in mfs)
+    pids = playbook_ids(POP_Q)
+    assert "pop_compare" in pids
+    assert "distributors_grown" not in pids
+
+
+def test_execute_last_n_vs_prior_n_not_ams_windows() -> None:
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            _seed_yoy_window()
+            out = execute_query_spec(
+                {
+                    "state_action": "clear",
+                    "row_dimensions": ["party"],
+                    "metrics": ["ams_growth", "volume"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "filters": {"client_type": "Eva Distributors"},
+                    "metric_filters": [
+                        {"metric": "ams_growth", "op": "lt", "value": 5},
+                        {"metric": "volume", "op": "gt", "value": 10},
+                    ],
+                },
+                user_text=POP_Q,
+            )
+            assert out.get("ok"), out.get("error") or out.get("plan_errors")
+            qs = out.get("query_spec") or {}
+            assert qs.get("metric") == "pop"
+            assert qs.get("compare") == "prior"
+            md = out.get("answer_markdown") or ""
+            assert "No results" not in md
+            assert "May–Jul" not in md
+            assert "prior 6 months" in md.lower() or "prior period" in md.lower()
+            names = {
+                str(r.get("party") or "")
+                for r in (out.get("rows") or out.get("parties") or [])
+            }
+            blob = md + " " + " ".join(sorted(names))
+            assert "KeepMe Dist" in blob
+            assert "FastGrow Dist" not in blob
+            assert "Tiny Dist" not in blob
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

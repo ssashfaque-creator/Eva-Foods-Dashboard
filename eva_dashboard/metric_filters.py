@@ -16,6 +16,7 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "volume": ("volume_mt", "volume", "mt"),
     "vs_ams": ("pct_vs_ams", "vs_ams"),
     "yoy": ("yoy_pct", "yoy"),
+    "pop": ("pop_pct", "pop"),
     "mom": ("mom_pct", "mom"),
     "last_price": ("last_price",),
     "avg_price": ("avg_price_incl_gst", "avg_price", "incl_gst_per_unit"),
@@ -88,6 +89,36 @@ def looks_yoy_period_compare(user_text: str) -> bool:
             r"last\s+\d+\s+months?\s+(?:vs\.?|versus|compared?\s+to).{0,60}last\s+year|"
             r"vs\.?\s+(?:the\s+)?previous\s+year|"
             r"year\s+ago"
+            r")\b",
+            t,
+        )
+    )
+
+
+def looks_prior_period_compare(user_text: str) -> bool:
+    """True when last N months should be compared to the N months before that.
+
+    Sequential period-over-period — not calendar YoY and not the 3-month AMS
+    windows. 'vs last year' always wins as YoY.
+    """
+    if looks_yoy_period_compare(user_text):
+        return False
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"vs\.?\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"versus\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"compared?\s+(?:with|to)\s+(?:the\s+)?(?:prior|previous|preceding)\s+"
+            r"(?:period|\d+\s+months?|months?)|"
+            r"last\s+\d+\s+months?\s+(?:vs\.?|versus|compared?\s+to)\s+"
+            r"(?:the\s+)?(?:prior|previous|preceding)|"
+            r"(?:prior|previous|preceding)\s+\d+\s+months?|"
+            r"period\s+over\s+period|\bpop\b"
             r")\b",
             t,
         )
@@ -241,6 +272,14 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         for entry in found:
             if str(entry.get("metric") or "") == "ams_growth":
                 remapped.append({**entry, "metric": "yoy"})
+            else:
+                remapped.append(entry)
+        found = remapped
+    elif looks_prior_period_compare(raw):
+        remapped = []
+        for entry in found:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "pop"})
             else:
                 remapped.append(entry)
         found = remapped

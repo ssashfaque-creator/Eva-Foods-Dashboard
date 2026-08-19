@@ -289,8 +289,9 @@ exposed; the pivot tool runs those engines.
     who is X → party_lookup. Profile → party_profile.
 11. COMPARE: compared things = rows; shared scope = filters.
     Last N months vs same N last year → compare=yoy + metric=yoy (NOT ams_growth).
+    Last N vs the prior N months → compare=prior + metric=pop.
     Lowest/least growth of that window → sort=asc; highest/biggest → sort=desc.
-    AMS-window growth (no last-year language) → ams_growth.
+    AMS-window growth (no last-year / prior-N language) → ams_growth.
     Stacked cuts (volume > X AND growth < Y%) → metric_filters AND, party rows,
     no month columns, state_action=clear on a complete new ask.
 12. Prefer standard pivots for AMS/volume; use SQL tools for discovery asks.
@@ -942,6 +943,7 @@ _LEGACY_TOOLS: list[dict[str, Any]] = [
                             "yoy",
                             "ams_growth",
                             "yoy_ams",
+                            "pop",
                             "share_of_segment",
                             "segment_mix",
                             "geo_share",

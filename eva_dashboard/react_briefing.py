@@ -19,23 +19,23 @@ are not available on this ReAct path.
 operations: pivot | party_list | party_lookup | party_profile | overview | advanced
 row_dimensions: city, zone, party, business_unit, packing_category, product, oil_type, client_type
 column_dimensions: month, client_type, business_unit, city, oil_type, packing_category
-metrics: volume, avg_price, last_price, price_fetch, ams, vs_ams, ams_growth, yoy, yoy_ams
+metrics: volume, avg_price, last_price, price_fetch, ams, vs_ams, ams_growth, yoy, yoy_ams, pop
 period_type: MTD | LAST_N_MONTHS | LAST_MONTH | LAST_WEEK | NAMED_MONTH | SPECIFIC_MONTH | CUSTOM_DATE
 filters: city, cities, zone, client_type, client_types, oil_type, packing_category, party, parties, party_ilike, product
 excludes: party_like, client_type, business_unit (EXCLUDE only — never put excluded names in filters)
 state_action: keep | modify | clear   (follow-up vs fresh ask)
-compare: yoy = calendar YoY of the spoken window (same span last year)
+compare: yoy = calendar YoY (same span last year); prior = last N months vs the N months immediately before
 metric_filters: [{metric, op, value}] stacked with AND
   ('sales more than 10 MT but less than 5% growth' → volume>10 AND yoy<5)
   A trailing % on AMS/volume is growth, not tons
-  ('less than 5% in AMS' → yoy when vs last year, else ams_growth — NEVER ams < 5).
+  ('less than 5% in AMS' → yoy when vs last year, pop when vs prior N months, else ams_growth — NEVER ams < 5).
   'more than 10 MT AMS' → metric_filters ams>10 (the 3-month AMS KPI).
   Do NOT also add volume>10. Do NOT switch metric to yoy_ams for a size cut.
 
 TREND DEFAULT (no period spoken): LAST_N_MONTHS months_back=6, rows=business_unit, cols=month, metrics=[volume,ams].
 Named month (March / July 2026) → SPECIFIC_MONTH + target_month=YYYY-MM (anchor year to LIVE DATABASE), no month columns unless they asked month-wise.
 Party list/rank / stacked metric cuts over last N months → LAST_N_MONTHS + months_back=N, row_dimensions=['party'], NO month columns (one window, not a month grid).
-Lowest/highest/least growth last N months vs the same months last year → metric='yoy', compare='yoy', sort=asc (lowest) or desc (highest). Never ams_growth for that. ams_growth is DIFFERENT: current AMS window vs the previous AMS window.
+Lowest/highest/least growth last N months vs the same months last year → metric='yoy', compare='yoy'. Last N vs the prior N months → metric='pop', compare='prior'. Never ams_growth for those — ams_growth is ALWAYS the 3-month AMS window vs the previous 3-month AMS window.
 Complete new analytical ask (own period + cuts) → state_action='clear' (do not keep last-12-months memory).
 'show all matching' / 'the all distributors' → limit=200.
 Named customer INCLUDE → filters.party (or extracted_entities) + rows=party.

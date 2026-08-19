@@ -1,5 +1,5 @@
 {
-  "version": "1.4.9",
+  "version": "1.4.10",
   "description": "Offline magic eval — route + playbook + money-metric baseline (AMS/volume/Price Fetch)",
   "cases": [
     {
@@ -140,6 +140,15 @@
       "user_text": "show me all distributors with more than 10 MT AMS that have less than 5% growth in ams last 6 months vs the same period last year",
       "expect_kind": ["standard"],
       "expect_playbooks": ["yoy_compare", "compound_metric_rank"],
+      "forbid_tools": ["execute_read_only_sql"],
+      "expect_preferred_tools": ["run_standard_analytics_pivot"],
+      "money_metric": true
+    },
+    {
+      "id": "pop_last_n_vs_prior_n",
+      "user_text": "all distributors with sales growth less than 5% in ams last 6 months vs the prior 6 months. Only distributors with sales more than 10 MT",
+      "expect_kind": ["standard"],
+      "expect_playbooks": ["pop_compare", "compound_metric_rank"],
       "forbid_tools": ["execute_read_only_sql"],
       "expect_preferred_tools": ["run_standard_analytics_pivot"],
       "money_metric": true

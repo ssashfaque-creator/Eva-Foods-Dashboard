@@ -116,7 +116,7 @@ def test_react_briefing_teaches_live_db_and_queryspec(tmp_path: Path, monkeypatc
     assert "run_standard_analytics_pivot" in brief
     assert "compare='yoy'" in contract or "compare=yoy" in contract
     assert "metric='yoy'" in contract or "metric=yoy" in contract
-    assert "ams_growth is DIFFERENT" in contract
+    assert "metric='pop'" in contract or "compare='prior'" in contract or "compare=prior" in contract
     assert "10 MT AMS" in contract
 
 
