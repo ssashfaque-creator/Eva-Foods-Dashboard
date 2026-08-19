@@ -15,7 +15,15 @@ from eva_dashboard.metrics_catalog import (
 def test_catalog_loads_canonical_metrics() -> None:
     cat = load_metrics_catalog()
     assert cat.get("version")
-    for key in ("volume", "ams", "vs_ams", "avg_price", "price_fetch", "ams_growth"):
+    for key in (
+        "volume",
+        "ams",
+        "vs_ams",
+        "avg_price",
+        "price_fetch",
+        "ams_growth",
+        "yoy",
+    ):
         assert key in (cat.get("metrics") or {})
 
 

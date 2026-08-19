@@ -787,7 +787,10 @@ REACT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                             "metric_filters, limit, sort_order, compare=yoy, "
                             "operation=pivot|party_lookup|party_profile|party_list. "
                             "Eva brand → business_units Eva Consumer+Eva Bulk. "
-                            "who is X → party_lookup. tell me about X → party_profile."
+                            "who is X → party_lookup. tell me about X → party_profile. "
+                            "Last N months vs same N last year → compare=yoy, "
+                            "metric=yoy (not ams_growth). Stacked volume+growth "
+                            "cuts → metric_filters AND, party rows, no month cols."
                         ),
                     },
                     "user_text": {

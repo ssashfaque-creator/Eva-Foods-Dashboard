@@ -19,15 +19,22 @@ are not available on this ReAct path.
 operations: pivot | party_list | party_lookup | party_profile | overview | advanced
 row_dimensions: city, zone, party, business_unit, packing_category, product, oil_type, client_type
 column_dimensions: month, client_type, business_unit, city, oil_type, packing_category
-metrics: volume, avg_price, last_price, price_fetch, ams, vs_ams, ams_growth
+metrics: volume, avg_price, last_price, price_fetch, ams, vs_ams, ams_growth, yoy, yoy_ams
 period_type: MTD | LAST_N_MONTHS | LAST_MONTH | LAST_WEEK | NAMED_MONTH | SPECIFIC_MONTH | CUSTOM_DATE
 filters: city, cities, zone, client_type, client_types, oil_type, packing_category, party, parties, party_ilike, product
 excludes: party_like, client_type, business_unit (EXCLUDE only — never put excluded names in filters)
 state_action: keep | modify | clear   (follow-up vs fresh ask)
-metric_filters: [{metric, op, value}] for "AMS more than 10" (op: gt/gte/lt/lte)
+compare: yoy = calendar YoY of the spoken window (same span last year)
+metric_filters: [{metric, op, value}] stacked with AND
+  ('sales more than 10 MT but less than 5% growth' → two cuts)
 
 TREND DEFAULT (no period spoken): LAST_N_MONTHS months_back=6, rows=business_unit, cols=month, metrics=[volume,ams].
 Named month (March / July 2026) → SPECIFIC_MONTH + target_month=YYYY-MM (anchor year to LIVE DATABASE), no month columns unless they asked month-wise.
+Party list/rank / stacked metric cuts over last N months → LAST_N_MONTHS + months_back=N, row_dimensions=['party'], NO month columns (one window, not a month grid).
+Last N months vs the same N months last year → compare='yoy', metric='yoy', metric_filters metric=yoy.
+  That is calendar YoY of the spoken window. ams_growth is DIFFERENT: current 3-month AMS vs the previous 3-month AMS window. Do not use ams_growth for 'same months last year'.
+Complete new analytical ask (own period + cuts) → state_action='clear' (do not keep last-12-months memory).
+'show all matching' → limit=200.
 Named customer INCLUDE → filters.party (or extracted_entities) + rows=party.
 who is X (identity only) → operation=party_lookup.
 tell me about X / customer rundown / last purchase → operation=party_profile.

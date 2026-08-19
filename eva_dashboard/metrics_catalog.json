@@ -51,7 +51,7 @@
     },
     "ams_growth": {
       "label": "AMS growth",
-      "description": "Growth versus prior AMS window.",
+      "description": "Growth versus prior AMS window (current 3-month AMS vs the previous 3-month AMS). Not calendar YoY of a spoken last-N-months span.",
       "synonyms": [
         "ams growth",
         "growth vs ams",
@@ -62,6 +62,29 @@
         "grew",
         "growth"
       ]
+    },
+    "yoy": {
+      "label": "Volume YoY %",
+      "description": "Calendar year-over-year of the spoken window (last N months vs the same N months last year, or a named month vs that month last year).",
+      "synonyms": [
+        "yoy",
+        "year over year",
+        "year on year",
+        "vs last year",
+        "versus last year",
+        "same period last year",
+        "same months last year"
+      ],
+      "implies_row": "party"
+    },
+    "yoy_ams": {
+      "label": "Volume YoY + AMS",
+      "description": "Calendar YoY of the spoken window plus AMS columns.",
+      "synonyms": [
+        "yoy and ams",
+        "ams and yoy"
+      ],
+      "implies_row": "party"
     },
     "avg_price": {
       "label": "Average rate",

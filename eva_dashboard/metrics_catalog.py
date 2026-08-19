@@ -25,6 +25,8 @@ CANONICAL_METRICS = (
     "ams",
     "vs_ams",
     "ams_growth",
+    "yoy",
+    "yoy_ams",
 )
 
 

@@ -287,7 +287,11 @@ exposed; the pivot tool runs those engines.
    → that row dimension.
 10. Channels → filters.client_type. Customers → filters.party only when INCLUDE.
     who is X → party_lookup. Profile → party_profile.
-11. COMPARE: compared things = rows; shared scope = filters. Growth → ams_growth.
+11. COMPARE: compared things = rows; shared scope = filters.
+    Last N months vs same N last year → compare=yoy + metric=yoy (NOT ams_growth).
+    AMS-window growth (no last-year language) → ams_growth.
+    Stacked cuts (volume > X AND growth < Y%) → metric_filters AND, party rows,
+    no month columns, state_action=clear on a complete new ask.
 12. Prefer standard pivots for AMS/volume; use SQL tools for discovery asks.
     ReAct tools: run_standard_analytics_pivot, execute_read_only_sql,
     calculate_expression, get_database_schema, lookup_entity_values.
@@ -5224,7 +5228,14 @@ def _dispatch_tool(
                 if wants_vol_vs_ams:
                     metric = "yoy_ams"
                 elif inferred_m in {"ams_growth", "yoy_ams", "yoy", "vs_ams"}:
-                    metric = "ams_growth" if inferred_m == "yoy" else inferred_m
+                    from eva_dashboard.metric_filters import looks_yoy_period_compare
+
+                    if inferred_m == "yoy" and not looks_yoy_period_compare(
+                        user_text
+                    ):
+                        metric = "ams_growth"
+                    else:
+                        metric = inferred_m
                 elif re.search(r"\b(ams|gains?|growth)\b", t_low):
                     metric = "ams_growth"
                 else:

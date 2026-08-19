@@ -85,6 +85,9 @@ PIVOT_METRICS = (
     "ams",
     "vs_ams",
     "ams_growth",
+    "yoy",
+    "yoy_ams",
+    "mom",
 )
 OPERATIONS = (
     "pivot",
@@ -112,7 +115,10 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
             "row_dimensions=['client_type','product'] (NOT party×SKU unless "
             "the user asked party/customer-wise). "
             "Numeric cuts like 'AMS more than 10' / 'growth > 30%' → "
-            "metric_filters=[{metric,op,value}]. "
+            "metric_filters=[{metric,op,value}] (AND when stacked). "
+            "Last N months vs the same N months last year → compare='yoy' "
+            "and metric_filters metric='yoy' (NOT ams_growth). "
+            "Party list/rank over last N months: no column_dimensions month. "
             "Follow-ups: state_action='keep'|'modify' + clear_filters "
             "(legacy: context_handling='prior')."
         ),
@@ -305,7 +311,12 @@ PLAN_QUERY_TOOL: dict[str, Any] = {
                         "'AMS more than 10' → "
                         "[{metric:'ams', op:'gt', value:10}]; "
                         "'growth more than 30%' → "
-                        "[{metric:'ams_growth', op:'gt', value:30}]. "
+                        "[{metric:'ams_growth', op:'gt', value:30}]; "
+                        "stacked cuts AND together. "
+                        "Calendar YoY of a spoken window "
+                        "('last 3 months vs same 3 months last year') → "
+                        "metric:'yoy' — not ams_growth (that is AMS window vs "
+                        "the previous AMS window). "
                         "op: gt|gte|lt|lte|eq. "
                         "metric: ams|ams_growth|volume|vs_ams|yoy|last_price|…"
                     ),
@@ -767,9 +778,12 @@ def _derive_intent_from_universal(
             "advanced": "advanced",
         }.get(operation, operation)
     mets = set(metrics)
-    # vs_ams on party rows (or unspecified grain) → rank. Named-month BU/city
-    # Volume vs AMS packs keep sales_* intent even when vs_ams is present.
-    if mets & {"vs_ams", "ams_growth"} and "month" not in column_dimensions:
+    # vs_ams / growth / YoY on party rows (or unspecified grain) → rank.
+    # Named-month BU/city Volume vs AMS packs keep sales_* intent even when
+    # vs_ams is present.
+    if mets & {"vs_ams", "ams_growth", "yoy", "yoy_ams", "mom"} and (
+        "month" not in column_dimensions or mets & {"yoy", "yoy_ams"}
+    ):
         if "party" in row_dimensions or not row_dimensions:
             return "party_rank"
     if "price_fetch" in mets or "avg_price" in mets:
@@ -1025,10 +1039,20 @@ def normalize_query_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
             if "month" not in column_dimensions:
                 intent = "sales_trend"
 
-    # Ranking metric from metrics array
+    # Ranking metric from metrics array. Prefer growth/YoY over volume so
+    # metrics=['volume','ams_growth'] does not rank as a volume list with
+    # empty growth columns.
     if not metric:
-        for m in metrics:
-            if m in {"vs_ams", "ams_growth", "ams", "volume"}:
+        for m in (
+            "yoy",
+            "yoy_ams",
+            "ams_growth",
+            "vs_ams",
+            "mom",
+            "ams",
+            "volume",
+        ):
+            if m in metrics:
                 metric = m
                 break
 
@@ -1348,10 +1372,27 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
     elif pt == "LAST_N_MONTHS":
         n = int(mb or 6)
         period["phrase"] = f"last {n} months"
-        grain["column_dimension"] = grain.get("column_dimension") or "month"
         grain["months_back"] = n
-        if "month" not in cols:
-            cols = ["month"] + [c for c in cols if c != "month"]
+        # Party rank / stacked metric cuts over last-N months are a single
+        # window, not a month grid — unless the plan already asked month-wise.
+        rankish = str(spec.get("intent") or "") == "party_rank" or (
+            bool(spec.get("metric_filters")) and "party" in rows
+        ) or str(spec.get("metric") or "") in {
+            "yoy",
+            "yoy_ams",
+            "ams_growth",
+            "vs_ams",
+        }
+        month_wise = "month" in cols
+        if rankish and not month_wise:
+            cols = [c for c in cols if c != "month"]
+            if grain.get("column_dimension") == "month":
+                grain.pop("column_dimension", None)
+            grain["time_grain"] = "none"
+        else:
+            grain["column_dimension"] = grain.get("column_dimension") or "month"
+            if "month" not in cols:
+                cols = ["month"] + [c for c in cols if c != "month"]
         if not rows and not grain.get("row_dimension") and not grain.get("group_by"):
             if not (mets & {"avg_price", "price_fetch"}) and str(
                 spec.get("operation") or "pivot"

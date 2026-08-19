@@ -24,12 +24,12 @@ METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 _METRIC_ALIASES: list[tuple[str, str]] = [
-    (r"ams\s*growth|growth\s*%|growth\s+percent|growth", "ams_growth"),
+    (r"ams\s*growth|growth\s+in\s+ams|growth\s*%|growth\s+percent|\bgrowth\b", "ams_growth"),
     (r"%\s*vs\s*ams|vs\.?\s*ams|versus\s+ams", "vs_ams"),
     (r"yoy|year\s*over\s*year|year\s+on\s+year", "yoy"),
     (r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month", "mom"),
     (r"ams|average\s+monthly\s+sales", "ams"),
-    (r"volume|sales\s+mt|tonnage|\bmt\b", "volume"),
+    (r"volume|\bsales\b|sales\s+mt|tonnage|\bmt\b", "volume"),
     (r"last\s+price|latest\s+price", "last_price"),
     (r"avg\s+price|average\s+price|average\s+rate", "avg_price"),
     (r"price\s*fetch", "price_fetch"),
@@ -62,6 +62,37 @@ def _norm(text: str) -> str:
     return " ".join(str(text or "").strip().lower().replace("-", " ").split())
 
 
+def looks_yoy_period_compare(user_text: str) -> bool:
+    """True when the user wants calendar YoY (same span last year), not AMS-window growth.
+
+    Covers 'YoY', 'vs last year', and 'last N months vs the same N months last year'.
+    """
+    t = (user_text or "").lower()
+    if not t.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"year\s+over\s+year|\byoy\b|year\s+on\s+year|"
+            r"same\s+period\s+last\s+year|"
+            r"same\s+\d+\s+months?\s+last\s+year|"
+            r"same\s+(?:three|six|twelve)\s+months?\s+last\s+year|"
+            r"corresponding\s+period\s+last\s+year|"
+            r"same\s+(?:window|span|time)\s+last\s+year|"
+            r"last\s+year\s+same\s+(?:period|\d+\s+months?)|"
+            r"vs\.?\s*(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+)?last\s+year|"
+            r"versus\s+(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+)?last\s+year|"
+            r"compared?\s+(?:with|to)\s+(?:the\s+)?(?:same\s+)?(?:\d+\s+months?\s+)?"
+            r"last\s+year|"
+            r"last\s+\d+\s+months?\s+(?:vs\.?|versus|compared?\s+to).{0,60}last\s+year|"
+            r"vs\.?\s+(?:the\s+)?previous\s+year|"
+            r"year\s+ago"
+            r")\b",
+            t,
+        )
+    )
+
+
 def _resolve_metric_name(blob: str) -> str | None:
     t = _norm(blob)
     for pat, canon in _METRIC_ALIASES:
@@ -89,8 +120,8 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         re.escape(k) for k in sorted(_OPS.keys(), key=len, reverse=True)
     )
     metric_alt = (
-        r"ams\s*growth|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
-        r"average\s+monthly\s+sales|ams|volume|"
+        r"ams\s*growth|growth\s+in\s+ams|growth\s*%|\bgrowth\b|%\s*vs\s*ams|vs\.?\s*ams|"
+        r"average\s+monthly\s+sales|ams|volume|\bsales\b|tonnage|\bmt\b|"
         r"yoy|year\s*over\s*year|year\s+on\s+year|"
         r"mom|month\s*over\s*month|month\s+on\s+month|vs\.?\s*last\s+month|"
         r"last\s+price|avg\s+price|price\s*fetch|invoices?"
@@ -174,7 +205,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         value = float(m.group("value"))
         verb = m.group(1).lower()
         metric = "ams_growth"
-        if re.search(r"\b(yoy|year\s*over\s*year)\b", t):
+        if looks_yoy_period_compare(raw) or re.search(
+            r"\b(yoy|year\s*over\s*year)\b", t
+        ):
             metric = "yoy"
         elif re.search(r"\b(mom|month\s*over\s*month|last\s+month)\b", t):
             metric = "mom"
@@ -184,6 +217,16 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
             entry = {"metric": metric, "op": op, "value": value}
         if entry not in found:
             found.append(entry)
+    # Calendar YoY language ("same 3 months last year") → growth cuts are yoy,
+    # not AMS-window growth (which is the previous 3-month AMS vs current AMS).
+    if looks_yoy_period_compare(raw):
+        remapped: list[dict[str, Any]] = []
+        for entry in found:
+            if str(entry.get("metric") or "") == "ams_growth":
+                remapped.append({**entry, "metric": "yoy"})
+            else:
+                remapped.append(entry)
+        found = remapped
     return found
 
 
@@ -193,7 +236,7 @@ def looks_like_metric_threshold_phrase(text: str) -> bool:
     if not raw:
         return False
     if not re.search(
-        r"\b(ams|volume|growth|yoy|mom|average\s+monthly)\b",
+        r"\b(ams|volume|growth|yoy|mom|sales|average\s+monthly)\b",
         raw,
         flags=re.I,
     ):
