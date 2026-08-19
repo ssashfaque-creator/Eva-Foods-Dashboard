@@ -39,6 +39,10 @@ LOWEST_YOY_Q = (
 HIGHEST_YOY_Q = (
     "which customers had the highest growth last 4 months vs the same months last year"
 )
+AMS_YOY_CUT_Q = (
+    "show me all distributors who have growth less than 5% in AMS last 6 months "
+    "vs same period last year (only distributors with AMS>10)"
+)
 
 
 def _env(tmp: str) -> None:
@@ -60,6 +64,8 @@ def _seed_yoy_window() -> None:
             ("2", "FastGrow Dist"),
             ("3", "Tiny Dist"),
             ("4", "Shrinker Dist"),
+            ("5", "WindowStar Dist"),
+            ("6", "TrailingOnly Dist"),
         )
         for cid, name in parties:
             conn.execute(
@@ -111,6 +117,27 @@ def _seed_yoy_window() -> None:
             ("2025-06-10", "Shrinker Dist", 40.0),
             ("2025-07-10", "Shrinker Dist", 40.0),
             ("2025-08-10", "Shrinker Dist", 40.0),
+            # WindowStar: period AMS of last 6 months > 10, trailing 3-mo AMS ~2,
+            # calendar YoY negative. TrailingOnly: opposite (trailing AMS high,
+            # period AMS of last 6 months < 10).
+            ("2026-03-10", "WindowStar Dist", 30.0),
+            ("2026-04-10", "WindowStar Dist", 30.0),
+            ("2026-05-10", "WindowStar Dist", 2.0),
+            ("2026-06-10", "WindowStar Dist", 2.0),
+            ("2026-07-10", "WindowStar Dist", 2.0),
+            ("2026-08-10", "WindowStar Dist", 2.0),
+            ("2025-03-10", "WindowStar Dist", 20.0),
+            ("2025-04-10", "WindowStar Dist", 20.0),
+            ("2025-05-10", "WindowStar Dist", 20.0),
+            ("2025-06-10", "WindowStar Dist", 20.0),
+            ("2025-07-10", "WindowStar Dist", 20.0),
+            ("2025-08-10", "WindowStar Dist", 20.0),
+            ("2026-05-10", "TrailingOnly Dist", 15.0),
+            ("2026-06-10", "TrailingOnly Dist", 15.0),
+            ("2026-07-10", "TrailingOnly Dist", 15.0),
+            ("2025-05-10", "TrailingOnly Dist", 15.0),
+            ("2025-06-10", "TrailingOnly Dist", 15.0),
+            ("2025-07-10", "TrailingOnly Dist", 15.0),
         ):
             rows.append((dt, party, mt))
         for i, (dt, party, mt) in enumerate(rows):
@@ -141,11 +168,21 @@ def test_parse_stacked_volume_and_yoy_not_ams_growth() -> None:
     plain = parse_metric_filters("growth more than 30%")
     assert plain == [{"metric": "ams_growth", "op": "gt", "value": 30.0}]
 
+    # "less than 5% in AMS" is growth, never an AMS-tonnage cut (ams < 5).
+    cut = parse_metric_filters(AMS_YOY_CUT_Q)
+    assert {"metric": "yoy", "op": "lt", "value": 5.0} in cut
+    assert {"metric": "ams", "op": "gt", "value": 10.0} in cut
+    assert not any(f.get("metric") == "ams" and f.get("op") == "lt" for f in cut)
+    assert not any(f.get("metric") == "ams_growth" for f in cut)
+    pct_only = parse_metric_filters("growth less than 5% in AMS")
+    assert pct_only == [{"metric": "ams_growth", "op": "lt", "value": 5.0}]
+
 
 def test_yoy_period_language_is_calendar_not_ams_window() -> None:
     assert looks_yoy_period_compare(EXAMPLE_Q)
     assert looks_yoy_period_compare(ALT_Q)
     assert looks_yoy_period_compare(LOWEST_YOY_Q)
+    assert looks_yoy_period_compare(AMS_YOY_CUT_Q)
     assert looks_yoy_period_compare("vs the same months last year")
     assert looks_yoy_period_compare(
         "last 4 months versus the same 4 months last year"
@@ -403,6 +440,94 @@ def test_execute_lowest_yoy_not_smallest_ams_gains() -> None:
             assert "Shrinker Dist" in names
             # Lowest calendar YoY first (Shrinker declined vs last year)
             assert names[0] == "Shrinker Dist"
+        finally:
+            if previous is None:
+                os.environ.pop("EVA_DATA_DIR", None)
+            else:
+                os.environ["EVA_DATA_DIR"] = previous
+
+
+def test_coerce_ams_size_cut_stays_calendar_yoy() -> None:
+    """Agent-shaped spec: yoy + AMS>10 must not flip ranking to yoy_ams."""
+    spec = _coerce_vocab_from_user_text(
+        {
+            "state_action": "clear",
+            "row_dimensions": ["party"],
+            "metrics": ["yoy", "ams"],
+            "period_type": "LAST_N_MONTHS",
+            "months_back": 6,
+            "filters": {"client_type": "Eva Distributors"},
+            "metric_filters": [
+                {"metric": "yoy", "op": "lt", "value": 5},
+                {"metric": "ams", "op": "gt", "value": 10},
+            ],
+            "compare": "yoy",
+        },
+        AMS_YOY_CUT_Q,
+    )
+    assert spec.get("metric") == "yoy"
+    assert spec.get("compare") == "yoy"
+    assert spec.get("intent") == "party_rank"
+    assert spec.get("limit") == 200
+    assert "month" not in (spec.get("column_dimensions") or [])
+    mfs = spec.get("metric_filters") or []
+    assert any(f.get("metric") == "yoy" and f.get("op") == "lt" for f in mfs)
+    assert any(f.get("metric") == "ams" and f.get("op") == "gt" for f in mfs)
+    assert not any(f.get("metric") == "ams" and f.get("op") == "lt" for f in mfs)
+
+
+def test_router_ams_yoy_cut_is_standard() -> None:
+    route = route_ask(AMS_YOY_CUT_Q)
+    assert route["kind"] == "standard"
+    assert "run_standard_analytics_pivot" in (route.get("preferred_tools") or [])
+    ok, _ = tool_allowed("execute_read_only_sql", route)
+    assert ok is False
+    pids = playbook_ids(AMS_YOY_CUT_Q)
+    assert "yoy_compare" in pids
+    assert "compound_metric_rank" in pids
+    assert "distributors_grown" not in pids
+
+
+def test_execute_yoy_lt_5_uses_period_ams_not_trailing() -> None:
+    """AMS>10 on last-N YoY is volume/N, not the trailing 3-month AMS window."""
+    previous = os.environ.get("EVA_DATA_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        _env(tmp)
+        try:
+            import eva_dashboard.sales_query as sq
+
+            sq._CLIENTS_CACHE = None
+            _seed_yoy_window()
+            out = execute_query_spec(
+                {
+                    "state_action": "clear",
+                    "row_dimensions": ["party"],
+                    "metrics": ["yoy", "ams"],
+                    "period_type": "LAST_N_MONTHS",
+                    "months_back": 6,
+                    "filters": {"client_type": "Eva Distributors"},
+                    "metric_filters": [
+                        {"metric": "yoy", "op": "lt", "value": 5},
+                        {"metric": "ams", "op": "gt", "value": 10},
+                    ],
+                    "compare": "yoy",
+                },
+                user_text=AMS_YOY_CUT_Q,
+            )
+            assert out.get("ok"), out.get("error") or out.get("plan_errors")
+            qs = out.get("query_spec") or {}
+            assert qs.get("metric") == "yoy"
+            md = out.get("answer_markdown") or ""
+            assert "No results" not in md
+            names = {
+                str(r.get("party") or "")
+                for r in (out.get("rows") or out.get("parties") or [])
+            }
+            blob = md + " " + " ".join(sorted(names))
+            assert "WindowStar Dist" in blob
+            assert "TrailingOnly Dist" not in blob
+            assert "Tiny Dist" not in blob
+            assert "FastGrow Dist" not in blob
         finally:
             if previous is None:
                 os.environ.pop("EVA_DATA_DIR", None)

@@ -53,6 +53,17 @@ def test_apply_metric_filters_rows() -> None:
     assert [r["party"] for r in kept] == ["B"]
 
 
+def test_ams_cut_prefers_unrounded_period_ams() -> None:
+    """Last-N AMS>10 uses period AMS (volume/N), and must not integer-round first."""
+    rows = [
+        {"party": "Window", "period_ams_mt": 11.4, "ams_mt": 2.0},
+        {"party": "Trail", "period_ams_mt": 7.5, "ams_mt": 15.0},
+        {"party": "Edge", "period_ams_mt": 10.4, "ams_mt": 10.4},
+    ]
+    kept = apply_metric_filters(rows, [{"metric": "ams", "op": "gt", "value": 10}])
+    assert [r["party"] for r in kept] == ["Window", "Edge"]
+
+
 def test_spoken_constraints_merge_metric_filters() -> None:
     out = apply_spoken_constraints(
         {"metrics": ["ams_growth"], "row_dimensions": ["party"]},

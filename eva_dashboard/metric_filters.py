@@ -11,7 +11,7 @@ from typing import Any
 
 # Canonical metric id → column name on result row dicts
 METRIC_ROW_COLUMNS: dict[str, tuple[str, ...]] = {
-    "ams": ("ams_mt", "ams"),
+    "ams": ("period_ams_mt", "ams_mt", "ams"),
     "ams_growth": ("ams_growth_pct", "ams_growth"),
     "volume": ("volume_mt", "volume", "mt"),
     "vs_ams": ("pct_vs_ams", "vs_ams"),
@@ -102,6 +102,17 @@ def _resolve_metric_name(blob: str) -> str | None:
     return None
 
 
+def _cut_entry(metric: str, op: str, value: float, *, pct: bool) -> dict[str, Any]:
+    """Bind a parsed threshold to a canonical metric.
+
+    A trailing % on AMS/volume is growth (\"less than 5% in AMS\"), not an
+    AMS-tonnage cut. Bare \"AMS > 10\" stays AMS tons.
+    """
+    if pct and metric in {"ams", "volume"}:
+        metric = "ams_growth"
+    return {"metric": metric, "op": op, "value": value}
+
+
 def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
     """Extract metric thresholds from spoken language."""
     # Preserve numeric negatives (AMS / YoY < -20) before dash→space norm
@@ -146,7 +157,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if not op:
             continue
         value = float(m.group("value"))
-        entry = {"metric": metric, "op": op, "value": value}
+        entry = _cut_entry(
+            metric, op, value, pct=bool(m.group("pct"))
+        )
         if entry not in found:
             found.append(entry)
 
@@ -166,7 +179,9 @@ def parse_metric_filters(user_text: str) -> list[dict[str, Any]]:
         if not op:
             continue
         value = float(m.group("value"))
-        entry = {"metric": metric, "op": op, "value": value}
+        entry = _cut_entry(
+            metric, op, value, pct=bool(m.group("pct"))
+        )
         if entry not in found:
             found.append(entry)
 

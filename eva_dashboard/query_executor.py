@@ -1400,10 +1400,19 @@ def _coerce_vocab_from_user_text(
             out["metric"] = "yoy"
             out["compare"] = "yoy"
             metrics = ["volume", "yoy"]
-            if re.search(
-                r"\b(and|with|plus|including)\s+ams\b|\bams\s+and\b",
-                t,
-            ) and not re.search(r"growth\s+in\s+ams|ams\s+growth", t):
+            # Size cuts like "with AMS>10" are metric_filters, not a request
+            # to rank by trailing 3-month AMS (yoy_ams).
+            if (
+                "ams" not in mf_ids
+                and re.search(
+                    r"\b(and|with|plus|including)\s+ams\b|\bams\s+and\b",
+                    t,
+                )
+                and not re.search(
+                    r"growth\s+in\s+ams|ams\s+growth|ams\s*[><=]",
+                    t,
+                )
+            ):
                 out["metric"] = "yoy_ams"
                 metrics = ["volume", "ams", "yoy"]
             if low_growth:

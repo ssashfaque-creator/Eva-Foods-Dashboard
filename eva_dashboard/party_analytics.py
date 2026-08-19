@@ -272,6 +272,13 @@ def _ams_window_label(as_of: date) -> str:
     return f"{start.strftime('%b %Y')}–{end.strftime('%b %Y')}"
 
 
+def _calendar_months_spanned(date_from: str, date_to: str) -> int:
+    """Inclusive calendar months in a date span (Mar 1 → Aug 12 = 6)."""
+    a = date.fromisoformat(str(date_from)[:10])
+    b = date.fromisoformat(str(date_to)[:10])
+    return max(1, (b.year - a.year) * 12 + (b.month - a.month) + 1)
+
+
 def _ams_by_entity(
     *,
     as_of: date,
@@ -1430,7 +1437,9 @@ def analyze_parties(
                 "ok": True,
                 "date_from": c_start.isoformat(),
                 "date_to": c_end.isoformat(),
-                "label": f"{c_start.strftime('%b %Y')} (YoY)",
+                "label": (
+                    f"{c_start.strftime('%b %Y')} → {c_end.strftime('%b %Y')} (YoY)"
+                ),
             }
         if compare_info.get("ok") is False:
             return {"ok": False, "error": compare_info.get("error"), "period": compare_info}
@@ -1501,6 +1510,7 @@ def analyze_parties(
     partial = bool(period_info.get("partial_month"))
     days_elapsed = int(period_info.get("days_elapsed") or 0)
     days_in_month = int(period_info.get("days_in_month") or 30)
+    span_months = _calendar_months_spanned(d0, d1)
 
     rows = []
     entities = (
@@ -1527,6 +1537,10 @@ def analyze_parties(
         ams_growth = (
             pct_change(ams_v, ams_prior_v) if want_ams_growth else None
         )
+        period_ams = (vol / span_months) if span_months >= 2 else None
+        prior_period_ams = (
+            (prior / span_months) if want_yoy and span_months >= 2 else None
+        )
         inv_n = int(invoice_counts.get(ent, 0))
         avg_inv = (vol / inv_n) if inv_n else None
         if group == "city":
@@ -1541,18 +1555,18 @@ def analyze_parties(
         entry = {
             **name_field,
             **meta,
-            "volume_mt": mt_round(vol),
-            "ams_mt": mt_round(ams_v),
-            "ams_prior_mt": mt_round(ams_prior_v) if want_ams_growth else None,
-            "ams_growth_pct": (
-                round(float(ams_growth), 1) if ams_growth is not None else None
-            ),
-            "expected_mt": mt_round(expected) if expected is not None else None,
-            "pct_vs_ams": round(vs, 1) if vs is not None else None,
-            "prior_mt": mt_round(prior) if want_yoy else None,
-            "yoy_pct": round(yoy, 1) if yoy is not None else None,
-            "mom_prior_mt": mt_round(mom_prior) if want_mom else None,
-            "mom_pct": round(mom, 1) if mom is not None else None,
+            "volume_mt": vol,
+            "ams_mt": ams_v,
+            "period_ams_mt": period_ams,
+            "prior_period_ams_mt": prior_period_ams,
+            "ams_prior_mt": ams_prior_v if want_ams_growth else None,
+            "ams_growth_pct": ams_growth,
+            "expected_mt": expected if expected is not None else None,
+            "pct_vs_ams": vs,
+            "prior_mt": prior if want_yoy else None,
+            "yoy_pct": yoy,
+            "mom_prior_mt": mom_prior if want_mom else None,
+            "mom_pct": mom,
             "invoices": inv_n,
             "avg_invoice_mt": mt_round(avg_inv) if avg_inv is not None else None,
             "doing_well": bool(vs is not None and vs >= 0),
@@ -1601,13 +1615,15 @@ def analyze_parties(
         for r in well[:lim]:
             base = r["expected_mt"] if partial else r["ams_mt"]
             name = r.get("party") or r.get("city") or "—"
+            vol_cell = mt_round(r["volume_mt"])
+            base_cell = mt_round(base) if base is not None else "—"
             lines.append(
-                f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
-                f"{base if base is not None else '—'} | "
+                f"| {name} | {r.get('city') or '—'} | {vol_cell} | "
+                f"{base_cell} | "
                 f"{r['pct_vs_ams']:+.1f}% |"
                 if r["pct_vs_ams"] is not None
-                else f"| {name} | {r.get('city') or '—'} | {r['volume_mt']} | "
-                f"{base if base is not None else '—'} | — |"
+                else f"| {name} | {r.get('city') or '—'} | {vol_cell} | "
+                f"{base_cell} | — |"
             )
         tips = []
         if pct_well is not None:
@@ -1765,6 +1781,26 @@ def analyze_parties(
 
         rows = apply_metric_filters(rows, metric_filters)
 
+    _MT_KEYS = (
+        "volume_mt",
+        "ams_mt",
+        "period_ams_mt",
+        "prior_period_ams_mt",
+        "ams_prior_mt",
+        "expected_mt",
+        "prior_mt",
+        "mom_prior_mt",
+        "avg_invoice_mt",
+    )
+    _PCT_KEYS = ("ams_growth_pct", "pct_vs_ams", "yoy_pct", "mom_pct")
+    for r in rows:
+        for k in _MT_KEYS:
+            if r.get(k) is not None:
+                r[k] = mt_round(r[k])
+        for k in _PCT_KEYS:
+            if r.get(k) is not None:
+                r[k] = round(float(r[k]), 1)
+
     rows = rows[:lim]
     for r in rows:
         r["score"] = r.get(score_key)
@@ -1776,8 +1812,18 @@ def analyze_parties(
         extra.append("pct_vs_ams")
     if metric_n == "yoy":
         extra = ["volume_mt", "prior_mt", "yoy_pct"]
+        if span_months >= 2:
+            extra = ["volume_mt", "period_ams_mt", "prior_mt", "yoy_pct"]
     if metric_n == "yoy_ams":
         extra = ["volume_mt", "ams_mt", "pct_vs_ams", "prior_mt", "yoy_pct"]
+        if span_months >= 2:
+            extra = [
+                "volume_mt",
+                "period_ams_mt",
+                "ams_mt",
+                "prior_mt",
+                "yoy_pct",
+            ]
     if metric_n == "ams_growth":
         # AMS columns only — do not mix YoY volume (confuses "last year AMS").
         extra = [
@@ -1793,7 +1839,7 @@ def analyze_parties(
     # Always surface columns the stacked cuts actually test (volume+yoy, …)
     _FILTER_EXTRA = {
         "volume": ("volume_mt",),
-        "ams": ("ams_mt",),
+        "ams": ("period_ams_mt", "ams_mt"),
         "vs_ams": ("pct_vs_ams",),
         "yoy": ("prior_mt", "yoy_pct"),
         "mom": ("mom_prior_mt", "mom_pct"),
@@ -1801,6 +1847,8 @@ def analyze_parties(
     }
     for mid in filter_metrics:
         for col in _FILTER_EXTRA.get(mid, ()):
+            if col == "ams_mt" and "period_ams_mt" in extra:
+                continue
             if col not in extra:
                 extra.append(col)
 
@@ -2143,6 +2191,8 @@ def _party_table_result(
     col_labels = {
         "volume_mt": "Volume (MT)",
         "ams_mt": "AMS (MT)",
+        "period_ams_mt": "AMS in period (MT)",
+        "prior_period_ams_mt": "AMS last year (MT)",
         "ams_prior_mt": "AMS prior (MT)",
         "ams_growth_pct": "AMS growth %",
         "expected_mt": "Expected (MT)",
@@ -2218,6 +2268,8 @@ def _party_table_result(
                 cells.append("—")
             elif isinstance(val, float) and (c.endswith("_pct") or c == "pct_vs_ams"):
                 cells.append(f"{val:+.1f}%")
+            elif c.endswith("_mt"):
+                cells.append(str(mt_round(val)))
             else:
                 cells.append(str(val))
         if show_score:

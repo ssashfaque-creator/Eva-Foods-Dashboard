@@ -69,7 +69,10 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "NO column_dimensions month (one window, not a month grid)",
             "Put EVERY numeric cut in metric_filters (AND). "
             "sales/volume MT → metric=volume; calendar YoY % → metric=yoy; "
-            "AMS-window growth (no last-year language) → metric=ams_growth",
+            "AMS-window growth (no last-year language) → metric=ams_growth. "
+            "A trailing % on AMS/volume is growth ('less than 5% in AMS'), "
+            "not an AMS-tonnage cut. Bare AMS>10 on last N months is "
+            "period AMS (volume/N), still metric_filters metric=ams.",
             "Last N months vs the same N months last year → "
             "period_type=LAST_N_MONTHS, months_back=N, compare='yoy', metric='yoy'. "
             "Do NOT use ams_growth for that compare — AMS growth is current AMS "
@@ -223,7 +226,8 @@ _PLAYBOOKS: list[dict[str, Any]] = [
             "Party/distributor lists: row_dimensions=['party'], no month columns. "
             "Lowest/least/smallest growth vs last year → metric='yoy', sort=asc. "
             "Highest/biggest growth vs last year → metric='yoy', sort=desc. "
-            "Never ams_growth / title_mode=smallest_gains for 'same months last year'.",
+            "Never ams_growth / title_mode=smallest_gains for 'same months last year'. "
+            "'with AMS>10' is a size cut (metric_filters), not metric='yoy_ams'.",
             "ams_growth is a different metric (current AMS window vs prior AMS "
             "window) — do not use it for 'same months last year'.",
         ],
