@@ -120,6 +120,7 @@ def test_react_briefing_teaches_live_db_and_queryspec(tmp_path: Path, monkeypatc
     assert "10 MT AMS" in contract
     assert "empty spec_dict" in contract
     assert "Flattened" in contract
+    assert "flat Avg Rate" in contract
 
 
 def test_profile_fast_path_returns_card_not_whois() -> None:

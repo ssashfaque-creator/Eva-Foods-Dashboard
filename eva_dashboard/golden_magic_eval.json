@@ -1,5 +1,5 @@
 {
-  "version": "1.4.11",
+  "version": "1.4.12",
   "description": "Offline magic eval — route + playbook + money-metric baseline (AMS/volume/Price Fetch)",
   "cases": [
     {

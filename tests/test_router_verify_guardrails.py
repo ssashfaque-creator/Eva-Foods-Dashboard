@@ -116,6 +116,33 @@ def test_verify_retries_empty_pivot_preview() -> None:
     assert check["issues"]
 
 
+def test_verify_retries_all_dash_price_table() -> None:
+    md = (
+        "### Avg price — Packing × Client Type\n"
+        "_2026-07-01 → 2026-07-31 · Business Unit **Meal**_\n"
+        '<table class="eva-mtx"><tbody>'
+        '<tr><td class="dim">Canola Meal</td>'
+        '<td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>'
+        '<tr><td class="dim">Soya Meal</td>'
+        '<td class="num">—</td><td class="num">—</td></tr>'
+        "</tbody></table>"
+    )
+    check = verify_agent_answer(
+        "show me the average price of meal by product in July",
+        md,
+        tool_trace=[
+            {
+                "tool": "run_standard_analytics_pivot",
+                "ok": True,
+                "preview": md[:200],
+            }
+        ],
+        route={"kind": "standard"},
+    )
+    assert check["ok"] is False
+    assert any("blank" in i.lower() or "no numeric" in i.lower() for i in check["issues"])
+
+
 def test_dispatch_respects_router_block() -> None:
     route = route_ask("show AMS for Eva Consumer last 6 months")
     out = dispatch_react_tool(

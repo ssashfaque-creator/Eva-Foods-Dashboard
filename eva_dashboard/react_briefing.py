@@ -37,6 +37,7 @@ metric_filters: [{metric, op, value}] stacked with AND
 
 TREND DEFAULT (no period spoken): LAST_N_MONTHS months_back=6, rows=business_unit, cols=month, metrics=[volume,ams].
 Named month (March / July 2026) → SPECIFIC_MONTH + target_month=YYYY-MM (anchor year to LIVE DATABASE), no month columns unless they asked month-wise.
+Named-month average price by product → packing_category rows, omit column_dimensions (flat Avg Rate). Do not invent a client_type grid unless they asked channel-wise.
 Party list/rank / stacked metric cuts over last N months → LAST_N_MONTHS + months_back=N, row_dimensions=['party'], NO month columns (one window, not a month grid).
 Lowest/highest/least growth last N months vs the same months last year → metric='yoy', compare='yoy'. Last N vs the prior N months → metric='pop', compare='prior'. Never ams_growth for those — ams_growth is ALWAYS the 3-month AMS window vs the previous 3-month AMS window.
 Complete new analytical ask (own period + cuts) → state_action='clear' (do not keep last-12-months memory).

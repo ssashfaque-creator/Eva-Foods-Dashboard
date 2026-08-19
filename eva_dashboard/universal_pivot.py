@@ -83,13 +83,23 @@ def _fetch_priced_lines(
     # cannot inflate MT (Pepsi volume bug).
     sql = """
     SELECT
-      s.date,
+      substr(s.date, 1, 10) AS date,
       s.product,
       s.party,
-      SUM(COALESCE(s.rate, 0) * CASE
+      SUM(
+        CASE
+          WHEN COALESCE(s.rate, 0) <> 0 THEN s.rate * CASE
             WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
             ELSE COALESCE(s.mes_qty, s.qty, 0)
-          END)
+          END
+          WHEN COALESCE(s.qty, 0) <> 0 AND COALESCE(s.incl_gst_fed_amount, 0) <> 0
+            THEN (s.incl_gst_fed_amount / s.qty) * CASE
+              WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
+              ELSE COALESCE(s.mes_qty, s.qty, 0)
+            END
+          ELSE 0
+        END
+      )
         / NULLIF(SUM(CASE
             WHEN COALESCE(s.mt_qty, 0) <> 0 THEN s.mt_qty
             ELSE COALESCE(s.mes_qty, s.qty, 0)
@@ -98,8 +108,8 @@ def _fetch_priced_lines(
       SUM(COALESCE(s.mes_qty, 0)) AS mes_qty,
       SUM(COALESCE(s.incl_gst_fed_amount, 0)) AS incl_gst_fed_amount
     FROM sales s
-    WHERE s.date >= ? AND s.date <= ?
-    GROUP BY s.date, s.product, s.party
+    WHERE substr(s.date, 1, 10) >= ? AND substr(s.date, 1, 10) <= ?
+    GROUP BY substr(s.date, 1, 10), s.product, s.party
     """
     with connect() as conn:
         priced = pd.read_sql_query(sql, conn, params=[date_from, date_to])
@@ -114,21 +124,27 @@ def _fetch_priced_lines(
     keys = ["date", "party", "product"]
     base = base.copy()
     for k in keys:
-        # Keep blank/null party keys (pandas groupby drops NaN by default)
-        base[k] = (
+        # Keep blank/null party keys (pandas groupby drops NaN by default).
+        # Dates may be ISO datetimes — join on YYYY-MM-DD so rate is not dropped.
+        series_b = (
             base[k]
             .fillna("")
             .astype(str)
             .str.strip()
             .replace({"nan": "", "None": "", "<NA>": ""})
         )
-        priced[k] = (
+        series_p = (
             priced[k]
             .fillna("")
             .astype(str)
             .str.strip()
             .replace({"nan": "", "None": "", "<NA>": ""})
         )
+        if k == "date":
+            series_b = series_b.str.slice(0, 10)
+            series_p = series_p.str.slice(0, 10)
+        base[k] = series_b
+        priced[k] = series_p
     # Aggregate base MT first so duplicate line keys cannot double-count
     meta_cols = [c for c in base.columns if c not in keys + ["mt"]]
     agg = {c: "first" for c in meta_cols}
@@ -180,8 +196,19 @@ def _agg_avg_price(grp: pd.DataFrame) -> float | None:
         else mt_w
     )
     weights = mt_w.where(mt_w > 0, mes_w)
-    rate = weighted_avg(grp["rate"], weights)
-    return float(rate) if rate is not None else None
+    rate = grp["rate"] if "rate" in grp.columns else pd.Series(dtype=float)
+    # When sales.rate is blank, Incl GST ÷ qty is the invoice unit rate.
+    if (
+        rate.isna().any()
+        and "incl_gst_fed_amount" in grp.columns
+        and "qty" in grp.columns
+    ):
+        qty = grp["qty"].fillna(0).astype(float)
+        amt = grp["incl_gst_fed_amount"].fillna(0).astype(float)
+        derived = amt.where(qty > 0, pd.NA) / qty.replace(0, pd.NA)
+        rate = rate.fillna(derived)
+    avg = weighted_avg(rate, weights)
+    return float(avg) if avg is not None else None
 
 
 def _fill_row_dims(frame: pd.DataFrame, row_dims: list[str]) -> pd.DataFrame:

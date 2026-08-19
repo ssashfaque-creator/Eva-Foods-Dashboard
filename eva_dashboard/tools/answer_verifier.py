@@ -114,6 +114,20 @@ def verify_agent_answer(
     if wants_numbers and not has_numbers and not has_table and "?" not in text:
         issues.append("numeric ask but answer has no numbers or table")
 
+    num_cells = re.findall(
+        r'<td class="num">\s*([^<]*?)\s*</td>', text, flags=re.I
+    )
+    if (
+        wants_numbers
+        and len(num_cells) >= 2
+        and all(c.strip() in {"—", "–", "-", ""} for c in num_cells)
+    ):
+        issues.append(
+            "table has no numeric values (all blank cells). "
+            "Rerun run_standard_analytics_pivot; for named-month average price "
+            "omit column_dimensions so rates are not split across a channel grid."
+        )
+
     ok = not issues
     retry_hint = ""
     if not ok:

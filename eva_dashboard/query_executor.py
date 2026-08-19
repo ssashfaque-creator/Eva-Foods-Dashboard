@@ -2320,10 +2320,12 @@ def execute_query_spec(
         else:
             # SPECIFIC_MONTH cleared month columns — pick a non-conflicting
             # column grain (never equal the row leaf, e.g. channel×channel).
-            # volume + avg_price oil/period summaries stay flat (no channel grid).
+            # Average price (alone or with volume) stays flat unless the plan
+            # already named columns — a forced client_type grid is mostly
+            # dashes and is not what "avg price by product in July" asked.
             mets_now = set(spec.get("metrics") or [])
             rows_now = list(spec.get("row_dimensions") or [])
-            if "volume" in mets_now and "avg_price" in mets_now:
+            if "avg_price" in mets_now:
                 grain.pop("column_dimension", None)
                 spec["column_dimensions"] = []
             elif "party" in rows_now:

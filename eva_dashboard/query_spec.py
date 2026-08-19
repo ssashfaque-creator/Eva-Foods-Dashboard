@@ -1431,7 +1431,7 @@ def resolve_period_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
             grain.setdefault("row_dimension", "business_unit")
             rows = rows or ["business_unit"]
         # Volume for one month → Volume+AMS pack (client_type cross-tab, not months).
-        # volume + avg_price summaries stay flat (no forced channel grid).
+        # Average price (alone or with volume) stays flat unless columns were named.
         # Party / customer rows stay flat (Customer × Volume[/Avg price]), never
         # party × client_type unless the user asked channel-wise.
         if (
